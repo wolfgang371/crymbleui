@@ -320,7 +320,7 @@ module CrymbleUI
         #   - When widget exits viewport, its region in layer texture still has old pixels
         #   - We CANNOT clear that region because: fill_rect draws to render target,
         #     but blit_region reads from TEXTURE which isn't updated until display()
-        #   - Calling display() after fill_rect breaks rendering (documented in CLAUDE.md)
+        #   - Calling display() after fill_rect breaks rendering
         #   - So instead we track that this widget needs "fresh" background on re-entry
         #   - During capture, we fill with background_color instead of blit_region
         # This is the same pattern as layer.buffer_just_cleared (Bug 1 fix)
