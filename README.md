@@ -65,9 +65,10 @@ and many more in examples/
 ### Tutorial 01: Hello World
 The simplest CrymbleUI application.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 01: Hello World](screenshots/tutorial-01.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -83,22 +84,16 @@ end
 CrymbleUI.run(HelloWorld.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 01: Hello World](screenshots/tutorial-01.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 02: Button
 Buttons with click events.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 02: Button](screenshots/tutorial-02.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -116,22 +111,16 @@ end
 CrymbleUI.run(ButtonDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 02: Button](screenshots/tutorial-02.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 03: VStack Layout
 Vertical stacking of widgets.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 03: VStack Layout](screenshots/tutorial-03.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -152,22 +141,16 @@ end
 CrymbleUI.run(VStackDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 03: VStack Layout](screenshots/tutorial-03.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 04: HStack Layout
 Horizontal stacking of widgets.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 04: HStack Layout](screenshots/tutorial-04.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -191,22 +174,16 @@ end
 CrymbleUI.run(HStackDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 04: HStack Layout](screenshots/tutorial-04.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 05: State Management
 Reactive state with automatic UI updates.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 05: State Management](screenshots/tutorial-05.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -233,22 +210,16 @@ end
 CrymbleUI.run(CounterApp.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 05: State Management](screenshots/tutorial-05.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 06: Checkbox
 Boolean toggles and tristate checkboxes.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 06: Checkbox](screenshots/tutorial-06.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -286,22 +257,16 @@ end
 CrymbleUI.run(CheckboxDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 06: Checkbox](screenshots/tutorial-06.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 07: TextInput
 Single-line text entry fields.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 07: TextInput](screenshots/tutorial-07.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -336,22 +301,16 @@ end
 CrymbleUI.run(TextInputDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 07: TextInput](screenshots/tutorial-07.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 08: ComboBox
 Dropdown selection lists.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 08: ComboBox](screenshots/tutorial-08.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -380,22 +339,16 @@ end
 CrymbleUI.run(ComboBoxDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 08: ComboBox](screenshots/tutorial-08.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 09: Expanded & Spacer
 Filling remaining space in layouts.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 09: Expanded & Spacer](screenshots/tutorial-09.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -432,22 +385,16 @@ end
 CrymbleUI.run(ExpandedDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 09: Expanded & Spacer](screenshots/tutorial-09.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 10: ScrollView
 Scrollable containers for large content.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 10: ScrollView](screenshots/tutorial-10.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -475,22 +422,16 @@ end
 CrymbleUI.run(ScrollViewDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 10: ScrollView](screenshots/tutorial-10.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 11: Styling Widgets
 Customizing colors and fonts.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 11: Styling Widgets](screenshots/tutorial-11.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -527,22 +468,16 @@ end
 CrymbleUI.run(StylingDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 11: Styling Widgets](screenshots/tutorial-11.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 12: WindowPanel
 Floating, draggable, resizable panels.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 12: WindowPanel](screenshots/tutorial-12.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -579,22 +514,16 @@ end
 CrymbleUI.run(WindowPanelDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 12: WindowPanel](screenshots/tutorial-12.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 13: MenuBar
 Application menus with dropdown items.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 13: MenuBar](screenshots/tutorial-13.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -638,22 +567,16 @@ end
 CrymbleUI.run(MenuBarDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 13: MenuBar](screenshots/tutorial-13.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 14: Popup & Overlays
 Floating popup containers.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 14: Popup & Overlays](screenshots/tutorial-14.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -689,22 +612,16 @@ end
 CrymbleUI.run(PopupDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 14: Popup & Overlays](screenshots/tutorial-14.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 15: StatusBar
 Information display at window bottom.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 15: StatusBar](screenshots/tutorial-15.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -746,22 +663,16 @@ end
 CrymbleUI.run(StatusBarDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 15: StatusBar](screenshots/tutorial-15.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 16: Keyboard Focus
 Tab navigation between focusable widgets.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 16: Keyboard Focus](screenshots/tutorial-16.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -802,22 +713,16 @@ end
 CrymbleUI.run(FocusDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 16: Keyboard Focus](screenshots/tutorial-16.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 17: Keyboard Shortcuts
 Explicit shortcuts on widgets and built-in framework shortcuts.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 17: Keyboard Shortcuts](screenshots/tutorial-17.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -870,22 +775,16 @@ end
 CrymbleUI.run(ShortcutsDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 17: Keyboard Shortcuts](screenshots/tutorial-17.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 18: RecursiveGrid
 2D grid layout with array-based DSL.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 18: RecursiveGrid](screenshots/tutorial-18.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -924,22 +823,16 @@ end
 CrymbleUI.run(RecursiveGridDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 18: RecursiveGrid](screenshots/tutorial-18.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 19: Drag and Drop
 Type-safe drag and drop with accept_types filtering.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 19: Drag and Drop](screenshots/tutorial-19.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -1007,22 +900,16 @@ end
 CrymbleUI.run(DragDropDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 19: Drag and Drop](screenshots/tutorial-19.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 20: Layers and Alignment
 Floating overlays with automatic positioning.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 20: Layers and Alignment](screenshots/tutorial-20.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -1090,22 +977,16 @@ end
 CrymbleUI.run(LayersDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 20: Layers and Alignment](screenshots/tutorial-20.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 ### Tutorial 21: Custom Widgets
 Creating custom widget classes using DSL composition.
 
-<table><tr>
-<td width="50%" valign="top">
-<div style="max-height: 400px; overflow: auto;">
+![Tutorial 21: Custom Widgets](screenshots/tutorial-21.png)
+
+<details>
+<summary>View source code</summary>
 
 ```crystal
 require "../src/crymble"
@@ -1235,14 +1116,7 @@ end
 CrymbleUI.run(CustomWidgetDemo.new)
 ```
 
-</div>
-</td>
-<td width="50%" valign="top" align="center">
-
-![Tutorial 21: Custom Widgets](screenshots/tutorial-21.png)
-
-</td>
-</tr></table>
+</details>
 
 ---
 
