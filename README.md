@@ -27,8 +27,8 @@ Add to your `shard.yml`:
 
 ```yaml
 dependencies:
-  crymble:
-    github: wolfgang371/crymble
+  crymble-ui:
+    github: wolfgang371/crymbleui
 ```
 
 Then run:
