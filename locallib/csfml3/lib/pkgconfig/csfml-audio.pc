@@ -1,0 +1,13 @@
+prefix=/home/ki/git/gui/locallib/csfml3
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: CSFML-audio
+Description: The Simple and Fast Multimedia Library for C, audio module.
+URL: https://www.sfml-dev.org
+Version: 3.0.0
+Requires: csfml-system
+Requires.private: sfml-audio
+Libs: -L${libdir} -lcsfml-audio
+Cflags: -I${includedir}

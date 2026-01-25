@@ -14,7 +14,7 @@ describe CrymbleUI::ShortcutManager do
             end
 
             # Simulate Ctrl+S key press
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
                 event.control = false
@@ -42,7 +42,7 @@ describe CrymbleUI::ShortcutManager do
             end
 
             # Simulate Ctrl+N (not registered)
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
             {% else %}
@@ -75,7 +75,7 @@ describe CrymbleUI::ShortcutManager do
             end
 
             # Simulate Ctrl+F with panel active
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
                 event.control = false
@@ -104,7 +104,7 @@ describe CrymbleUI::ShortcutManager do
             end
 
             # Simulate Ctrl+S with a panel active (but panel doesn't have ^S)
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
             {% else %}

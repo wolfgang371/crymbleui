@@ -1,4 +1,4 @@
-require "crsfml"
+require "../csfml3/wrapper"
 
 module CrymbleUI
     # Represents a keyboard shortcut

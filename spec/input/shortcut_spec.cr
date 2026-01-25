@@ -83,7 +83,7 @@ describe CrymbleUI::Shortcut do
             shortcut = CrymbleUI::Shortcut.parse("^S")
 
             # Create a mock key event
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
                 event.control = false
@@ -101,7 +101,7 @@ describe CrymbleUI::Shortcut do
         it "doesn't match with wrong key" do
             shortcut = CrymbleUI::Shortcut.parse("^S")
 
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             {% if flag?(:darwin) %}
                 event.system = true
             {% else %}
@@ -117,7 +117,7 @@ describe CrymbleUI::Shortcut do
         it "doesn't match with wrong modifiers" do
             shortcut = CrymbleUI::Shortcut.parse("^S")
 
-            event = SF::Event::KeyPressed.new
+            event = SF::Event::KeyPressedEvent.new
             event.control = false  # Missing Ctrl
             event.alt = false
             event.shift = false

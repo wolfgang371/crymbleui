@@ -37,7 +37,7 @@ describe "Keyboard Shortcut Integration" do
         app.@count.should eq(0)
 
         # Simulate Ctrl+I key press
-        event = SF::Event::KeyPressed.new
+        event = SF::Event::KeyPressedEvent.new
         {% if flag?(:darwin) %}
             event.system = true
             event.control = false

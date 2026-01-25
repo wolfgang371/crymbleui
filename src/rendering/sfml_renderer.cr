@@ -1,4 +1,4 @@
-require "crsfml"
+require "../csfml3/wrapper"
 require "../core/types"
 require "../core/widget"
 require "../core/app"
@@ -112,7 +112,7 @@ module CrymbleUI
                 @paint_context = nil
             else
                 @window = SF::RenderWindow.new(
-                    SF::VideoMode.new(width, height),
+                    SF::VideoMode.new(width.to_u32, height.to_u32),
                     title
                 )
                 @window.not_nil!.vertical_sync_enabled = false # otherwise there is always a lag between mouse cursor and e.g. dragged panels
@@ -414,14 +414,14 @@ module CrymbleUI
                         # Poll all pending events (coalescing - don't render per event)
                         while event = window.poll_event
                             event_count += 1
-                            if event.is_a?(SF::Event::MouseMoved)
+                            if event.type == SF::Event::MouseMoved
                                 @last_mouse_move_time = Time.monotonic
                             end
                             redraw = handle_event(event, app)
-                            if redraw || event.is_a?(SF::Event::MouseButtonPressed) ||
-                                                    event.is_a?(SF::Event::MouseButtonReleased) ||
-                                                    event.is_a?(SF::Event::KeyPressed) ||
-                                                    event.is_a?(SF::Event::Resized)
+                            if redraw || event.type == SF::Event::MouseButtonPressed ||
+                                                    event.type == SF::Event::MouseButtonReleased ||
+                                                    event.type == SF::Event::KeyPressed ||
+                                                    event.type == SF::Event::Resized
                                 needs_redraw = true
                             end
                         end
@@ -461,10 +461,10 @@ module CrymbleUI
                     if event = window.wait_event
                         event_count += 1
                         redraw = handle_event(event, app)
-                        if redraw || event.is_a?(SF::Event::MouseButtonPressed) ||
-                                                event.is_a?(SF::Event::MouseButtonReleased) ||
-                                                event.is_a?(SF::Event::KeyPressed) ||
-                                                event.is_a?(SF::Event::Resized)
+                        if redraw || event.type == SF::Event::MouseButtonPressed ||
+                                                event.type == SF::Event::MouseButtonReleased ||
+                                                event.type == SF::Event::KeyPressed ||
+                                                event.type == SF::Event::Resized
                             needs_redraw = true
                         end
                     end
@@ -473,10 +473,10 @@ module CrymbleUI
                     while event = window.poll_event
                         event_count += 1
                         redraw = handle_event(event, app)
-                        if redraw || event.is_a?(SF::Event::MouseButtonPressed) ||
-                                                event.is_a?(SF::Event::MouseButtonReleased) ||
-                                                event.is_a?(SF::Event::KeyPressed) ||
-                                                event.is_a?(SF::Event::Resized)
+                        if redraw || event.type == SF::Event::MouseButtonPressed ||
+                                                event.type == SF::Event::MouseButtonReleased ||
+                                                event.type == SF::Event::KeyPressed ||
+                                                event.type == SF::Event::Resized
                             needs_redraw = true
                         end
                     end
@@ -512,11 +512,11 @@ module CrymbleUI
 
         # Handle a single event
         # Returns true if event requires redraw
-        private def handle_event(event : SF::Event, app : App) : Bool
-            case event
+        private def handle_event(event : LibCSFML::Event, app : App) : Bool
+            case event.type
             when SF::Event::TextEntered
                 # Check for Ctrl++ / Ctrl+- for zoom (works on all keyboard layouts)
-                char = event.unicode.chr
+                char = event.text.unicode.chr
                 if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
                     case char
                     when '+', '='
@@ -540,9 +540,9 @@ module CrymbleUI
             when SF::Event::MouseWheelScrolled
                 # Ctrl+MouseWheel = zoom in/out
                 if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
-                    if event.delta > 0
+                    if event.mouse_wheel_scroll.delta > 0
                         handle_zoom_in(app)
-                    elsif event.delta < 0
+                    elsif event.mouse_wheel_scroll.delta < 0
                         handle_zoom_out(app)
                     end
                     return true
@@ -555,11 +555,11 @@ module CrymbleUI
                     mouse_pos = Vec2.new(sfml_pos.x.to_f64, sfml_pos.y.to_f64)
                     # Note: SFML delta is positive for scroll up, negative for scroll down
                     # Check wheel axis - touchpad can generate horizontal scroll events
-                    delta = case event.wheel
+                    delta = case event.mouse_wheel_scroll.wheel
                             when SF::Mouse::Wheel::HorizontalWheel
-                              Vec2.new(event.delta.to_f64, 0.0)  # Horizontal scroll → X
+                              Vec2.new(event.mouse_wheel_scroll.delta.to_f64, 0.0)  # Horizontal scroll → X
                             else
-                              Vec2.new(0.0, event.delta.to_f64)  # Vertical scroll → Y
+                              Vec2.new(0.0, event.mouse_wheel_scroll.delta.to_f64)  # Vertical scroll → Y
                             end
                     # Detect shift key for horizontal scrolling
                     shift = SF::Keyboard.key_pressed?(SF::Keyboard::LShift) || SF::Keyboard.key_pressed?(SF::Keyboard::RShift)
@@ -569,10 +569,11 @@ module CrymbleUI
                 end
                 true  # Redraw after scroll
             when SF::Event::KeyPressed
+                key = event.key
                 # Global zoom shortcuts - numpad +/- and Ctrl+0 for reset
                 # Note: Regular keyboard +/- is handled via TextEntered for keyboard layout compatibility
-                if event.control
-                    case event.code
+                if key.control
+                    case key.code
                     when SF::Keyboard::Add  # numpad +
                         handle_zoom_in(app)
                         return true
@@ -583,7 +584,7 @@ module CrymbleUI
                         handle_zoom_reset(app)
                         return true
                     when SF::Keyboard::M  # Ctrl+M = toggle maximize on topmost panel
-                        if !event.alt && !event.shift
+                        if !key.alt && !key.shift
                             if panel = app.root.try(&.find_topmost_panel)
                                 panel.toggle_maximize
                             end
@@ -591,36 +592,36 @@ module CrymbleUI
                         end
                     when SF::Keyboard::Tab  # Ctrl+Tab / Ctrl+Shift+Tab = cycle panels
                         if root = app.root
-                            @focus_manager.cycle_panel(forward: !event.shift, root: root)
+                            @focus_manager.cycle_panel(forward: !key.shift, root: root)
                         end
                         return true
                     end
                 end
 
                 # ESC key: cancel drags and close menus (before focused widget gets it)
-                if event.code == SF::Keyboard::Escape
+                if key.code == SF::Keyboard::Escape
                     if app.handle_escape
                         return true
                     end
                 end
 
                 # Tab/Shift+Tab for focus cycling (before focused widget gets it)
-                if event.code == SF::Keyboard::Tab
+                if key.code == SF::Keyboard::Tab
                     if root = app.root
-                        @focus_manager.cycle_focus(forward: !event.shift, root: root)
+                        @focus_manager.cycle_focus(forward: !key.shift, root: root)
                     end
                     return true
                 end
 
                 # Try focused widget (for navigation keys like arrows, backspace)
-                handled = @focus_manager.handle_key_down(event.code, event.control, event.shift)
+                handled = @focus_manager.handle_key_down(key.code, key.control, key.shift)
 
                 # If not handled by focused widget, try focus navigation
                 unless handled
-                    case event.code
+                    case key.code
                     when SF::Keyboard::Up, SF::Keyboard::Down, SF::Keyboard::Left, SF::Keyboard::Right
                         if root = app.root
-                            direction = case event.code
+                            direction = case key.code
                                          when SF::Keyboard::Up    then :up
                                          when SF::Keyboard::Down  then :down
                                          when SF::Keyboard::Left  then :left
@@ -632,7 +633,7 @@ module CrymbleUI
                         end
                     when SF::Keyboard::Enter, SF::Keyboard::Space
                         # Activate focused widget (button click, checkbox toggle)
-                        key_sym = event.code == SF::Keyboard::Enter ? :enter : :space
+                        key_sym = key.code == SF::Keyboard::Enter ? :enter : :space
                         @focus_manager.handle_activation_key(key_sym)
                         handled = true
                     end
@@ -641,7 +642,7 @@ module CrymbleUI
                 # If still not handled, try keyboard shortcuts
                 unless handled
                     active_panel = app.root.try(&.find_topmost_panel)
-                    @shortcut_manager.handle_key_event(event, active_panel)
+                    @shortcut_manager.handle_key_event(event.key, active_panel)
                 end
                 true  # Redraw for key events
             when SF::Event::Closed
@@ -650,17 +651,17 @@ module CrymbleUI
                 app.handle_close_request
                 false
             when SF::Event::MouseButtonPressed
-                handle_mouse_down(app, event.x.to_f64, event.y.to_f64)
+                handle_mouse_down(app, event.mouse_button.position.x.to_f64, event.mouse_button.position.y.to_f64)
                 false  # Caller handles redraw for button events
             when SF::Event::MouseButtonReleased
-                handle_mouse_up(app, event.x.to_f64, event.y.to_f64)
+                handle_mouse_up(app, event.mouse_button.position.x.to_f64, event.mouse_button.position.y.to_f64)
                 false  # Caller handles redraw for button events
             when SF::Event::MouseMoved
-                handle_mouse_move(app, event.x.to_f64, event.y.to_f64)
+                handle_mouse_move(app, event.mouse_move.position.x.to_f64, event.mouse_move.position.y.to_f64)
             when SF::Event::Resized
                 if window = @window
                     # Reset view to prevent content scaling
-                    view = SF::View.new(SF.float_rect(0, 0, event.width.to_f32, event.height.to_f32))
+                    view = SF::View.new(SF.float_rect(0, 0, event.size.size.x.to_f32, event.size.size.y.to_f32))
                     window.view = view
 
                     # Force re-apply cursor after window resize

@@ -1,0 +1,12 @@
+prefix=/home/ki/git/gui/locallib/sfml3
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: SFML-network
+Description: The Simple and Fast Multimedia Library, network module.
+URL: http://www.sfml-dev.org
+Version: 3.0.0
+Requires: sfml-system
+Libs: -L${libdir} -lsfml-network
+Cflags: -I${includedir}

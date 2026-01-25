@@ -328,7 +328,7 @@ describe CrymbleUI::ComboBox do
       combo.request_focus
 
       # Press Enter
-      CrymbleUI::Widget.focus_manager.handle_key_down(SF::Keyboard::Key::Return, false, false)
+      CrymbleUI::Widget.focus_manager.handle_key_down(SF::Keyboard::Enter, false, false)
       renderer.render_frame(app)
 
       # Should be expanded

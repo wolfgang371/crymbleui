@@ -1,4 +1,4 @@
-require "crsfml"
+require "../csfml3/wrapper"
 require "../core/font"
 
 module CrymbleUI
