@@ -15,7 +15,7 @@
 #
 # Run with: shards build tutorial-17 && ./bin/tutorial-17
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ShortcutsDemo < CrymbleUI::App
   state message : String = "Try the shortcuts!"

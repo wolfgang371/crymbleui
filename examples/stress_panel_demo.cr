@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # FlashingButton - Button that flashes when selected
 class FlashingButton < CrymbleUI::Button

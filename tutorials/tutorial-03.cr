@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-03 && ./bin/tutorial-03
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class VStackDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

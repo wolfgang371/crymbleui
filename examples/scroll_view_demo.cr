@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ScrollViewDemoApp < CrymbleUI::App
   def build : CrymbleUI::Widget

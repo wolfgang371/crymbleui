@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-05 && ./bin/tutorial-05
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class CounterApp < CrymbleUI::App
   # Reactive state - UI rebuilds when this changes

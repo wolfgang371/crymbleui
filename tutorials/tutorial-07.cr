@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-07 && ./bin/tutorial-07
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class TextInputDemo < CrymbleUI::App
   state name : String = ""

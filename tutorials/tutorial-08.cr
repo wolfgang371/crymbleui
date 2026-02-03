@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-08 && ./bin/tutorial-08
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ComboBoxDemo < CrymbleUI::App
   state selected_index : Int32 = 0

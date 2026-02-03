@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Demo application showcasing ComboBox widget (new architecture)
 class ComboBoxDemo < CrymbleUI::App

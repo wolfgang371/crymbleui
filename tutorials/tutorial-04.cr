@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-04 && ./bin/tutorial-04
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class HStackDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

@@ -9,7 +9,7 @@
 #
 # Run with: shards build tutorial-09 && ./bin/tutorial-09
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ExpandedDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

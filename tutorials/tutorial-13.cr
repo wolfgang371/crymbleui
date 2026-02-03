@@ -13,7 +13,7 @@
 #
 # Run with: shards build tutorial-13 && ./bin/tutorial-13
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class MenuBarDemo < CrymbleUI::App
   state status : String = "Ready"

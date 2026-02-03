@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-19 && ./bin/tutorial-19
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class DragDropDemo < CrymbleUI::App
   state last_drop : String = "(none)"

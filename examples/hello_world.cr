@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Hello World Counter Application
 # Demonstrates:

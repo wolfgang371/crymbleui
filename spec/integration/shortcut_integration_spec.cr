@@ -1,5 +1,5 @@
 require "../spec_helper"
-require "../../src/crymble"
+require "../../src/crymble-ui"
 
 # Test app with keyboard shortcuts
 class ShortcutTestApp < CrymbleUI::App

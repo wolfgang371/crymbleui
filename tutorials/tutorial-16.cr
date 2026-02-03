@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-16 && ./bin/tutorial-16
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class FocusDemo < CrymbleUI::App
   state value1 : String = ""

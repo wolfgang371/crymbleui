@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Demo application showcasing menu bar features
 class MenuBarDemo < CrymbleUI::App

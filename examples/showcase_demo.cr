@@ -12,7 +12,7 @@
 #
 # Run with: shards build showcase_demo && ./bin/showcase_demo
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # =============================================================================
 # Custom Widgets

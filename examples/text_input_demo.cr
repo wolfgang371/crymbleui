@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Demo application showcasing TextInput widget
 class TextInputDemo < CrymbleUI::App

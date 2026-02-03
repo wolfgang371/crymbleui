@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # StatusBar Demo - Block-based dynamic text updates
 # StatusBar accepts a block that computes text, checks for changes, and only re-renders if needed

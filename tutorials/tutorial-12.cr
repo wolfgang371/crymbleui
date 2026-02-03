@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-12 && ./bin/tutorial-12
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class WindowPanelDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

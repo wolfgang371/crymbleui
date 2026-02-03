@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-14 && ./bin/tutorial-14
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class PopupDemo < CrymbleUI::App
   state show_popup : Bool = false

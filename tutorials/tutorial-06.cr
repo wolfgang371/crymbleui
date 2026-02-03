@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-06 && ./bin/tutorial-06
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class CheckboxDemo < CrymbleUI::App
   state option1 : Bool = false

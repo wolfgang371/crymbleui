@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 module CrymbleUI
   # Custom drag data for files (app-specific, not part of core)

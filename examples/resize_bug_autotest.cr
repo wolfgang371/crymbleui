@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Automated test to reproduce ScrollView-in-Panel resize bug
 # The bug shows content floating outside panel during resize

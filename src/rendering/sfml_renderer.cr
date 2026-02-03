@@ -89,7 +89,7 @@ module CrymbleUI
 
 
         # Embed font at compile time for self-contained binary
-        EMBEDDED_FONT = {{ read_file("resources/Cousine-Regular.ttf") }}
+        EMBEDDED_FONT = {{ read_file(__DIR__+"/../../resources/Cousine-Regular.ttf") }}
 
         def initialize(
             width : Int32 = 800,

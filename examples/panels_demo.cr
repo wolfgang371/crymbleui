@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Window Panels Demo (V2)
 # Demonstrates:

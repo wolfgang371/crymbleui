@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Minimal test to check if ghosting is VirtualMatrix-specific or general rendering issue
 #

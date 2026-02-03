@@ -18,7 +18,7 @@
 #
 # Run with: shards build tutorial-18 && ./bin/tutorial-18
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class RecursiveGridDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

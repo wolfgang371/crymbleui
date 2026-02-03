@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-20 && ./bin/tutorial-20
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class LayersDemo < CrymbleUI::App
   state click_count : Int32 = 0

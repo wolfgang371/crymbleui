@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-10 && ./bin/tutorial-10
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ScrollViewDemo < CrymbleUI::App
   def build : CrymbleUI::Widget

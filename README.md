@@ -42,7 +42,7 @@ shards build
 ## Quick Start
 
 ```crystal
-require "crymble"
+require "crymble-ui"
 
 class HelloApp < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -71,7 +71,7 @@ The simplest CrymbleUI application.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class HelloWorld < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -96,7 +96,7 @@ Buttons with click events.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ButtonDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -123,7 +123,7 @@ Vertical stacking of widgets.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class VStackDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -153,7 +153,7 @@ Horizontal stacking of widgets.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class HStackDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -186,7 +186,7 @@ Reactive state with automatic UI updates.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class CounterApp < CrymbleUI::App
   # Reactive state - UI rebuilds when this changes
@@ -222,7 +222,7 @@ Boolean toggles and tristate checkboxes.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class CheckboxDemo < CrymbleUI::App
   state option1 : Bool = false
@@ -269,7 +269,7 @@ Single-line text entry fields.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class TextInputDemo < CrymbleUI::App
   state name : String = ""
@@ -313,7 +313,7 @@ Dropdown selection lists.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ComboBoxDemo < CrymbleUI::App
   state selected_index : Int32 = 0
@@ -351,7 +351,7 @@ Filling remaining space in layouts.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ExpandedDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -397,7 +397,7 @@ Scrollable containers for large content.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ScrollViewDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -434,7 +434,7 @@ Customizing colors and fonts.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class StylingDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -480,7 +480,7 @@ Floating, draggable, resizable panels.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class WindowPanelDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -526,7 +526,7 @@ Application menus with dropdown items.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class MenuBarDemo < CrymbleUI::App
   state status : String = "Ready"
@@ -579,7 +579,7 @@ Floating popup containers.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class PopupDemo < CrymbleUI::App
   state show_popup : Bool = false
@@ -624,7 +624,7 @@ Information display at window bottom.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class StatusBarDemo < CrymbleUI::App
   state click_count : Int32 = 0
@@ -675,7 +675,7 @@ Tab navigation between focusable widgets.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class FocusDemo < CrymbleUI::App
   state value1 : String = ""
@@ -725,7 +725,7 @@ Explicit shortcuts on widgets and built-in framework shortcuts.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class ShortcutsDemo < CrymbleUI::App
   state message : String = "Try the shortcuts!"
@@ -787,7 +787,7 @@ CrymbleUI.run(ShortcutsDemo.new)
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class RecursiveGridDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
@@ -835,7 +835,7 @@ Type-safe drag and drop with accept_types filtering.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class DragDropDemo < CrymbleUI::App
   state last_drop : String = "(none)"
@@ -912,7 +912,7 @@ Floating overlays with automatic positioning.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class LayersDemo < CrymbleUI::App
   state click_count : Int32 = 0
@@ -989,7 +989,7 @@ Creating custom widget classes using DSL composition.
 <summary>View source code</summary>
 
 ```crystal
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # =============================================================================
 # PATTERN 1: DSL-based custom widget (simple containers)

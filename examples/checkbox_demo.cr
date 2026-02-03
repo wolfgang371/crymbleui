@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Demo application showcasing checkbox features
 class CheckboxDemo < CrymbleUI::App

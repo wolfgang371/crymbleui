@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Demo application showcasing the Expanded widget for flexible layouts
 class ExpandedDemo < CrymbleUI::App

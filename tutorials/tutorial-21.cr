@@ -11,7 +11,7 @@
 #
 # Run with: shards build tutorial-21 && ./bin/tutorial-21
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # =============================================================================
 # PATTERN 1: DSL-based custom widget (simple containers)

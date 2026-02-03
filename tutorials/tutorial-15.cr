@@ -10,7 +10,7 @@
 #
 # Run with: shards build tutorial-15 && ./bin/tutorial-15
 
-require "../src/crymble"
+require "../src/crymble-ui"
 
 class StatusBarDemo < CrymbleUI::App
   state click_count : Int32 = 0

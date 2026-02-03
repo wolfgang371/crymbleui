@@ -1,4 +1,4 @@
-require "../src/crymble"
+require "../src/crymble-ui"
 
 # Simple Overlay Demo - Two Layers
 # Root Layer (z=0): Window auto-stacks content
