@@ -66,10 +66,7 @@ and many more in examples/
 ### **New:** Tutorial 22: Virtual Matrix
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-<video src="screenshots/tutorial-22.mp4"
-       poster="screenshots/tutorial-22.png"
-       controls width="100%">
-</video>
+[![Tutorial 22: Virtual Matrix](screenshots/tutorial-22.png)](screenshots/tutorial-22.mp4)
 
 <details>
 <summary>View source code</summary>
@@ -1305,10 +1302,7 @@ CrymbleUI.run(CustomWidgetDemo.new)
 ### Tutorial 22: VirtualMatrix with Sticky Headers
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-<video src="screenshots/tutorial-22.mp4"
-       poster="screenshots/tutorial-22.png"
-       controls width="100%">
-</video>
+[![Tutorial 22: VirtualMatrix with Sticky Headers](screenshots/tutorial-22.png)](screenshots/tutorial-22.mp4)
 
 <details>
 <summary>View source code</summary>
