@@ -1091,7 +1091,7 @@ describe "ScrollView viewport_cache integration" do
   end
 
   describe "visual correctness - no missing rows" do
-    it "all rows in viewport range are visible (no gaps)" do
+    it "all rows in viewport range are visible (no gaps)", tags: "slow" do
       # BUG: Screenshot shows rows 14-15 missing between rows 4-13 and 16-17
       # This test creates unique-colored rows and verifies NO gaps exist
       renderer = CrymbleUI::Testing::TestRenderer.new(400, 400)

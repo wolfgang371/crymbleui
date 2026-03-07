@@ -3,6 +3,20 @@ require "./widget"
 require "../rendering/render_backend"
 
 module CrymbleUI
+  # Entry in a blit-plan: describes one cached widget texture to blit onto a layer
+  struct BlitEntry
+    property source : RenderBackend
+    property dest_x : Int32
+    property dest_y : Int32
+    property width : Int32
+    property height : Int32
+
+    def initialize(@source : RenderBackend, @dest_x : Int32, @dest_y : Int32)
+      @width = source.width
+      @height = source.height
+    end
+  end
+
   # Layer represents a render target with its own backend
   # Layers form a tree hierarchy and are composited by z-index
   #
@@ -49,6 +63,10 @@ module CrymbleUI
     # Owner widget (e.g., WindowPanel that owns this layer)
     property owner_widget : Widget?
 
+    # Blit-plan: when set, render_layer uses fast path (clear + blit cached textures)
+    # instead of full widget render pipeline. Used for sticky layers on scroll.
+    property blit_plan : Array(BlitEntry)? = nil
+
     # State
     property state : WidgetState
 
@@ -67,6 +85,10 @@ module CrymbleUI
     property buffer_origin : Vec2 = Vec2.zero # Content coord at buffer position (0,0)
     # Flag set during buffer recenter - widgets should fill with bg color, not capture from stale texture
     property buffer_just_cleared : Bool = false
+    # Flag to force buffer clear on next render without NeedsLayout semantics.
+    # Used by cursor overlay: old content must be erased (ghost bands) but
+    # NeedsLayout is heavier than needed (forces sibling validation on first_render).
+    property needs_clear : Bool = false
 
     def initialize(@id : String, @bounds : Rect, @z_index : Int32 = 0, @background_color : Color = Color.new(0, 0, 0, 0), @owner_widget : Widget? = nil)
       @opacity = 1.0
@@ -130,8 +152,10 @@ module CrymbleUI
         {% end %}
       end
 
-      {% if flag?(:DEBUG_RENDER) && !orphaned.empty? %}
-        puts "[LAYER CLEANUP] Cleaned up #{orphaned.size} orphaned layers, #{@@all_layers.size} remain"
+      {% if flag?(:DEBUG_RENDER) %}
+        if !orphaned.empty?
+          puts "[LAYER CLEANUP] Cleaned up #{orphaned.size} orphaned layers, #{@@all_layers.size} remain"
+        end
       {% end %}
     end
 
@@ -187,6 +211,15 @@ module CrymbleUI
       # NOTE: Do NOT propagate to parent layer - layout is isolated per layer
     end
 
+    # Mark layer for render with buffer clear (lighter than mark_needs_layout).
+    # Clears the buffer to erase stale content (ghost bands) then renders all widgets.
+    # Unlike mark_needs_layout: does NOT force sibling validation or disable viewport culling.
+    def mark_needs_clear_and_render
+      @state = WidgetState::NeedsRender if @state == WidgetState::Clean
+      @dirty_widgets.clear # Empty set = render all widgets
+      @needs_clear = true
+    end
+
     # Check if layer needs rendering
     # A layer needs rendering if it's the first render OR has dirty state
     def needs_render? : Bool
@@ -203,6 +236,7 @@ module CrymbleUI
     def clear_render_state
       @state = WidgetState::Clean
       @dirty_widgets.clear
+      @needs_clear = false
       @last_rendered_bounds = @bounds # Track bounds for change detection
     end
 

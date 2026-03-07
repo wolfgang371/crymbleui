@@ -21,6 +21,7 @@ class CheckboxZoomTestApp < CrymbleUI::App
     checkbox = CrymbleUI::Checkbox.new(@checkbox_text, checked: @checkbox_checked) { }
     @last_checkbox = checkbox
     window = CrymbleUI::Window.new("Test", 400, 200)
+    window.add_child(CrymbleUI::Text.new(""))  # dummy to avoid tight single-child constraints
     window.add_child(checkbox)
     window
   end

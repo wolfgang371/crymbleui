@@ -65,36 +65,19 @@
 
 ### 2. Explicit Change Tracking
 
-State changes propagate through a well-defined event system:
-
-```crystal
-struct StateChange
-  property type : Symbol          # :toggled, :clicked, :value_changed
-  property target : Widget        # What changed
-  property scope : InvalidateScope # What needs redrawing
-  property action : Symbol?        # Optional action request (e.g., :close_menu)
-end
-
-enum InvalidateScope
-  Self      # Only this widget
-  Children  # This widget + children
-  Parent    # Invalidate upward (e.g., menu item → close menu)
-  Global    # Full redraw (rare - major layout changes)
-end
-```
+Widgets propagate state changes by calling `mark_needs_render` or `mark_needs_layout` on themselves. The property macros (`render_property`, `layout_property`) do this automatically on setter. Parent changes cascade to children; the renderer skips widgets that are clean.
 
 ### 3. Testability First
 
 All business logic must be testable without rendering:
 
 ```crystal
-# GOOD: Pure state logic, fully testable
-it "checkable menu items keep menu open" do
-  item = MenuItemState.new("Dark Mode", checkable: true)
-  change = item.click
-
-  change.action.should be_nil  # No close action
-  change.type.should eq(:item_toggled)
+# GOOD: Test observable widget state directly
+it "button callback fires on click" do
+  fired = false
+  button = Button.new("OK") { fired = true }
+  button.on_click
+  fired.should be_true
 end
 
 # BAD: Requires visual inspection
@@ -157,7 +140,7 @@ class Button < Widget
   end
 end
 
-class WindowChrome < Widget
+class WindowPanel::Chrome < Widget
   def cache_policy : CachePolicy
     CachePolicy::Static  # Cache until layout changes
   end
@@ -166,31 +149,16 @@ end
 
 ### Cache Invalidation Rules
 
-Clear, explicit rules prevent bugs:
+Clear, explicit rules prevent bugs. Widgets call `mark_needs_render` or `mark_needs_layout`; the renderer propagates changes through the tree:
 
 ```crystal
 class Widget
-  # Called when state changes
-  def on_state_change(change : StateChange)
-    case change.scope
-    when InvalidateScope::Self
-      invalidate_own_cache
-    when InvalidateScope::Children
-      invalidate_tree_cache
-    when InvalidateScope::Parent
-      parent.try &.on_state_change(change)
-    when InvalidateScope::Global
-      root.invalidate_all_caches
-    end
-
-    mark_needs_render if should_render?(change)
-  end
-
-  private def should_render?(change : StateChange) : Bool
-    # Only render if cache policy allows caching
-    # or if this is a Never-cache widget
-    cache_policy == CachePolicy::Never ||
-      (cache_policy == CachePolicy::Dynamic && change.invalidates_cache?)
+  # Called when state changes (via property macro setters)
+  def on_state_change
+    # Self-only invalidation (render_property)
+    mark_needs_render
+    # Or layout invalidation (layout_property)
+    # mark_needs_layout  # propagates to parent and children
   end
 end
 ```
@@ -272,8 +240,11 @@ module PrimitiveBuilder
     @primitives.not_nil! << FillRect.new(bounds, color)
   end
 
-  def draw_text(text : String, pos : Vec2, color : Color, size : Float64 = 16.0)
-    @primitives.not_nil! << DrawText.new(text, pos, color, size)
+  def draw_text(text : String, pos : Vec2, color : Color, font_scale : Int32 = 0)
+    size = FontSizing.calculate_size(font_scale)
+    left_offset, top_offset = Widget.font.get_text_offsets(text, size)
+    adjusted_pos = Vec2.new(pos.x - left_offset, pos.y - top_offset)
+    @primitives.not_nil! << DrawText.new(text, adjusted_pos, color, size)
   end
 
   def draw_line(from : Vec2, to : Vec2, color : Color, width : Float64 = 1.0)
@@ -544,20 +515,11 @@ class Text < Widget
 
   def to_primitives(bounds : Rect) : Array(DrawPrimitive)
     primitives do
-      draw_text(@text, bounds.position, @color, font_size)  # font_size is computed from @font_scale
+      draw_text(@text, bounds.position, @color, @font_scale)
     end
   end
 end
 
-class Rectangle < Widget
-  include PrimitiveBuilder
-
-  def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-    primitives do
-      fill_rect(bounds, @color)
-    end
-  end
-end
 ```
 
 ### Layer 2: Composite Widgets
@@ -629,253 +591,6 @@ end
 ```
 
 **Key**: Every widget implements `to_primitives()`. Composition is natural.
-
-## Proposed Architecture
-
-### State Layer (Pure, Testable)
-
-```crystal
-module CrymbleUI::State
-  # Pure state objects - no rendering knowledge
-  # All logic is here, fully unit testable
-
-  class MenuItemState
-    property label : String
-    property checked : Bool
-    property checkable : Bool
-    property callback : Proc(Nil)?
-
-    def initialize(@label, @checked = false, @checkable = false, @callback = nil)
-    end
-
-    # Pure logic - returns what should happen
-    def click : StateChange
-      # Execute callback (business logic)
-      @callback.try &.call
-
-      if @checkable
-        @checked = !@checked
-        StateChange.new(
-          type: :item_toggled,
-          target: self,
-          scope: InvalidateScope::Self,
-          action: nil  # Checkable items don't close menu
-        )
-      else
-        StateChange.new(
-          type: :item_activated,
-          target: self,
-          scope: InvalidateScope::Parent,
-          action: :close_menu  # Action items request close
-        )
-      end
-    end
-  end
-
-  class MenuState
-    property label : String
-    property open : Bool
-    property items : Array(MenuItemState)
-
-    def initialize(@label, @items = [] of MenuItemState)
-      @open = false
-    end
-
-    def toggle : StateChange
-      @open = !@open
-      StateChange.new(
-        type: @open ? :menu_opened : :menu_closed,
-        target: self,
-        scope: InvalidateScope::Children,
-        action: nil
-      )
-    end
-
-    def close : StateChange
-      @open = false
-      StateChange.new(
-        type: :menu_closed,
-        target: self,
-        scope: InvalidateScope::Children,
-        action: nil
-      )
-    end
-
-    def handle_item_click(item : MenuItemState) : StateChange
-      change = item.click
-
-      # If item requests menu close
-      if change.action == :close_menu
-        close
-      else
-        change
-      end
-    end
-  end
-end
-```
-
-### Widget Layer (Coordination)
-
-```crystal
-class MenuItem < Widget
-  include PrimitiveBuilder
-
-  # Widget owns the state
-  property state : State::MenuItemState
-
-  def initialize(label : String, checked : Bool? = nil, &block : -> Nil)
-    super()
-    @state = State::MenuItemState.new(
-      label: label,
-      checked: checked || false,
-      checkable: !checked.nil?,
-      callback: block
-    )
-  end
-
-  # Declare caching behavior
-  def cache_policy : CachePolicy
-    CachePolicy::Dynamic
-  end
-
-  # Handle click event
-  def on_click
-    # Delegate to pure state logic
-    change = @state.click
-
-    # Propagate change upward
-    propagate_change(change)
-  end
-
-  # Produce rendering primitives based on state
-  def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-    primitives do
-      # Hover background
-      fill_rect(bounds, @hover_color) if @hovered
-
-      # Checkmark
-      if @state.checked
-        check_pos = Vec2.new(bounds.x + 8.0, bounds.y + 4.0)
-        draw_text("✓", check_pos, text_color, font_size)
-      end
-
-      # Label
-      label_pos = Vec2.new(bounds.x + 24.0, bounds.y + 4.0)
-      draw_text(@state.label, label_pos, text_color, font_size)
-
-      # Shortcut (if present)
-      if @state.shortcut
-        shortcut_pos = Vec2.new(bounds.x + bounds.width - 40.0, bounds.y + 4.0)
-        draw_text(@state.shortcut, shortcut_pos, @shortcut_color, font_size)
-      end
-    end
-  end
-end
-```
-
-### Rendering Layer (Backend Execution)
-
-**Critical**: The renderer knows NOTHING about widgets. It only executes primitives.
-
-```crystal
-# Backend-specific renderer (SFML implementation)
-class SFMLRenderer
-  def initialize(@render_target : SF::RenderTarget, @font : SF::Font)
-  end
-
-  # Execute a list of primitives
-  def render(primitives : Array(DrawPrimitive))
-    primitives.each do |primitive|
-      execute_primitive(primitive)
-    end
-  end
-
-  # Dispatch primitive to backend-specific implementation
-  private def execute_primitive(primitive : DrawPrimitive)
-    case primitive
-    when FillRect
-      execute_fill_rect(primitive)
-    when DrawText
-      execute_draw_text(primitive)
-    when DrawLine
-      execute_draw_line(primitive)
-    when DrawCircle
-      execute_draw_circle(primitive)
-    end
-  end
-
-  private def execute_fill_rect(p : FillRect)
-    rect = SF::RectangleShape.new(SF.vector2f(p.bounds.width, p.bounds.height))
-    rect.position = SF.vector2f(p.bounds.x, p.bounds.y)
-    rect.fill_color = to_sf_color(p.color)
-    @render_target.draw(rect)
-  end
-
-  private def execute_draw_text(p : DrawText)
-    text = SF::Text.new(p.text, @font, p.size.to_u32)
-    text.position = SF.vector2f(p.position.x, p.position.y)
-    text.fill_color = to_sf_color(p.color)
-    @render_target.draw(text)
-  end
-
-  private def execute_draw_line(p : DrawLine)
-    line = SF::VertexArray.new(SF::Lines, 2)
-    line[0] = SF::Vertex.new(SF.vector2f(p.from.x, p.from.y), to_sf_color(p.color))
-    line[1] = SF::Vertex.new(SF.vector2f(p.to.x, p.to.y), to_sf_color(p.color))
-    @render_target.draw(line)
-  end
-
-  private def execute_draw_circle(p : DrawCircle)
-    circle = SF::CircleShape.new(p.radius)
-    circle.position = SF.vector2f(p.center.x - p.radius, p.center.y - p.radius)
-    if p.fill
-      circle.fill_color = to_sf_color(p.color)
-    else
-      circle.fill_color = SF::Color::Transparent
-      circle.outline_color = to_sf_color(p.color)
-      circle.outline_thickness = 1.0
-    end
-    @render_target.draw(circle)
-  end
-
-  private def to_sf_color(c : Color) : SF::Color
-    SF::Color.new(c.r, c.g, c.b, c.a)
-  end
-end
-
-# Alternative backend: OpenGL renderer
-class OpenGLRenderer
-  def render(primitives : Array(DrawPrimitive))
-    primitives.each do |primitive|
-      case primitive
-      when FillRect
-        # OpenGL implementation
-      when DrawText
-        # OpenGL implementation
-      end
-    end
-  end
-end
-
-# Alternative backend: HTML Canvas renderer
-class CanvasRenderer
-  def render(primitives : Array(DrawPrimitive)) : String
-    js = [] of String
-    primitives.each do |primitive|
-      case primitive
-      when FillRect
-        js << "ctx.fillRect(#{primitive.bounds.x}, #{primitive.bounds.y}, ...);"
-      when DrawText
-        js << "ctx.fillText('#{primitive.text}', #{primitive.position.x}, ...);"
-      end
-    end
-    js.join("\n")
-  end
-end
-```
-
-**Key**: Same primitives work with any backend. Swap SFML → OpenGL by changing one line.
 
 ## Cache Implementation Strategy
 
@@ -1021,8 +736,7 @@ class RenderCache
 
   private def render_to_texture(primitives, renderer)
     texture = SF::RenderTexture.new(...)
-    renderer.render_target = texture
-    renderer.render(primitives)
+    renderer.render_primitives(primitives)
     texture
   end
 end
@@ -1049,7 +763,7 @@ class Button < Widget
   end
 end
 
-class WindowChrome < Widget
+class WindowPanel::Chrome < Widget
   def cache_policy : CachePolicy
     CachePolicy::Static  # Cache primitives + texture aggressively
   end
@@ -1090,31 +804,21 @@ Start with `Text` widget (simplest):
 4. Implement primitive caching in `Widget.get_primitives`
 5. Remove all ad-hoc cache skipping code (those `is_a?(Popup)` checks)
 
-### Phase 4: Add State Layer for Complex Widgets
-
-For widgets with complex behavior (Menu, MenuItem):
-
-1. Create `State::MenuItemState` with pure logic
-2. Write comprehensive unit tests for state (100% coverage)
-3. Move behavior from `MenuItem.on_click` to `MenuItemState.click`
-4. Update `MenuItem.to_primitives` to use state
-5. Verify behavior unchanged (now fully tested!)
-
-### Phase 5: Migrate Remaining Widgets
+### Phase 4: Migrate Remaining Widgets
 
 Continue pattern for all widgets:
 - Primitive widgets: Just `to_primitives`
-- Interactive widgets: State + `to_primitives`
+- Interactive widgets: `to_primitives` based on widget state
 - Containers: Aggregate child primitives
 
-### Phase 6: Remove Old Rendering Path
+### Phase 5: Remove Old Rendering Path
 
 1. Remove `render(context)` method from all widgets
 2. Remove `PaintContext` (replaced by primitives)
 3. Renderer only knows primitives, nothing about widgets
 4. Clean, separated architecture complete!
 
-### Phase 7: Advanced Optimizations (Optional)
+### Phase 6: Advanced Optimizations (Optional)
 
 1. Texture caching for expensive widgets
 2. Dirty rectangle tracking
@@ -1170,71 +874,17 @@ describe MenuItem do
 end
 ```
 
-### Unit Tests (State Layer)
-
-```crystal
-describe State::MenuItemState do
-  describe "#click" do
-    context "checkable item" do
-      it "toggles checked state" do
-        item = State::MenuItemState.new("Dark Mode", checked: false, checkable: true)
-        item.click
-        item.checked.should be_true
-      end
-
-      it "returns StateChange with no close action" do
-        item = State::MenuItemState.new("Dark Mode", checkable: true)
-        change = item.click
-        change.action.should be_nil
-      end
-
-      it "invalidates only self" do
-        item = State::MenuItemState.new("Dark Mode", checkable: true)
-        change = item.click
-        change.scope.should eq(InvalidateScope::Self)
-      end
-    end
-
-    context "action item" do
-      it "requests menu close" do
-        item = State::MenuItemState.new("New File", checkable: false)
-        change = item.click
-        change.action.should eq(:close_menu)
-      end
-
-      it "invalidates parent" do
-        item = State::MenuItemState.new("New File", checkable: false)
-        change = item.click
-        change.scope.should eq(InvalidateScope::Parent)
-      end
-    end
-
-    it "executes callback" do
-      called = false
-      item = State::MenuItemState.new("Test") { called = true }
-      item.click
-      called.should be_true
-    end
-  end
-end
-```
-
 ### Integration Tests (Widget Layer)
 
 ```crystal
 describe MenuItem do
-  it "delegates click to state" do
+  it "fires callback on click" do
     clicked = false
     item = MenuItem.new("Test") { clicked = true }
 
     item.on_click
 
     clicked.should be_true
-    item.state.should_not be_nil
-  end
-
-  it "propagates state changes upward" do
-    # Test change propagation without rendering
   end
 end
 ```
@@ -1461,24 +1111,27 @@ SFML text has built-in padding/offsets that must be handled consistently between
 
 **Implementation**:
 
-1. **Measurement** (`Widget.measure_text` in widget.cr):
+1. **Measurement** (`Widget.measure_text` in widget.cr, delegates to `SFMLFont#measure_text`):
    ```crystal
    def self.measure_text(text : String, size : Float64) : Size
-     sf_text = SF::Text.new(text, font, size.to_u32)
-     bounds = sf_text.local_bounds  # ← Uses local_bounds to include padding
-     Size.new(bounds.width.to_f64, bounds.height.to_f64)
+     # Delegates to Font implementation (SFMLFont or TestFont)
+     font.measure_text(text, size)
+     # SFMLFont: width = local_bounds.width, height = font.get_line_spacing (consistent across glyphs)
    end
    ```
 
 2. **Rendering** (`draw_text` in primitive_builder.cr):
    ```crystal
-   def draw_text(text : String, position : Vec2, color : Color, size : Float64 = 16.0)
-     sf_text = SF::Text.new(text, font, size.to_u32)
-     left_offset = sf_text.local_bounds.left
-     top_offset = sf_text.local_bounds.top
-     # Compensate for SFML offsets so visual glyphs appear at requested position
-     adjusted_position = Vec2.new(position.x - left_offset, position.y - top_offset)
-     @primitives.not_nil! << DrawText.new(text, adjusted_position, color, size)
+   # Takes font_scale : Int32 (passed to FontSizing.calculate_size for zoom-aware sizing)
+   def draw_text(text : String, position : Vec2, color : Color, font_scale : Int32 = 0)
+     size = FontSizing.calculate_size(font_scale)
+     if font = Widget.font
+       # Delegate to font to get SFML local_bounds offsets
+       left_offset, top_offset = font.get_text_offsets(text, size)
+       # Compensate for SFML offsets so visual glyphs appear at requested position
+       adjusted_position = Vec2.new(position.x - left_offset, position.y - top_offset)
+       @primitives.not_nil! << DrawText.new(text, adjusted_position, color, size)
+     end
    end
    ```
 
@@ -1491,9 +1144,9 @@ SFML text has built-in padding/offsets that must be handled consistently between
    ```
 
 **How it works**:
-- `measure_text` returns visual size only: `(local_bounds.width, local_bounds.height)`
+- `measure_text` returns visual size: width from `local_bounds.width`, height from `font.get_line_spacing` (consistent across glyphs)
 - Widget.bounds is sized using measured size plus padding
-- `draw_text` shifts rendering position backwards by `local_bounds.left/top`
+- `draw_text` queries `font.get_text_offsets` (which reads `local_bounds.left/top`) and shifts the position so visual glyphs appear at the requested position
 - Visual glyphs render exactly at requested position
 - Text stays within measured bounds (no overflow)
 
@@ -1522,8 +1175,8 @@ SFML text has built-in padding/offsets that must be handled consistently between
 
 **How it works together**:
 ```crystal
-# Measure text (returns width, height only)
-text_size = measure_text("Hello", 16.0)  # => Size(50, 15)
+# Measure text using a pixel size (returns width, height)
+text_size = measure_text("Hello", FontSizing.calculate_size(@font_scale))  # => Size(50, 15)
 
 # Size widget: add equal padding
 widget_size = Size(text_size.width + 20, text_size.height + 20)  # Equal 10px padding
@@ -1531,11 +1184,29 @@ widget_size = Size(text_size.width + 20, text_size.height + 20)  # Equal 10px pa
 # Position text: simple padding offset
 text_pos = Vec2(widget.x + 10, widget.y + 10)  # 10px from edges
 
-# Render: draw_text compensates for SFML offsets automatically
-draw_text("Hello", text_pos, color, 16.0)  # Glyphs appear exactly at text_pos
+# Render: draw_text takes font_scale (Int32) and compensates for SFML offsets automatically
+draw_text("Hello", text_pos, color, @font_scale)  # Glyphs appear exactly at text_pos
 ```
 
 **Result**: Equal visual padding on all sides, regardless of font size or glyphs (including descenders like 'y', 'g', 'q')
+
+### SFML Text: Integer Coordinates Required
+
+**CRITICAL**: All SFML text positions MUST be rounded to integer pixels before rendering.
+
+Fractional (sub-pixel) coordinates cause GPU bilinear interpolation on the font glyph atlas,
+producing visually washed-out/blurry text. This is most visible after zoom (e.g. 110%) where
+centering arithmetic produces non-integer positions like (143.7, 28.3).
+
+This applies to ALL `SF::Text` position assignments across the codebase:
+- `CrSFMLBackend.draw_text` — per-widget texture rendering
+- `SFMLRenderer` DrawText execution — direct-to-window primitives
+- `SFMLPaintContext.draw_text` — paint context text drawing
+
+Similarly, sprite positions for layer compositing must be rounded (see commit 7fb1c03 —
+sub-pixel sprite positioning caused ghosted text in viewport_cache layers).
+
+**History**: Fixed in commit 20a683b (blurry button text) and commit 7fb1c03 (ghosted text).
 
 ## Event Handling and Input
 

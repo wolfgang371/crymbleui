@@ -55,8 +55,7 @@ module CrymbleUI
 
     # Highlight layer configuration
     HIGHLIGHT_Z_INDEX = 1000  # Above content (0), below ghost (9999)
-    DEFAULT_HIGHLIGHT_COLOR = Color.new(180, 220, 255, 255)  # Blue
-    DEFAULT_HIGHLIGHT_OPACITY = 0.4  # 40% opacity
+    # Drag highlight defaults (dynamic - must follow theme changes)
 
     # Current drag state
     getter state : DragState = DragState.new
@@ -245,14 +244,14 @@ module CrymbleUI
       color = if target.is_a?(DropTarget)
         target.as(DropTarget).highlight_color
       else
-        DEFAULT_HIGHLIGHT_COLOR
+        Theme.current.drag_highlight
       end
 
       # Get highlight opacity from target (if DropTarget) or use default
       opacity = if target.is_a?(DropTarget)
         target.as(DropTarget).highlight_opacity
       else
-        DEFAULT_HIGHLIGHT_OPACITY
+        Theme.current.brightness_drag_opacity
       end
 
       layer = Layer.new(

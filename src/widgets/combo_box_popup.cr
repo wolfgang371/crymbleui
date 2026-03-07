@@ -98,8 +98,8 @@ module CrymbleUI
       selected_index : Int32 = 0,
       max_height : Float64? = nil,
       width : Float64? = nil,
-      background_color : Color = Color.white,
-      border_color : Color = Color.new(180, 180, 180, 255),
+      background_color : Color = Theme.current.popup_background,
+      border_color : Color = Theme.current.popup_border,
       padding : Float64 = 4.0,
       id : String? = nil,
       @text_background_color : Color? = nil,
@@ -146,8 +146,8 @@ module CrymbleUI
     # Legacy constructor for compatibility
     def initialize(
       max_height : Float64? = nil,
-      background_color : Color = Color.white,
-      border_color : Color = Color.new(180, 180, 180, 255),
+      background_color : Color = Theme.current.popup_background,
+      border_color : Color = Theme.current.popup_border,
       padding : Float64 = 0.0,
       id : String? = nil
     )

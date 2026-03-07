@@ -659,6 +659,75 @@ describe "ScrollView Scrollbar Interaction" do
     thumb.not_nil!.bounds.y.should be >= arrow_size
   end
 
+  it "hit_test returns ScrollView for scrollbar area, not child widget" do
+    # Bug: When child widgets extend into scrollbar area, they intercept clicks
+    # meant for the scrollbar. hit_test should prioritize scrollbar area.
+    #
+    # This specifically affects VirtualMatrix where cells can extend into
+    # the scrollbar region and steal scrollbar clicks.
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = TestApp.new
+    window = CrymbleUI::Window.new("Test", 400, 300)
+
+    scroll_view = CrymbleUI::ScrollView.new(direction: CrymbleUI::ScrollDirection::Vertical, id: "test_scroll")
+    vstack = CrymbleUI::VStack.new(spacing: 5.0)
+    20.times { vstack.add_child(CrymbleUI::Button.new("Button") { }) }
+    scroll_view.set_content(vstack)
+
+    window.add_child(scroll_view)
+    app.root_widget = window
+    renderer.render_frame(app)
+
+    # Calculate a point in the vertical scrollbar area
+    abs = scroll_view.absolute_bounds
+    scrollbar_x = abs.x + abs.width - 8.0  # Middle of 16px scrollbar
+    scrollbar_y = abs.y + 100.0  # Somewhere in the track
+
+    # hit_test should return ScrollView, not a child widget
+    # (scrollbar area should be "protected" from child hit testing)
+    hit_point = CrymbleUI::Vec2.new(scrollbar_x, scrollbar_y)
+    hit_result = scroll_view.hit_test(hit_point)
+
+    # The hit should be the ScrollView itself (for scrollbar handling)
+    # NOT a Button or other child widget
+    hit_result.should eq scroll_view
+  end
+
+  it "hit_test returns ScrollView for scrollbar even when child extends into scrollbar area" do
+    # Specific regression test: child widget bounds extend into scrollbar area
+    # but hit_test should still return ScrollView for scrollbar clicks.
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = TestApp.new
+    window = CrymbleUI::Window.new("Test", 400, 300)
+
+    scroll_view = CrymbleUI::ScrollView.new(direction: CrymbleUI::ScrollDirection::Both, id: "test_scroll")
+
+    # Create a grid that fills the full area (may extend into scrollbar region)
+    vstack = CrymbleUI::VStack.new(spacing: 0.0)
+    20.times do
+      hstack = CrymbleUI::HStack.new(spacing: 0.0)
+      10.times { hstack.add_child(CrymbleUI::Button.new("B") { }) }
+      vstack.add_child(hstack)
+    end
+    scroll_view.set_content(vstack)
+
+    window.add_child(scroll_view)
+    app.root_widget = window
+    renderer.render_frame(app)
+
+    # Click in vertical scrollbar area
+    abs = scroll_view.absolute_bounds
+    scrollbar_x = abs.x + abs.width - 8.0
+    scrollbar_y = abs.y + 100.0
+
+    hit_point = CrymbleUI::Vec2.new(scrollbar_x, scrollbar_y)
+    hit_result = scroll_view.hit_test(hit_point)
+
+    # Must return ScrollView, not a Button
+    hit_result.should eq scroll_view
+    hit_result.should_not be_a(CrymbleUI::Button)
+  end
+
   it "thumb does not overlap down arrow at max scroll" do
     # Bug: Thumb at max scroll extends to bottom, overlapping down arrow.
     # Expected: Thumb ends at track_height - ARROW_SIZE.

@@ -77,11 +77,10 @@ module CrymbleUI
     # Selection range is between @selection_anchor and @cursor_pos
     @selection_anchor : Int32? = nil
 
-    # Selection highlight color
-    SELECTION_COLOR = Color.new(173, 214, 255, 255)
+    # Selection highlight color (dynamic - must follow theme changes)
 
     # QuickEntry mode background tint (subtle cream to distinguish from FullEdit)
-    QUICK_ENTRY_BG_COLOR = Color.new(255, 252, 245, 255)
+
 
     # Cursor blink state
     reconcile_property cursor_visible : Bool = true
@@ -98,7 +97,7 @@ module CrymbleUI
     reconcile_property value_on_focus : String? = nil
 
     # Double-click detection
-    @last_click_time : Time::Span = Time::Span.zero
+    @last_click_time : Time::Instant = Time.instant - 1.hour
 
     # Does this widget want to consume arrow keys?
     # In FullEdit mode, arrows move cursor; in QuickEntry, arrows should navigate focus
@@ -140,11 +139,11 @@ module CrymbleUI
       width : Float64? = nil,
       @placeholder : String = "",
       font_scale : Int32 = 0,
-      @text_color : Color = Color.new(0, 0, 0, 255),
-      @background_color : Color = Color.new(255, 255, 255, 255),
-      @border_color : Color = Color.new(180, 180, 180, 255),
-      @focused_border_color : Color = Color.new(0, 120, 215, 255),
-      @placeholder_color : Color = Color.new(150, 150, 150, 255),
+      @text_color : Color = Theme.current.input_text,
+      @background_color : Color = Theme.current.input_background,
+      @border_color : Color = Theme.current.input_border,
+      @focused_border_color : Color = Theme.current.input_border_focused,
+      @placeholder_color : Color = Theme.current.input_placeholder,
       @padding : Float64 = 4.0,
       mode : TextInputMode = TextInputMode::FullEdit,
       on_event : Proc(String, TextInputEvent, Nil)? = nil,
@@ -168,11 +167,11 @@ module CrymbleUI
       width : Float64? = nil,
       placeholder : String = "",
       font_scale : Int32 = 0,
-      text_color : Color = Color.new(0, 0, 0, 255),
-      background_color : Color = Color.new(255, 255, 255, 255),
-      border_color : Color = Color.new(180, 180, 180, 255),
-      focused_border_color : Color = Color.new(0, 120, 215, 255),
-      placeholder_color : Color = Color.new(150, 150, 150, 255),
+      text_color : Color = Theme.current.input_text,
+      background_color : Color = Theme.current.input_background,
+      border_color : Color = Theme.current.input_border,
+      focused_border_color : Color = Theme.current.input_border_focused,
+      placeholder_color : Color = Theme.current.input_placeholder,
       padding : Float64 = 4.0,
       mode : TextInputMode = TextInputMode::FullEdit,
       on_event : Proc(String, TextInputEvent, Nil)? = nil,
@@ -189,6 +188,10 @@ module CrymbleUI
     # TextInput can receive keyboard focus
     def focusable? : Bool
       true
+    end
+
+    def preferred_cursor(point : Vec2) : CursorType?
+      CursorType::Text
     end
 
     # Copy state from old widget during reconciliation
@@ -260,8 +263,13 @@ module CrymbleUI
 
     # Measure text input size
     def measure(constraints : BoxConstraints) : Size
-      # Height is fixed based on font size
+      # Height: tight constraints → fill exactly; loose → natural, clamped to max
       height = font_size + (@padding * 2) + (BORDER_WIDTH * 2)
+      if constraints.min_height == constraints.max_height && constraints.max_height.finite?
+        height = constraints.max_height  # Tight: fill cell (e.g., merged VirtualMatrix cells)
+      elsif constraints.max_height.finite?
+        height = Math.min(height, constraints.max_height)  # Loose: clamp down only
+      end
 
       # Width: prefer explicit, but always respect constraint max
       width = @explicit_width || constraints.max_width
@@ -291,7 +299,7 @@ module CrymbleUI
     # Generate primitives for rendering
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       # Determine border color based on focus state
-      current_border_color = focused? ? @focused_border_color : @border_color
+      current_border_color = effectively_focused? ? @focused_border_color : @border_color
 
       # Local bounds rect
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
@@ -307,18 +315,15 @@ module CrymbleUI
       display_text = display_empty ? @placeholder : @value
       display_color = display_empty ? @placeholder_color : @text_color
 
-      # Text position
-      text_y = content_y
+      # Text position — vertically centered in content area
+      # At natural height content_h ≈ font_size so offset ≈ 0 (no-op).
+      # In tall merged cells, text centers properly and scrolls out
+      # when the cell shrinks behind a sticky row header.
+      text_y = content_y + (content_height - font_size) / 2.0
       text_position = Vec2.new(content_x, text_y)
 
       primitives do
-        # Draw background (tinted in QuickEntry mode to distinguish from FullEdit)
-        bg_color = if @edit_mode == TextInputMode::QuickEntry && focused?
-                     QUICK_ENTRY_BG_COLOR
-                   else
-                     @background_color
-                   end
-        fill_rect(local_bounds, bg_color)
+        fill_rect(local_bounds, @background_color)
 
         # Draw border as 4 filled rectangles (avoids SFML outline_thickness clipping)
         # Drawn INSIDE bounds for pixel-perfect alignment
@@ -329,7 +334,7 @@ module CrymbleUI
 
         # Draw selection highlight (before text so it's behind)
         # Show selection for: actual selection OR pending_replace (all text will be replaced)
-        show_selection = has_selection? || (@pending_replace && focused?)
+        show_selection = has_selection? || (@pending_replace && effectively_focused?)
         if !display_empty && show_selection
           # For pending_replace: select all text; otherwise use actual selection
           sel_start, sel_end = if has_selection?
@@ -343,8 +348,8 @@ module CrymbleUI
           sel_end_x = content_x + measure_text(@value[0...sel_end], font_size).width
           sel_width = sel_end_x - sel_start_x
           if sel_width > 0
-            sel_rect = Rect.new(sel_start_x, content_y, sel_width, content_height)
-            fill_rect(sel_rect, SELECTION_COLOR)
+            sel_rect = Rect.new(sel_start_x, text_y, sel_width, font_size)
+            fill_rect(sel_rect, Theme.current.input_selection)
           end
         end
 
@@ -354,18 +359,18 @@ module CrymbleUI
         end
 
         # Draw cursor (only when focused and visible)
-        if focused? && @cursor_visible && !display_empty
+        if effectively_focused? && @cursor_visible && !display_empty
           # Calculate cursor x position based on text before cursor
           text_before_cursor = @value[0...@cursor_pos]
           cursor_x_offset = measure_text(text_before_cursor, font_size).width
           cursor_x = content_x + cursor_x_offset
 
           # Cursor line
-          cursor_rect = Rect.new(cursor_x, content_y, CURSOR_WIDTH, content_height)
+          cursor_rect = Rect.new(cursor_x, text_y, CURSOR_WIDTH, font_size)
           fill_rect(cursor_rect, @text_color)
-        elsif focused? && @cursor_visible && display_empty
+        elsif effectively_focused? && @cursor_visible && display_empty
           # Cursor at start when empty
-          cursor_rect = Rect.new(content_x, content_y, CURSOR_WIDTH, content_height)
+          cursor_rect = Rect.new(content_x, text_y, CURSOR_WIDTH, font_size)
           fill_rect(cursor_rect, @text_color)
         end
       end
@@ -394,6 +399,25 @@ module CrymbleUI
       mark_needs_render
       # Fire Blur event so parent widgets (e.g., ComboBox) can respond
       @on_event.try &.call(@value, TextInputEvent::Blur)
+    end
+
+    # === PROXY FOCUS (for VirtualMatrix cell hosting) ===
+
+    # Activate proxy focus — set up cursor, blink, and QuickEntry state
+    def activate_proxy_focus
+      super
+      @cursor_visible = true
+      @value_on_focus = @value
+      start_cursor_blink
+      self.pending_replace = true if @edit_mode == TextInputMode::QuickEntry
+    end
+
+    # Deactivate proxy focus — stop cursor blink, clear selection
+    def deactivate_proxy_focus
+      super
+      stop_cursor_blink
+      @cursor_visible = false
+      @selection_anchor = nil
     end
 
     # Start cursor blinking timer
@@ -736,12 +760,12 @@ module CrymbleUI
 
     # Click to focus and clear selection, detect double-click
     def on_click
-      now = Time.monotonic
+      now = Time.instant
 
       # Check for double-click
       if (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
         on_double_click
-        @last_click_time = Time::Span.zero # Reset to prevent triple-click triggering
+        @last_click_time = Time.instant - 1.hour # Reset to far past to prevent triple-click triggering
       else
         clear_selection
         request_focus

@@ -9,8 +9,7 @@ module CrymbleUI
   class Button < Widget
     include PrimitiveBuilder
     include FontScalable
-    # Hover brightness offset (additive HSV V, works for black)
-    HOVER_BRIGHTNESS = 0.15
+    # Hover brightness offset (dynamic - must follow theme changes)
 
     # Text content
     @text : String
@@ -66,9 +65,9 @@ module CrymbleUI
       shortcut : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      @text_color : Color = Color.new(255, 255, 255, 255),
-      @background_color : Color = Color.new(0, 120, 215, 255),
-      @border_color : Color = Color.new(0, 100, 180, 255),
+      @text_color : Color = Theme.current.button_text,
+      @background_color : Color = Theme.current.button_background,
+      @border_color : Color = Theme.current.button_border,
       @padding : Float64 = 10.0,
       on_click : Proc(Nil)? = nil,
     )
@@ -85,9 +84,9 @@ module CrymbleUI
       shortcut : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      text_color : Color = Color.new(255, 255, 255, 255),
-      background_color : Color = Color.new(0, 120, 215, 255),
-      border_color : Color = Color.new(0, 100, 180, 255),
+      text_color : Color = Theme.current.button_text,
+      background_color : Color = Theme.current.button_background,
+      border_color : Color = Theme.current.button_border,
       padding : Float64 = 10.0,
       &block : -> Nil
     )
@@ -142,16 +141,16 @@ module CrymbleUI
       border_color = @border_color
 
       if @hovered || focus_highlighted?
-        bg_color = @background_color.highlight(HOVER_BRIGHTNESS)
-        border_color = @border_color.highlight(HOVER_BRIGHTNESS)
+        hover_brightness = Theme.current.brightness_hover
+        bg_color = @background_color.highlight(hover_brightness)
+        border_color = @border_color.highlight(hover_brightness)
       end
 
       # Calculate text position in widget-local coordinates
       text_size = measure_text(display_text, font_size)
-      # Horizontal: center based on measured text width
+      # Center both horizontally and vertically within bounds
       text_x = (bounds.width - text_size.width) / 2.0
-      # Vertical: padding from top (draw_text handles SFML offset compensation)
-      text_y = @padding
+      text_y = (bounds.height - font_size) / 2.0
       text_position = Vec2.new(text_x, text_y)
 
       # Create widget-local rect at (0,0)

@@ -1,5 +1,6 @@
 require "spec"
 require "../src/core/types"
+require "../src/core/theme"
 require "../src/core/widget"
 require "../src/core/app"
 require "../src/core/scheduler"
@@ -13,6 +14,7 @@ require "../src/testing/widget_tester"
 require "../src/testing/test_font"
 require "../src/testing/gui_test_helpers"
 require "../src/input/focus_manager"
+require "../src/widgets/virtual_matrix/adapter"
 
 # Include GUI test helpers for all specs
 include CrymbleUI::Testing::GUITestHelpers
@@ -29,6 +31,7 @@ CrymbleUI::Widget.focus_manager = CrymbleUI::FocusManager.new
 # Reset state before each test to ensure isolation
 Spec.before_each do
   CrymbleUI::FontSizing.reset_zoom
+  CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
   CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
 end
 
@@ -85,5 +88,72 @@ class TestApp < CrymbleUI::App
   # Allow tests to set root widget directly
   def root_widget=(widget : CrymbleUI::Widget)
     @root = widget
+  end
+end
+
+# Reusable test adapter with configurable merged regions.
+# Use add_merge to register bounding boxes, then pass to VirtualMatrix.new(adapter, ...).
+class MergeableTestAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
+
+  @row_count : Int32
+  @col_count : Int32
+
+  @merges = [] of Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+
+  def initialize(@row_count, @col_count)
+  end
+
+  def row_count : Int32
+    @row_count
+  end
+
+  def col_count : Int32
+    @col_count
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    CrymbleUI::Text.new("#{row},#{col}")
+  end
+
+  def add_merge(top_left : Tuple(Int32, Int32), bottom_right : Tuple(Int32, Int32))
+    @merges << {top_left, bottom_right}
+  end
+
+  def cell_get_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+    @merges.each do |tl, br|
+      if row >= tl[0] && row <= br[0] && col >= tl[1] && col <= br[1]
+        return {tl, br}
+      end
+    end
+    { {row, col}, {row, col} }
+  end
+end
+
+# Minimal visible cell for pixel-level testing.
+# Emits fill_rect so TestRenderBackend can see it (unlike Text which only emits DrawText).
+# Replaces VirtualMatrixCell in tests that need pixel scanning.
+class TestVisibleCell < CrymbleUI::Widget
+  include CrymbleUI::PrimitiveBuilder
+
+  def initialize(text : String = "", id : String? = nil)
+    super(id: id)
+  end
+
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    w = constraints.max_width.finite? ? constraints.max_width : 100.0
+    h = constraints.max_height.finite? ? constraints.max_height : 20.0
+    CrymbleUI::Size.new(w, h)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    size = measure(constraints)
+    @bounds = CrymbleUI::Rect.new(position, size)
+  end
+
+  def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    primitives do
+      fill_rect(CrymbleUI::Rect.new(0.0, 0.0, bounds.width, bounds.height), CrymbleUI::Color.new(45, 50, 55, 255))
+    end
   end
 end

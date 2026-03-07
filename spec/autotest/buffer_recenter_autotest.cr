@@ -1,4 +1,4 @@
-require "../src/crymble-ui"
+require "../../src/crymble-ui"
 
 # Simplified SFML visual test for buffer recenter garbling bug
 # Uses LARGE COLORED BOXES and pixel sampling to detect visual corruption

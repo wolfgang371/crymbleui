@@ -28,8 +28,8 @@ module CrymbleUI
     def initialize(
       @accept_types : Array(String),
       @on_drop_handler : Proc(DragData, Vec2, Nil)? = nil,
-      @background_color : Color = Color.new(240, 240, 240, 255),
-      @hover_color : Color = Color.new(180, 220, 255, 255),
+      @background_color : Color = Theme.current.dropzone_background,
+      @hover_color : Color = Theme.current.dropzone_hover,
       id : String? = nil
     )
       super(id: id)

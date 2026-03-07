@@ -1,5 +1,5 @@
 name: crymble-ui
-version: 0.2.0
+version: 0.3.0
 
 authors:
   - wolfgang371 <wolfgang371@bomel.de>
@@ -40,6 +40,8 @@ targets:
     main: examples/combo_box_demo.cr
   showcase_demo:
     main: examples/showcase_demo.cr
+  virtual_matrix_demo:
+    main: examples/virtual_matrix_demo.cr
   # Tutorials
   tutorial-01:
     main: tutorials/tutorial-01.cr
@@ -83,6 +85,10 @@ targets:
     main: tutorials/tutorial-20.cr
   tutorial-21:
     main: tutorials/tutorial-21.cr
+  tutorial-22:
+    main: tutorials/tutorial-22.cr
+  tutorial-23:
+    main: tutorials/tutorial-23.cr
 
 crystal: 0.36.1
 

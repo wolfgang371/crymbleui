@@ -1,0 +1,1896 @@
+require "../core/widget"
+require "../core/types"
+require "../core/layer"
+require "../core/layer_owner"
+require "../dsl/primitive_builder"
+require "./virtual_matrix/sticky_math"
+require "./virtual_matrix/blit_plan"
+require "./virtual_matrix/cursor_overlay"
+require "./virtual_matrix/ruler_widget"
+require "./virtual_matrix/sticky_reposition"
+require "./virtual_matrix/cursor"
+require "./virtual_matrix/event_handlers"
+require "./virtual_matrix/adapter"
+
+module CrymbleUI
+  # VirtualMatrix: A high-performance grid widget.
+  #
+  # Features:
+  # - Virtual rendering (only visible cells exist as widgets)
+  # - Adapter-based scroll_order for sticky behavior (headers are data cells styled via cell_paint)
+  # - Compound/merged cells
+  # - Cross-highlight cursor
+  #
+  # Architecture: Single content layer + ScrollView for scrollbars
+  # - Content layer with viewport_cache for efficient scrolling
+  # - ScrollView provides scrollbar chrome
+  # - Sticky behavior via adapter's get_scrollorder
+  #
+  # KEY DESIGN INVARIANT: layout is expensive, render is cheap.
+  # After initial layout, VirtualMatrix's size/position is constant. Scrolling and
+  # cursor movement only change WHICH cells are visible — they must NEVER trigger
+  # mark_needs_layout. Instead they should:
+  #   1. Update @scroll_offset (direct ivar write, NOT the layout_property setter)
+  #   2. Sync to ScrollView via set_scroll_offset_for_sync (NOT the setter)
+  #   3. Update layer.scroll_offset for viewport_cache compositing
+  #   4. Call update_visible_cells to refresh which cell widgets exist
+  #   5. Call mark_needs_render (NOT mark_needs_layout)
+  # See on_mouse_wheel for the correct pattern.
+  #
+  class VirtualMatrix < Widget
+    include LayerOwner
+    include PrimitiveBuilder
+
+    # Grid dimensions
+    getter rows : Int32
+    getter cols : Int32
+
+    # Optional adapter for data binding
+    getter adapter : Widgets::VirtualMatrix::MatrixAdapter?
+
+    # Push-based invalidation: pending state (flushed in pre_render_flush)
+    @pending_cell_invalidations : Set(Tuple(Int32, Int32)) = Set(Tuple(Int32, Int32)).new
+    @pending_invalidate_all : Bool = false
+
+    # Cell sizing (in frame_height multiples, like ImGui)
+    GRID_SPACING_BASE = 3.0  # Pixels between grid cells at zoom 1.0 (balances readability vs density)
+    GRID_SPACING      = 3    # Integer alias at zoom 1.0 (for spec backwards compat)
+    # Backward-compat aliases (canonical location: MatrixAdapter)
+    DEFAULT_COLUMN_WIDTH = Widgets::VirtualMatrix::MatrixAdapter::DEFAULT_COLUMN_WIDTH
+    DEFAULT_ROW_HEIGHT   = Widgets::VirtualMatrix::MatrixAdapter::DEFAULT_ROW_HEIGHT
+    OFFSCREEN_PARK       = -1000.0 # Parking position for invisible cells (far off-screen to avoid rendering)
+
+    # Interactive resize constants
+    RESIZE_TOLERANCE_BASE = 4.0  # pixels from border to trigger resize (at zoom 1.0)
+    MIN_COL_WIDTH    = 0.5  # minimum column width in frame_height units
+    MIN_ROW_HEIGHT   = 0.5  # minimum row height in frame_height units
+
+    private def resize_tolerance : Float64
+      RESIZE_TOLERANCE_BASE * FontSizing.zoom_factor
+    end
+
+    enum ResizeAxis
+      None
+      Col
+      Row
+    end
+
+    # Frame height for pixel conversion: one "frame height unit" = 20 physical pixels at zoom 1.0.
+    # All cell dimensions (col_width, row_height) are specified in frame_height multiples.
+    FRAME_HEIGHT_BASE = 20.0
+
+    # Viewport cache buffer (pixels beyond viewport kept pre-rendered for smooth scrolling)
+    CACHE_EXTENT = 100.0
+    # Cell creation buffer: cells are created when within this distance of the viewport.
+    # Must be >= CACHE_EXTENT so cells cover the entire viewport_cache buffer.
+    # = CACHE_EXTENT(100) + safety_margin(50) for sub-pixel rounding headroom.
+    CREATION_BUFFER = 150.0
+    # Cell destruction buffer: cells are destroyed when outside this distance.
+    # Larger than CREATION_BUFFER to provide hysteresis (avoids create/destroy thrashing
+    # when scrolling back and forth near the viewport edge).
+    DESTRUCTION_BUFFER = 200.0
+
+    # Z-index offsets for VirtualMatrix layers (relative to widget's base_z)
+    CONTENT_LAYER_Z  = 1  # Main cell content layer
+    CURSOR_OVERLAY_Z = 8  # Cursor highlight layer (above all ScrollView layers: SV uses +1..+5)
+
+    # Zoom tracking for change detection in perform_layout
+    @last_zoom_factor : Float64 = 1.0
+
+    private def frame_height : Float64
+      FRAME_HEIGHT_BASE * FontSizing.zoom_factor
+    end
+
+    private def grid_spacing : Int32
+      (GRID_SPACING_BASE * FontSizing.zoom_factor).round.to_i32
+    end
+
+    # Layers (reconciled to preserve layer state across DSL rebuilds)
+    @[Reconcile]
+    @content_layer : Layer?
+    @cursor_overlay_layer : Layer?
+    @cursor_overlay_widget : CursorOverlayWidget?
+
+    # Ruler widgets (rendered on sticky layers for column/row labels + resize handles)
+    getter col_ruler_widget : ColumnRulerWidget? = nil
+    getter row_ruler_widget : RowRulerWidget? = nil
+    getter corner_ruler_widget : CornerRulerWidget? = nil
+    getter corner_row_strip_widget : CornerRowStripWidget? = nil
+
+    # Ruler visibility (default on)
+    layout_property show_rulers : Bool = true
+
+    # ScrollView for scrollbar chrome (overlays content area)
+    @content_scroll_view : ScrollView?
+
+    # Resize state for ancestor notification handlers
+    @resize_start_content_bounds : Rect?
+
+    # Reconciliation properties
+    layout_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
+
+    # Track last synced scroll offset for bi-directional sync with ScrollView
+    # This allows detecting which side (VirtualMatrix or ScrollView) changed
+    # NOT reconciled: after rebuild the ScrollView is fresh (offset=0), so we need
+    # the push branch to fire and seed it with our reconciled scroll_offset.
+    @last_synced_scroll_offset : Vec2 = Vec2.zero
+    reconcile_property cursor_rc : Tuple(Int32, Int32) = {0, 0}
+    reconcile_property drag_index_rc : Tuple(Int32, Int32)? = nil
+    reconcile_property is_dragging : Bool = false
+
+    # Interactive column/row resize state
+    reconcile_property resize_axis : ResizeAxis = ResizeAxis::None
+    reconcile_property resize_index : Int32 = 0
+    reconcile_property resize_start_mouse : Float64 = 0.0
+    reconcile_property resize_start_size : Float64 = 0.0
+
+    # Cursor highlight intensity. Positive = additive/brighten (dark themes),
+    # negative = subtractive/darken (light themes). Magnitude = per-channel delta.
+    @cursor_highlight_delta : Int32 = Theme.current.brightness_cursor_delta
+
+    # Content layer background color (visible between cells)
+    @content_background_color : Color = Theme.current.grid_content_background
+
+    # Cursor flash state (managed via overlay layer with additive blend)
+    @cursor_flash_timer_id : Int32? = nil
+    @cursor_flash_on : Bool = true
+
+    # Cell management (sparse - only visible cells exist)
+    # NOT reconciled - cells are recreated fresh on rebuild to avoid bounds corruption
+    @active_cells : Hash(Tuple(Int32, Int32), Widget) = {} of Tuple(Int32, Int32) => Widget
+
+    # Cached visible indices (updated in perform_layout)
+    @visible_rows : Array(Int32) = [] of Int32
+    @visible_cols : Array(Int32) = [] of Int32
+
+    # Viewport StickyMath outputs (for reposition_sticky_cells)
+    @viewport_col_offset : Int32 = 0
+    @viewport_col_positions : Hash(Int32, Int32) = {} of Int32 => Int32
+    @viewport_col_shifting_index : Int32 = 0
+    @viewport_row_offset : Int32 = 0
+    @viewport_row_positions : Hash(Int32, Int32) = {} of Int32 => Int32
+    @viewport_row_shifting_index : Int32 = 0
+
+    # Visibility cache key to avoid redundant update_visible_cells work
+    # Simplified: just visible indices (no scroll_offset rounding)
+    @last_visible_key : Tuple(Array(Int32), Array(Int32))? = nil
+    @force_cell_update : Bool = false
+    @layer_widgets_need_sync : Bool = true
+
+    # Deferred scroll: update_visible_cells is expensive and should only run once per frame,
+    # not on every mouse event. sync_from_scroll_view sets this flag; the actual work
+    # happens in flush_pending_scroll_update, called from render_all_layers via Layer.
+    @pending_scroll_update : Bool = false
+    @pending_scroll_viewport_w : Float64 = 0.0
+    @pending_scroll_viewport_h : Float64 = 0.0
+
+    # Instrumentation: count update_visible_cells calls (for performance testing)
+    @@update_visible_cells_call_count : Int32 = 0
+
+    def self.update_visible_cells_call_count : Int32
+      @@update_visible_cells_call_count
+    end
+
+    def self.reset_update_visible_cells_counter
+      @@update_visible_cells_call_count = 0
+    end
+
+    # Cell sizes (frame_height multiples), one entry per row/col.
+    # Initialized from adapter.get_sizes, mutated by drag resize.
+    # Protected for copy_state_from reconciliation.
+    @row_heights : Array(Float64) = [] of Float64
+    @col_widths : Array(Float64) = [] of Float64
+
+    protected def col_widths : Array(Float64)
+      @col_widths
+    end
+
+    protected def row_heights : Array(Float64)
+      @row_heights
+    end
+
+    # === DIMENSION CACHES (27 variables, all cleared by invalidate_dimension_caches) ===
+    # Built once per resize (O(n)), reused per-scroll (O(1) or O(log n)).
+    # Adding a new cache variable? Add its nil-assignment to invalidate_dimension_caches too.
+
+    # -- Group 1: Derived totals --
+    @cached_total_width : Float64? = nil
+    @cached_total_height : Float64? = nil
+
+    # -- Group 2: Size & cumulative arrays (O(n) to build, O(log n) bsearch per scroll) --
+    @cached_col_sizes : Array(Int32)? = nil
+    @cached_row_sizes : Array(Int32)? = nil
+    @cached_col_cumulative : Array(Int32)? = nil     # prefix sums in scroll order
+    @cached_row_cumulative : Array(Int32)? = nil
+    @cached_col_physical_cum : Array(Int32)? = nil   # prefix sums in physical order
+    @cached_row_physical_cum : Array(Int32)? = nil
+    @cached_col_scroll_order : Array(Int32)? = nil
+    @cached_row_scroll_order : Array(Int32)? = nil
+    @cached_sticky_row_count : Int32? = nil
+    @cached_sticky_col_count : Int32? = nil
+
+    # -- Group 3: Viewport sticky results (keyed on {num_shifted, index_beyond}) --
+    @last_col_sticky_key : Tuple(Int32, Int32?)? = nil
+    @last_row_sticky_key : Tuple(Int32, Int32?)? = nil
+    @last_col_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), Array(Int32))? = nil
+    @last_row_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), Array(Int32))? = nil
+    @cached_col_sorted_shifted : Array(Int32)? = nil
+    @cached_row_sorted_shifted : Array(Int32)? = nil
+
+    # -- Group 4: Creation/destruction region caches --
+    @last_creation_col_key : Tuple(Int32, Int32?)? = nil
+    @last_creation_row_key : Tuple(Int32, Int32?)? = nil
+    @last_creation_col_result : Array(Int32)? = nil
+    @last_creation_row_result : Array(Int32)? = nil
+    @last_destruction_col_key : Tuple(Int32, Int32?)? = nil
+    @last_destruction_row_key : Tuple(Int32, Int32?)? = nil
+    @last_destruction_col_result : Array(Int32)? = nil
+    @last_destruction_row_result : Array(Int32)? = nil
+
+    # Scroll wheel sensitivity
+    SCROLL_SPEED_BASE = 30.0
+
+    private def scroll_speed : Float64
+      SCROLL_SPEED_BASE * FontSizing.zoom_factor
+    end
+
+    def initialize(@rows : Int32, @cols : Int32, id : String? = nil)
+      adapter = DefaultAdapter.new(@rows, @cols)
+      @adapter = adapter
+      @row_heights, @col_widths = adapter.get_sizes
+      super(id: id)
+      @focusable = true
+      bind_adapter_invalidation(adapter)
+    end
+
+    # Constructor with adapter for data binding
+    def initialize(
+      adapter : Widgets::VirtualMatrix::MatrixAdapter,
+      id : String? = nil,
+      cursor_highlight_delta : Int32 = Theme.current.brightness_cursor_delta,
+      content_background_color : Color = Theme.current.grid_content_background
+    )
+      @adapter = adapter
+      row_order, col_order = adapter.get_scrollorder
+      @rows = row_order.size
+      @cols = col_order.size
+      @row_heights, @col_widths = adapter.get_sizes
+      @cursor_highlight_delta = cursor_highlight_delta
+      @content_background_color = content_background_color
+      super(id: id)
+      @focusable = true
+      bind_adapter_invalidation(adapter)
+    end
+
+    # Override base class method (which always returns false)
+    def focusable? : Bool
+      true
+    end
+
+    # VirtualMatrix is a focus scope — FocusCycler won't Tab into cell widgets
+    def is_focus_scope? : Bool
+      true
+    end
+
+    # Proxy focus: the cell widget that currently has delegated focus
+    # VirtualMatrix stays focused (owns grid nav), but forwards events to this widget
+    @proxy_focused_widget : Widget? = nil
+
+    # === THEME CONFIGURATION ===
+
+    def cursor_highlight_delta : Int32
+      @cursor_highlight_delta
+    end
+
+    def cursor_highlight_delta=(value : Int32)
+      @cursor_highlight_delta = value
+    end
+
+    def content_background_color : Color
+      @content_background_color
+    end
+
+    def content_background_color=(value : Color)
+      @content_background_color = value
+    end
+
+    # === SIZE SETTERS/GETTERS ===
+
+    # Set custom row height (in frame_height multiples)
+    def row_height(row : Int32, height : Float64)
+      @row_heights[row] = height
+      @cached_total_height = nil  # Invalidate cache
+      invalidate_dimension_caches
+      @force_cell_update = true
+      mark_needs_layout
+    end
+
+    # Set custom column width (in frame_height multiples)
+    def col_width(col : Int32, width : Float64)
+      @col_widths[col] = width
+      @cached_total_width = nil  # Invalidate cache
+      invalidate_dimension_caches
+      @force_cell_update = true
+      mark_needs_layout
+    end
+
+    # Lightweight drag setters: update size without mark_needs_layout.
+    # Used during interactive resize drag for O(1) per-move instead of O(n) rebuild.
+    # Caller must follow with update_visible_cells + mark_needs_render.
+    protected def set_col_width_for_drag(col : Int32, width : Float64)
+      @col_widths[col] = width
+      @cached_total_width = nil
+      invalidate_dimension_caches
+      @force_cell_update = true
+    end
+
+    protected def set_row_height_for_drag(row : Int32, height : Float64)
+      @row_heights[row] = height
+      @cached_total_height = nil
+      invalidate_dimension_caches
+      @force_cell_update = true
+    end
+
+    # Get row height (in frame_height multiples)
+    def get_row_height(row : Int32) : Float64
+      @row_heights[row]
+    end
+
+    # Get column width (in frame_height multiples)
+    def get_col_width(col : Int32) : Float64
+      @col_widths[col]
+    end
+
+    # === STICKY HELPERS ===
+
+    # Derive sticky count from scroll_order tail.
+    # Elements at the end of scroll_order that form a contiguous set {0, 1, ..., N-1}
+    # are considered sticky (they scroll out last and render at fixed positions).
+    # This matches the original imgui design where scroll_order is the sole mechanism.
+    private def derive_sticky_count(scroll_order : Array(Int32)) : Int32
+      count = 0
+      sticky_set = Set(Int32).new
+      scroll_order.reverse_each do |idx|
+        test_set = sticky_set.dup
+        test_set.add(idx)
+        if test_set == (0...test_set.size).to_set
+          sticky_set = test_set
+          count = test_set.size
+        else
+          break
+        end
+      end
+      count
+    end
+
+    # Derive number of sticky rows from row scroll_order (cached to avoid repeated allocation)
+    def sticky_row_count : Int32
+      @cached_sticky_row_count ||= if adapter = @adapter
+        row_order, _ = adapter.get_scrollorder
+        scroll_order = @cached_row_scroll_order || row_order
+        derive_sticky_count(scroll_order)
+      else
+        0
+      end
+    end
+
+    # Derive number of sticky columns from col scroll_order (cached to avoid repeated allocation)
+    def sticky_col_count : Int32
+      @cached_sticky_col_count ||= if adapter = @adapter
+        _, col_order = adapter.get_scrollorder
+        scroll_order = @cached_col_scroll_order || col_order
+        derive_sticky_count(scroll_order)
+      else
+        0
+      end
+    end
+
+    # Calculate total pixel height of sticky rows
+    def sticky_row_height_pixels : Float64
+      count = sticky_row_count
+      return 0.0 if count <= 0
+      (0...count).sum { |r| row_height_pixels(r) }
+    end
+
+    # Calculate total pixel width of sticky columns
+    def sticky_col_width_pixels : Float64
+      count = sticky_col_count
+      return 0.0 if count <= 0
+      (0...count).sum { |c| col_width_pixels(c) }
+    end
+
+    # Ruler dimensions in pixels (0 if rulers hidden)
+    def ruler_row_height_pixels : Float64
+      @show_rulers ? (RULER_ROW_HEIGHT * frame_height) : 0.0
+    end
+
+    def ruler_col_width_pixels : Float64
+      @show_rulers ? (RULER_COL_WIDTH * frame_height) : 0.0
+    end
+
+    # === COMPOUND/MERGED CELLS ===
+
+    # Get bounding box for a cell
+    # Non-merged cells return themselves as the bounding box
+    def get_bounding_box(cell : Tuple(Int32, Int32)) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+      if adapter = @adapter
+        adapter.cell_get_bounding_box(cell[0], cell[1])
+      else
+        {cell, cell}
+      end
+    end
+
+    # Get top-left cell of merged region (static, ignores scroll state)
+    def get_top_left_cell(cell : Tuple(Int32, Int32)) : Tuple(Int32, Int32)
+      get_bounding_box(cell)[0]
+    end
+
+    # Check if cell is top-left of its merged region (should render widget)
+    def is_handle_cell?(cell : Tuple(Int32, Int32)) : Bool
+      cell == get_top_left_cell(cell)
+    end
+
+    # Dynamic handle cell: first VISIBLE cell of a merged region.
+    # When the top-left scrolls out, the first visible row/col takes over.
+    # Uses sorted_shifted arrays for O(log S) lookup instead of O(N) firsts array.
+    # Returns nil if merged region is entirely invisible.
+    def dynamic_handle_cell(cell : Tuple(Int32, Int32),
+                            sorted_shifted_rows : Array(Int32),
+                            sorted_shifted_cols : Array(Int32)) : Tuple(Int32, Int32)?
+      bounding = get_bounding_box(cell)
+      min_row = bounding[0][0]
+      min_col = bounding[0][1]
+
+      # First visible row/col at or after the bounding box start — O(log S)
+      handle_row = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_row, sorted_shifted_rows, @rows)
+      handle_col = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_col, sorted_shifted_cols, @cols)
+
+      # -1 means no visible element at or after this index
+      return nil if handle_row == -1 || handle_col == -1
+
+      # Only valid if the handle is within the bounding box
+      max_row = bounding[1][0]
+      max_col = bounding[1][1]
+      return nil if handle_row > max_row || handle_col > max_col
+
+      {handle_row, handle_col}
+    end
+
+    # Check if cell is the dynamic handle of its merged region
+    def is_dynamic_handle_cell?(cell : Tuple(Int32, Int32),
+                                sorted_shifted_rows : Array(Int32),
+                                sorted_shifted_cols : Array(Int32)) : Bool
+      cell == dynamic_handle_cell(cell, sorted_shifted_rows, sorted_shifted_cols)
+    end
+
+    # Get cell at a given row/col (returns top-left for merged cells)
+    def cell_at_point(cell : Tuple(Int32, Int32)) : Tuple(Int32, Int32)
+      get_top_left_cell(cell)
+    end
+
+    # Check if a cell is "cursored" (cursor is within its bounding box)
+    def is_cell_cursored?(cell : Tuple(Int32, Int32)) : Bool
+      bounding = get_bounding_box(cell)
+      row_range = bounding[0][0]..bounding[1][0]
+      col_range = bounding[0][1]..bounding[1][1]
+      row_range.includes?(@cursor_rc[0]) && col_range.includes?(@cursor_rc[1])
+    end
+
+    # === CELL ACCESSORS ===
+
+    def active_cell_count : Int32
+      @active_cells.size
+    end
+
+    # Expose active_cells for testing (read-only)
+    def active_cells : Hash(Tuple(Int32, Int32), Widget)
+      @active_cells
+    end
+
+    # Clear all widget_backend and background_backend for active cells.
+    # Called by layer_renderer's handle_viewport_cache_scroll on full recenter (no overlap).
+    # Without this, the fast-path (cached blit) would blit OLD content
+    # rendered at OLD buffer_origin positions after the buffer recenters.
+    def clear_all_widget_backends
+      @active_cells.each do |_key, widget|
+        widget.widget_backend = nil
+        widget.background_backend = nil
+      end
+    end
+
+    # Prepare for blit-shift recenter (overlap exists).
+    # DON'T touch widget_backend or background_backend — overlap cells keep valid caches
+    # and pass the fast path (cheap blit, no re-render). Background content (solid bg_color)
+    # is position-independent, so old background stays valid after buffer shift.
+    # Only force cell update so edge cells for the newly exposed strip get created.
+    def prepare_backends_for_blit_shift(layer : Layer)
+      @force_cell_update = true
+    end
+
+    def visible_cell_indices : NamedTuple(rows: Array(Int32), cols: Array(Int32))
+      {rows: @visible_rows, cols: @visible_cols}
+    end
+
+    # Calculate screen position (absolute) for a cell - useful for testing
+    # Returns the absolute position where a cell would appear on screen
+    def cell_screen_position(row : Int32, col : Int32) : Vec2
+      # Content area is the full bounds
+      content_x = absolute_bounds.x
+      content_y = absolute_bounds.y
+
+      # Calculate cell position within content (before scroll)
+      # Ruler offsets shift all cells right/down
+      cell_x = ruler_col_width_pixels + (0...col).sum { |c| col_width_pixels(c) }
+      cell_y = ruler_row_height_pixels + (0...row).sum { |r| row_height_pixels(r) }
+
+      # Apply scroll offset
+      screen_x = content_x + cell_x - @scroll_offset.x
+      screen_y = content_y + cell_y - @scroll_offset.y
+
+      Vec2.new(screen_x, screen_y)
+    end
+
+    # === ADAPTER METHODS ===
+
+    # Bind invalidation callbacks so adapter can push changes to this matrix
+    private def bind_adapter_invalidation(adapter)
+      adapter._bind_invalidation(
+        on_cell: ->(row : Int32, col : Int32) {
+          @pending_cell_invalidations << {row, col}
+          mark_needs_render
+          nil
+        },
+        on_all: ->{
+          @pending_invalidate_all = true
+          mark_needs_layout
+          nil
+        }
+      )
+    end
+
+    # === CURSOR AND NAVIGATION ===
+
+    # Check if row is highlighted (cursor is in this row)
+    def is_row_highlighted?(row : Int32) : Bool
+      @cursor_rc[0] == row
+    end
+
+    # Check if column is highlighted (cursor is in this column)
+    def is_col_highlighted?(col : Int32) : Bool
+      @cursor_rc[1] == col
+    end
+
+    # === LAYER ACCESSORS ===
+
+    def layer : Layer?
+      @content_layer
+    end
+
+    def content_layer : Layer?
+      @content_layer
+    end
+
+    def cursor_overlay_layer : Layer?
+      @cursor_overlay_layer
+    end
+
+    # Removed: sticky_col_header_layer, sticky_row_header_layer, sticky_corner_layer
+    # Headers are now data cells rendered via adapter cell_paint with styling
+
+    # Returns the ScrollView used for scrollbar chrome
+    def content_scroll_view : ScrollView?
+      @content_scroll_view
+    end
+
+    # === LAYOUT ===
+
+    def measure(constraints : BoxConstraints) : Size
+      # Fill available space
+      width = constraints.max_width.finite? ? constraints.max_width : 400.0
+      height = constraints.max_height.finite? ? constraints.max_height : 300.0
+      Size.new(width, height)
+    end
+
+    def perform_layout(constraints : BoxConstraints, position : Vec2)
+      handle_zoom_change
+      measured = measure(constraints)
+      @bounds = Rect.new(position, measured)
+
+      content_x = absolute_bounds.x
+      content_y = absolute_bounds.y
+      full_width = @bounds.width
+      full_height = @bounds.height
+      content_width, content_height = effective_content_size(full_width, full_height)
+      base_z = parent_layer_z_index
+
+      setup_content_layer(content_x, content_y, content_width, content_height, base_z)
+      setup_cursor_overlay_layer(content_x, content_y, content_width, content_height, base_z)
+      setup_scroll_view(full_width, full_height)
+      sync_scroll_offsets
+      @content_layer.not_nil!.scroll_offset = @scroll_offset
+
+      if @show_rulers
+        create_ruler_widgets(@content_scroll_view.not_nil!)
+      end
+
+      update_visible_cells(content_width, content_height)
+      clamp_cursor
+    end
+
+    # Detect zoom change → scale scroll offset proportionally and invalidate all caches.
+    private def handle_zoom_change
+      current_zoom = FontSizing.zoom_factor
+      return if @last_zoom_factor == current_zoom
+
+      zoom_ratio = current_zoom / @last_zoom_factor
+      @scroll_offset = Vec2.new(@scroll_offset.x * zoom_ratio, @scroll_offset.y * zoom_ratio)
+      @last_zoom_factor = current_zoom
+      invalidate_dimension_caches
+      @cached_total_width = nil
+      @cached_total_height = nil
+      @force_cell_update = true
+
+      # Destroy all active cells (sizes changed, need recreation at new dimensions)
+      @active_cells.each do |_key, widget|
+        if @proxy_focused_widget == widget
+          widget.deactivate_proxy_focus
+          @proxy_focused_widget = nil
+        end
+        widget.render_layer = nil
+        widget.parent = nil
+        @children.delete(widget)
+      end
+      @active_cells.clear
+      @layer_widgets_need_sync = true
+
+      # Clear layer backends to erase old pixels rendered at previous zoom's cell sizes
+      @content_layer.try(&.mark_needs_clear_and_render)
+      if sv = @content_scroll_view
+        sv.sticky_row_layer.try(&.mark_needs_clear_and_render)
+        sv.sticky_col_layer.try(&.mark_needs_clear_and_render)
+        sv.sticky_corner_layer.try(&.mark_needs_clear_and_render)
+      end
+      @content_layer.try { |l| l.buffer_origin = Vec2.zero }
+    end
+
+    # Create or update the content layer (viewport-cached, scrollable cell content).
+    private def setup_content_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+      content_bounds = Rect.new(x, y, w, h)
+      {% if flag?(:DEBUG_BLIT) %}
+        is_new = @content_layer.nil?
+      {% end %}
+      @content_layer ||= Layer.new(
+        "matrix_content_#{id}",
+        content_bounds,
+        z_index: base_z + CONTENT_LAYER_Z,
+        background_color: @content_background_color,
+        owner_widget: self
+      )
+      {% if flag?(:DEBUG_BLIT) %}
+        if is_new
+          File.open("/tmp/blit_trace.log", "a") do |f|
+            f.puts ">>> NEW CONTENT LAYER CREATED (scroll=#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) active_cells=#{@active_cells.size}"
+          end
+        end
+      {% end %}
+      @content_layer.not_nil!.bounds = content_bounds
+      @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
+      @content_layer.not_nil!.viewport_cache = true
+      @content_layer.not_nil!.cache_extent = CACHE_EXTENT
+      @content_layer.not_nil!.scroll_offset = @scroll_offset
+    end
+
+    # Create or update the cursor overlay layer (non-scrolling highlight bands).
+    private def setup_cursor_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+      overlay_bounds = Rect.new(x, y, w, h)
+      @cursor_overlay_layer ||= Layer.new(
+        "cursor_overlay_#{id}",
+        overlay_bounds,
+        z_index: base_z + CURSOR_OVERLAY_Z,
+        background_color: Color.new(0, 0, 0, 0),
+        owner_widget: self
+      )
+      @cursor_overlay_layer.not_nil!.bounds = overlay_bounds
+      @cursor_overlay_layer.not_nil!.z_index = base_z + CURSOR_OVERLAY_Z
+      @cursor_overlay_layer.not_nil!.blend_mode = @cursor_highlight_delta >= 0 ? BlendMode::Additive : BlendMode::Subtractive
+
+      # Create/register cursor overlay widget at layer-local origin (0,0)
+      overlay_layer = @cursor_overlay_layer.not_nil!
+      unless @cursor_overlay_widget
+        cow = CursorOverlayWidget.new(self)
+        cow.parent = self
+        overlay_constraints = BoxConstraints.tight(Size.new(overlay_bounds.width, overlay_bounds.height))
+        cow.layout(overlay_constraints, Vec2.zero)
+        overlay_layer.widgets << cow
+        @cursor_overlay_widget = cow
+      else
+        cow = @cursor_overlay_widget.not_nil!
+        overlay_constraints = BoxConstraints.tight(Size.new(overlay_bounds.width, overlay_bounds.height))
+        cow.layout(overlay_constraints, Vec2.zero)
+      end
+    end
+
+    # Create/configure ScrollView for scrollbar chrome and sticky layer support.
+    private def setup_scroll_view(full_width : Float64, full_height : Float64)
+      scroll_view = @content_scroll_view ||= ScrollView.new(ScrollDirection::Both, id: "#{id}_scrollview")
+      scroll_view.parent = self
+      @children << scroll_view unless @children.includes?(scroll_view)
+
+      scroll_view.on_scroll_changed do |new_offset|
+        sync_from_scroll_view(new_offset)
+      end
+
+      scroll_view.viewport_size = Size.new(full_width, full_height)
+      scroll_view.content_size = Size.new(total_content_width, total_content_height)
+
+      # Sticky layer config (include ruler space for ruler widgets)
+      scroll_view.sticky_rows = sticky_row_count
+      scroll_view.sticky_cols = sticky_col_count
+      scroll_view.sticky_row_height = sticky_row_height_pixels + ruler_row_height_pixels
+      scroll_view.sticky_col_width = sticky_col_width_pixels + ruler_col_width_pixels
+      scroll_view.sticky_background_color = @content_background_color
+
+      scroll_constraints = BoxConstraints.tight(Size.new(full_width, full_height))
+      scroll_view.layout(scroll_constraints, Vec2.new(0.0, 0.0))
+    end
+
+    # Bi-directional scroll offset sync between VirtualMatrix and ScrollView.
+    # Clamps to valid range, then pushes or pulls depending on which side changed.
+    private def sync_scroll_offsets
+      scroll_view = @content_scroll_view.not_nil!
+
+      # Clamp scroll offset to valid range after resize
+      clamped_x = @scroll_offset.x.clamp(0.0, max_content_scroll_x)
+      clamped_y = @scroll_offset.y.clamp(0.0, max_content_scroll_y)
+      if clamped_x != @scroll_offset.x || clamped_y != @scroll_offset.y
+        @scroll_offset = Vec2.new(clamped_x, clamped_y)
+      end
+
+      if @scroll_offset != @last_synced_scroll_offset
+        # VirtualMatrix changed → push to ScrollView
+        scroll_view.set_scroll_offset_for_sync(@scroll_offset)
+      elsif scroll_view.scroll_offset != @last_synced_scroll_offset
+        # ScrollView changed (scrollbar interaction) → pull from ScrollView
+        @scroll_offset = scroll_view.scroll_offset
+      end
+      @last_synced_scroll_offset = @scroll_offset
+    end
+
+    # Create ruler widgets on sticky layers (called from perform_layout)
+    private def create_ruler_widgets(scroll_view : ScrollView)
+      ruler_h = ruler_row_height_pixels
+      ruler_w = ruler_col_width_pixels
+      content_w = @content_layer.try(&.bounds.width) || bounds.width
+      content_h = @content_layer.try(&.bounds.height) || bounds.height
+
+      # Column ruler on sticky_row_layer
+      if row_layer = scroll_view.sticky_row_layer
+        unless @col_ruler_widget
+          crw = ColumnRulerWidget.new(self)
+          crw.parent = self
+          constraints = BoxConstraints.tight(Size.new(content_w, ruler_h))
+          crw.layout(constraints, Vec2.zero)
+          row_layer.widgets << crw
+          @col_ruler_widget = crw
+        else
+          crw = @col_ruler_widget.not_nil!
+          constraints = BoxConstraints.tight(Size.new(content_w, ruler_h))
+          crw.layout(constraints, Vec2.zero)
+        end
+      end
+
+      # Row ruler on sticky_col_layer
+      if col_layer = scroll_view.sticky_col_layer
+        unless @row_ruler_widget
+          rrw = RowRulerWidget.new(self)
+          rrw.parent = self
+          constraints = BoxConstraints.tight(Size.new(ruler_w, content_h))
+          rrw.layout(constraints, Vec2.zero)
+          col_layer.widgets << rrw
+          @row_ruler_widget = rrw
+        else
+          rrw = @row_ruler_widget.not_nil!
+          constraints = BoxConstraints.tight(Size.new(ruler_w, content_h))
+          rrw.layout(constraints, Vec2.zero)
+        end
+      end
+
+      # Corner ruler on sticky_corner_layer (covers ruler corner + sticky col headers)
+      if corner_layer = scroll_view.sticky_corner_layer
+        corner_w = ruler_w + sticky_col_width_pixels
+        unless @corner_ruler_widget
+          corner = CornerRulerWidget.new(self)
+          corner.parent = self
+          constraints = BoxConstraints.tight(Size.new(corner_w, ruler_h))
+          corner.layout(constraints, Vec2.zero)
+          corner_layer.widgets << corner
+          @corner_ruler_widget = corner
+        else
+          corner = @corner_ruler_widget.not_nil!
+          constraints = BoxConstraints.tight(Size.new(corner_w, ruler_h))
+          corner.layout(constraints, Vec2.zero)
+        end
+
+        # Corner row strip for sticky row labels (below corner ruler)
+        sticky_row_h = sticky_row_height_pixels
+        unless @corner_row_strip_widget
+          strip = CornerRowStripWidget.new(self)
+          strip.parent = self
+          constraints = BoxConstraints.tight(Size.new(ruler_w, sticky_row_h))
+          strip.layout(constraints, Vec2.new(0.0, ruler_h))
+          corner_layer.widgets << strip
+          @corner_row_strip_widget = strip
+        else
+          strip = @corner_row_strip_widget.not_nil!
+          constraints = BoxConstraints.tight(Size.new(ruler_w, sticky_row_h))
+          strip.layout(constraints, Vec2.new(0.0, ruler_h))
+        end
+      end
+    end
+
+    # Re-add ruler widgets to sticky layers after widget lists are cleared.
+    # Called from update_visible_cells and ensure_layer_widgets_synced.
+    private def add_ruler_widgets_to_layers
+      return unless @show_rulers
+      sv = @content_scroll_view
+      return unless sv
+
+      if crw = @col_ruler_widget
+        sv.sticky_row_layer.try do |l|
+          l.widgets << crw unless l.widgets.includes?(crw)
+        end
+      end
+      if rrw = @row_ruler_widget
+        sv.sticky_col_layer.try do |l|
+          l.widgets << rrw unless l.widgets.includes?(rrw)
+        end
+      end
+      if corner = @corner_ruler_widget
+        sv.sticky_corner_layer.try do |l|
+          l.widgets << corner unless l.widgets.includes?(corner)
+        end
+      end
+      if strip = @corner_row_strip_widget
+        sv.sticky_corner_layer.try do |l|
+          l.widgets << strip unless l.widgets.includes?(strip)
+        end
+      end
+    end
+
+    # Sync scroll offset from ScrollView when user scrolls via scrollbar
+    # Called via ScrollView.on_scroll_changed callback (doesn't trigger layout).
+    # DEFERRED: update_visible_cells is expensive (10-60ms for 1000×1000 grid).
+    # Multiple scroll events per frame would compound this cost. Instead, we just
+    # update scroll_offset (for correct compositing) and defer cell management
+    # to flush_pending_scroll_update, called once before rendering.
+    private def sync_from_scroll_view(new_offset : Vec2)
+      return if @scroll_offset == new_offset
+
+      @scroll_offset = new_offset
+      @last_synced_scroll_offset = new_offset
+
+      # Sync layer scroll offset (compositor uses this immediately)
+      if layer = @content_layer
+        layer.scroll_offset = new_offset
+        # Defer cell update to once-per-frame
+        if layer.bounds.width > 0 && layer.bounds.height > 0
+          @pending_scroll_update = true
+          @pending_scroll_viewport_w = layer.bounds.width
+          @pending_scroll_viewport_h = layer.bounds.height
+        end
+      end
+
+      mark_needs_render
+      mark_cursor_overlay_dirty
+    end
+
+    # === DEFERRED SCROLL FLUSH ===
+
+    # Called by layer_renderer before collecting widgets for rendering.
+    # Flushes deferred scroll/invalidation updates so cells are created/destroyed once per frame,
+    # not on every mouse event during scrollbar thumb drag.
+    def pre_render_flush
+      # Process push-based adapter invalidations first
+      if @pending_invalidate_all
+        @pending_invalidate_all = false
+        @pending_cell_invalidations.clear
+        flush_invalidate_all
+        # Recreate cells immediately (layout may not run if only mark_needs_render)
+        trigger_update_visible_cells
+      elsif !@pending_cell_invalidations.empty?
+        flush_cell_invalidations
+        # Recreate destroyed cells
+        trigger_update_visible_cells
+      end
+
+      if @pending_scroll_update
+        @pending_scroll_update = false
+        update_visible_cells(@pending_scroll_viewport_w, @pending_scroll_viewport_h)
+      end
+    end
+
+    # Full invalidation: re-read dimensions, destroy all active cells
+    private def flush_invalidate_all
+      if adapter = @adapter
+        row_order, col_order = adapter.get_scrollorder
+        @rows = row_order.size
+        @cols = col_order.size
+        @row_heights, @col_widths = adapter.get_sizes
+      end
+
+      # Invalidate dimension caches (row/col count may have changed)
+      invalidate_dimension_caches
+
+      # Destroy all active cells
+      @active_cells.each do |_key, widget|
+        if @proxy_focused_widget == widget
+          widget.deactivate_proxy_focus
+          @proxy_focused_widget = nil
+        end
+        widget.render_layer = nil
+        widget.parent = nil
+        @children.delete(widget)
+      end
+      @active_cells.clear
+
+      # Clear all layer backends to erase stale pixels from old configuration.
+      # Without this, old cell content persists where new cells don't cover the same positions.
+      @content_layer.try(&.mark_needs_clear_and_render)
+      @content_layer.try { |l| l.buffer_origin = Vec2.zero }
+      if sv = @content_scroll_view
+        sv.sticky_row_layer.try(&.mark_needs_clear_and_render)
+        sv.sticky_col_layer.try(&.mark_needs_clear_and_render)
+        sv.sticky_corner_layer.try(&.mark_needs_clear_and_render)
+      end
+      @layer_widgets_need_sync = true
+
+      @force_cell_update = true
+    end
+
+    # Cell-level invalidation: destroy only the invalidated cells from @active_cells
+    private def flush_cell_invalidations
+      cells = @pending_cell_invalidations.dup
+      @pending_cell_invalidations.clear
+
+      any_destroyed = false
+      cells.each do |key|
+        if widget = @active_cells.delete(key)
+          if @proxy_focused_widget == widget
+            widget.deactivate_proxy_focus
+            @proxy_focused_widget = nil
+          end
+          widget.render_layer = nil
+          widget.parent = nil
+          @children.delete(widget)
+          any_destroyed = true
+        end
+      end
+
+      @force_cell_update = true if any_destroyed
+    end
+
+    # Trigger update_visible_cells using current content layer dimensions
+    private def trigger_update_visible_cells
+      if layer = @content_layer
+        if layer.bounds.width > 0 && layer.bounds.height > 0
+          update_visible_cells(layer.bounds.width, layer.bounds.height)
+        end
+      end
+    end
+
+    # === CELL MANAGEMENT ===
+
+    private def update_visible_cells(viewport_width : Float64, viewport_height : Float64)
+      {% if flag?(:PERF_LOG) || flag?(:CURSOR_PERF) %}
+        _uvc_start = Time.monotonic
+      {% end %}
+      # === VIEWPORT STICKY MATH with incremental cache ===
+      # Strategy: cache cumulative array per-resize (O(n) once), bsearch per-scroll (O(log n)),
+      # full sticky() recompute only when num_shifted or index_beyond changes (boundary crossing).
+
+      # Build/use cached sizes arrays (avoid O(n) rebuild per scroll)
+      col_sizes = @cached_col_sizes ||= (0...@cols).map { |c| col_width_pixels(c).to_i32 }
+      row_sizes = @cached_row_sizes ||= (0...@rows).map { |r| row_height_pixels(r).to_i32 }
+
+      # Get scroll order from adapter (or default sequential), cache it
+      unless @cached_col_scroll_order && @cached_row_scroll_order
+        if adapter = @adapter
+          row_order, col_order = adapter.get_scrollorder
+          @cached_row_scroll_order ||= row_order
+          @cached_col_scroll_order ||= col_order
+        else
+          @cached_row_scroll_order ||= (0...@rows).to_a
+          @cached_col_scroll_order ||= (0...@cols).to_a
+        end
+      end
+      col_scroll_order = @cached_col_scroll_order.not_nil!
+      row_scroll_order = @cached_row_scroll_order.not_nil!
+
+      # Build/use cached cumulative arrays (O(n) once per resize, O(1) thereafter)
+      col_cumulative = @cached_col_cumulative ||= col_scroll_order.map { |el| col_sizes[el] }.accumulate { |x, y| x + y }
+      row_cumulative = @cached_row_cumulative ||= row_scroll_order.map { |el| row_sizes[el] }.accumulate { |x, y| x + y }
+      # Physical cumulative in natural order for filtering creation/destruction regions
+      col_physical_cum = @cached_col_physical_cum ||= col_sizes.accumulate(0) { |a, b| a + b }
+      row_physical_cum = @cached_row_physical_cum ||= row_sizes.accumulate(0) { |a, b| a + b }
+
+      # Use floor/ceil for correct visibility at sub-pixel offsets.
+      # Subtract ruler offsets: StickyMath and col_physical_cum work in column-space
+      # (no ruler), but scroll_offset is in content-space (includes ruler width/height).
+      ruler_x = ruler_col_width_pixels.to_i32
+      ruler_y = ruler_row_height_pixels.to_i32
+      min_x = {(@scroll_offset.x.floor.to_i32 - ruler_x), 0_i32}.max
+      max_x = {((@scroll_offset.x + viewport_width).ceil.to_i32 - ruler_x), 0_i32}.max
+      min_y = {(@scroll_offset.y.floor.to_i32 - ruler_y), 0_i32}.max
+      max_y = {((@scroll_offset.y + viewport_height).ceil.to_i32 - ruler_y), 0_i32}.max
+
+      # O(log n) bsearch to determine boundary key
+      col_num_shifted = col_cumulative.bsearch_index { |p| p >= min_x } || col_scroll_order.size
+      col_index_beyond = col_cumulative.bsearch_index { |p| p > max_x }
+      row_num_shifted = row_cumulative.bsearch_index { |p| p >= min_y } || row_scroll_order.size
+      row_index_beyond = row_cumulative.bsearch_index { |p| p > max_y }
+
+      col_sticky_key = {col_num_shifted, col_index_beyond}
+      row_sticky_key = {row_num_shifted, row_index_beyond}
+
+      # Full sticky_fast() only when boundary key changes (column/row shifts in or out)
+      if @last_col_sticky_key == col_sticky_key && (cached = @last_col_sticky_result)
+        col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted = cached
+      else
+        col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
+          col_sizes, col_scroll_order, col_num_shifted, col_cumulative, col_physical_cum,
+          min_x, max_x, sticky_col_count)
+        @last_col_sticky_key = col_sticky_key
+        @last_col_sticky_result = {col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted}
+        @cached_col_sorted_shifted = col_sorted_shifted
+      end
+
+      if @last_row_sticky_key == row_sticky_key && (cached = @last_row_sticky_result)
+        row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted = cached
+      else
+        row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
+          row_sizes, row_scroll_order, row_num_shifted, row_cumulative, row_physical_cum,
+          min_y, max_y, sticky_row_count)
+        @last_row_sticky_key = row_sticky_key
+        @last_row_sticky_result = {row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted}
+        @cached_row_sorted_shifted = row_sorted_shifted
+      end
+
+      # Public API: only report cols/rows physically within viewport (sticky always included)
+      @visible_cols = visible_cols.select { |c| c < sticky_col_count || (col_physical_cum[c] <= max_x && col_physical_cum[c + 1] > min_x) }
+      @visible_rows = visible_rows.select { |r| r < sticky_row_count || (row_physical_cum[r] <= max_y && row_physical_cum[r + 1] > min_y) }
+
+      # Store viewport StickyMath outputs for reposition_sticky_cells
+      @viewport_col_offset = col_offset
+      @viewport_col_positions = col_positions
+      @viewport_col_shifting_index = col_shifting_index
+      @viewport_row_offset = row_offset
+      @viewport_row_positions = row_positions
+      @viewport_row_shifting_index = row_shifting_index
+
+      # Early-exit check: use exact visible indices for correctness
+      # Placed BEFORE creation/destruction sticky calls to avoid O(n) work per scroll frame
+      visible_key = {visible_rows, visible_cols}
+      exact_indices_changed = @last_visible_key != visible_key || @force_cell_update
+
+      {% if flag?(:DEBUG_BLIT) %}
+        # Log early-exit decisions
+        File.open("/tmp/blit_trace.log", "a") do |f|
+          cell_11_exists = @active_cells.has_key?({1, 1})
+          f.puts "UVC: scroll=#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)} changed=#{exact_indices_changed} cell_11=#{cell_11_exists}"
+        end
+      {% end %}
+
+      # Early exit if visible indices haven't changed
+      unless exact_indices_changed
+        {% if flag?(:PERF_LOG) %}
+          _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+          if _uvc_elapsed > 0.1
+            File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC EARLY-EXIT: #{_uvc_elapsed.round(2)}ms scroll=#{@scroll_offset.x.round(0)},#{@scroll_offset.y.round(0)} active=#{@active_cells.size} sync=#{@layer_widgets_need_sync}" }
+          end
+        {% end %}
+        {% if flag?(:CURSOR_PERF) %}
+          _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(early-exit): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size}" }
+        {% end %}
+        # Update visual states for cursor/highlight (lightweight, O(active_cells))
+        update_cell_states
+        if sticky_cells_can_use_blit_plan?
+          compute_sticky_blit_plans
+        else
+          reposition_sticky_cells
+        end
+        # Bug 2 fix: Ensure layer.widgets is synced even on early-exit
+        # After rebuild, new layer has empty widgets but active_cells may exist
+        ensure_layer_widgets_synced
+        return
+      end
+
+      # Update cache AFTER check
+      @last_visible_key = visible_key
+      @force_cell_update = false
+
+      sticky_cols_val = sticky_col_count
+      sticky_rows_val = sticky_row_count
+
+      # Compute creation/destruction regions with hysteresis buffering.
+      # Creation region (CREATION_BUFFER) ⊂ Destruction region (DESTRUCTION_BUFFER),
+      # so cells are created before they become visible and only destroyed well past the edge.
+      creation_cols = compute_region_cached(CREATION_BUFFER, viewport_width, @scroll_offset.x,
+        col_cumulative, col_physical_cum, col_scroll_order, sticky_cols_val,
+        @last_creation_col_key, @last_creation_col_result) { |k, r| @last_creation_col_key = k; @last_creation_col_result = r }
+      creation_rows = compute_region_cached(CREATION_BUFFER, viewport_height, @scroll_offset.y,
+        row_cumulative, row_physical_cum, row_scroll_order, sticky_rows_val,
+        @last_creation_row_key, @last_creation_row_result) { |k, r| @last_creation_row_key = k; @last_creation_row_result = r }
+      destruction_cols = compute_region_cached(DESTRUCTION_BUFFER, viewport_width, @scroll_offset.x,
+        col_cumulative, col_physical_cum, col_scroll_order, sticky_cols_val,
+        @last_destruction_col_key, @last_destruction_col_result) { |k, r| @last_destruction_col_key = k; @last_destruction_col_result = r }
+      destruction_rows = compute_region_cached(DESTRUCTION_BUFFER, viewport_height, @scroll_offset.y,
+        row_cumulative, row_physical_cum, row_scroll_order, sticky_rows_val,
+        @last_destruction_row_key, @last_destruction_row_result) { |k, r| @last_destruction_row_key = k; @last_destruction_row_result = r }
+
+      # Only manage cell widgets if we have an adapter AND indices changed
+      # (Skip expensive cell creation/destruction if same cells are visible)
+      if @adapter
+        # Determine which cells should be created (using creation region)
+        creation_cells = Set(Tuple(Int32, Int32)).new
+        creation_rows.each do |row|
+          creation_cols.each do |col|
+            creation_cells << {row, col}
+          end
+        end
+
+        # Determine which cells should be kept alive (using destruction region)
+        keep_alive_cells = Set(Tuple(Int32, Int32)).new
+        destruction_rows.each do |row|
+          destruction_cols.each do |col|
+            keep_alive_cells << {row, col}
+          end
+        end
+
+        # Filter to only "handle" cells using dynamic handle (first visible cell of merged region).
+        # For merged cells: when the top-left scrolls out, the first visible cell takes over.
+        # This ensures compound cells remain visible as long as any part is in the viewport.
+        # For NON-merged cells: always use cell itself as handle (dynamic handle only applies
+        # to merged cells where the visible representative shifts as parts scroll out).
+        # Bug 2h: dynamic_handle_cell was returning nil for non-merged cells in the creation
+        # buffer but outside the viewport, preventing their creation → blank rows on cursor-up.
+        handle_cells = Set(Tuple(Int32, Int32)).new
+        sticky_rows_val = sticky_row_count
+        sticky_cols_val = sticky_col_count
+        creation_cells.each do |cell|
+          bounding = get_bounding_box(cell)
+          is_merged = bounding[0] != bounding[1]
+
+          if is_merged
+            # For sticky compound cells, always use the top-left as the permanent widget key.
+            # The dynamic handle mechanism (which shifts the key as rows scroll out) causes
+            # destroy+create cycles that produce visual snapping. Sticky cells don't need it
+            # because they aren't subject to viewport_cache buffer limits.
+            is_sticky = (bounding[0][0] < sticky_rows_val || bounding[0][1] < sticky_cols_val)
+            if is_sticky
+              topleft = bounding[0]
+              next if handle_cells.includes?(topleft)
+
+              min_row, min_col = bounding[0]
+              max_row, max_col = bounding[1]
+              rows_intersect = (min_row..max_row).any? { |r| creation_rows.includes?(r) }
+              cols_intersect = (min_col..max_col).any? { |c| creation_cols.includes?(c) }
+              handle_cells << topleft if rows_intersect && cols_intersect
+            else
+              # Content (non-sticky) merged cells: use dynamic handle
+              handle = dynamic_handle_cell(cell, row_sorted_shifted, col_sorted_shifted)
+              next unless handle  # Merged region entirely invisible
+              next if handle_cells.includes?(handle)  # Already added
+
+              min_row, min_col = bounding[0]
+              max_row, max_col = bounding[1]
+              rows_intersect = (min_row..max_row).any? { |r| creation_rows.includes?(r) }
+              cols_intersect = (min_col..max_col).any? { |c| creation_cols.includes?(c) }
+              handle_cells << handle if rows_intersect && cols_intersect
+            end
+          else
+            # Non-merged cell: cell is its own handle, always include
+            handle_cells << cell
+          end
+        end
+        keep_alive_handles = Set(Tuple(Int32, Int32)).new
+        keep_alive_cells.each do |cell|
+          bounding = get_bounding_box(cell)
+          if bounding[0] != bounding[1]
+            # Merged cell: sticky compounds use top-left, content compounds use dynamic handle
+            is_sticky = (bounding[0][0] < sticky_rows_val || bounding[0][1] < sticky_cols_val)
+            if is_sticky
+              keep_alive_handles << bounding[0]
+            elsif is_dynamic_handle_cell?(cell, row_sorted_shifted, col_sorted_shifted)
+              keep_alive_handles << cell
+            end
+          else
+            # Non-merged cell: always its own handle
+            keep_alive_handles << cell
+          end
+        end
+
+        # Destroy cells that are outside the destruction buffer (larger hysteresis region)
+        cells_to_remove = @active_cells.keys.reject { |key| keep_alive_handles.includes?(key) }
+        cells_destroyed = cells_to_remove.size > 0
+        {% if flag?(:DEBUG_BLIT) %}
+          # Log when cells are created or destroyed
+          new_cells_set = handle_cells.reject { |h| @active_cells.has_key?(h) }
+          if cells_to_remove.size > 0 || new_cells_set.size > 0
+            File.open("/tmp/blit_trace.log", "a") do |f|
+              f.puts "CELL_CHANGE: scroll=#{@scroll_offset}"
+              f.puts "  creating=#{new_cells_set.to_a.sort}" if new_cells_set.size > 0
+              f.puts "  destroying=#{cells_to_remove.to_a.sort}" if cells_to_remove.size > 0
+            end
+          end
+          # Log active cells at scroll=0
+          if @scroll_offset.x < 1.0
+            File.open("/tmp/blit_trace.log", "a") do |f|
+              f.puts "ACTIVE_CELLS_AT_0: #{@active_cells.keys.to_a.sort}"
+            end
+          end
+        {% end %}
+        cells_to_remove.each do |key|
+          if widget = @active_cells.delete(key)
+            # Clear proxy focus if the destroyed cell had it
+            if @proxy_focused_widget == widget
+              widget.deactivate_proxy_focus
+              @proxy_focused_widget = nil
+            end
+            widget.render_layer = nil
+            widget.parent = nil
+            @children.delete(widget)
+          end
+        end
+
+        compound_visible_sizes, compound_clipped_pos = compute_compound_visible_sizes(
+          handle_cells, visible_cols, visible_rows,
+          col_sizes, row_sizes,
+          col_offset, col_positions, col_shifting_index,
+          row_offset, row_positions, row_shifting_index,
+          row_sorted_shifted, col_sorted_shifted)
+
+        # Create cells that are newly visible and are handle cells
+        # Layout each cell inline when created (fixed content-space position)
+        cells_created = false
+        new_cells_count = 0
+        # Track newly created cells for targeted rendering
+        new_cells = [] of Widget
+        adapter = @adapter.not_nil!
+        handle_cells.each do |key|
+          next if @active_cells.has_key?(key)
+
+          row, col = key
+          # Normalize to canonical top-left, so adapters always receive
+          # the correct cell coordinates (not the dynamic handle).
+          canonical = get_top_left_cell(key)
+          cell = adapter.cell_paint(canonical[0], canonical[1])
+
+          cells_created = true
+          new_cells_count += 1
+          cell.needs_fresh_background = true  # Ensures clean background capture (no ghosting from destroyed cells)
+          cell.parent = self
+          @children << cell
+          @active_cells[key] = cell
+          new_cells << cell  # Track for targeted rendering
+
+          # Layout the NEW cell at its FIXED content-space position
+          # Bug 2 fix: Use absolute content coordinates, NOT scroll-relative creation_col_offset.
+          # For viewport_cache layers, cells have fixed positions; buffer_origin handles viewport shift.
+          # Ruler offset: cells must start AFTER the ruler strips so they align with
+          # the sticky layer boundaries (sticky_col_width = ruler_col_w + sticky_col_w_pixels).
+          x = ruler_col_width_pixels.to_i + col_physical_cum[col]
+          y = ruler_row_height_pixels.to_i + row_physical_cum[row]
+          bounding = get_bounding_box(key)
+
+          # Use visible compound size if available (WU3: partial scroll shrinking)
+          # Bug A fix: Content cells (non-sticky) use FIXED sizes in content space;
+          # only sticky cells need WU3 viewport-relative sizing.
+          is_content_cell = row >= sticky_row_count && col >= sticky_col_count
+          if !is_content_cell && (compound_size = compound_visible_sizes[key]?)
+            cell_width = compound_size[0]
+            cell_height = compound_size[1]
+            # Use clipped position for compound cells
+            if clipped = compound_clipped_pos[key]?
+              x = clipped[0].to_i32
+              y = clipped[1].to_i32
+            end
+          else
+            cell_width = calculate_merged_width(bounding, col_sizes)
+            cell_height = calculate_merged_height(bounding, row_sizes)
+          end
+          cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
+          cell.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
+          {% if flag?(:DEBUG_BLIT) %}
+            if key == {1, 1}
+              File.open("/tmp/blit_trace.log", "a") do |f|
+                f.puts "CELL_LAYOUT(1,1): x=#{x} y=#{y} col_offset=#{creation_col_offset} col_positions[1]=#{creation_col_positions[1]?} scroll=#{@scroll_offset}"
+              end
+            end
+          {% end %}
+        end
+
+        # Re-layout existing content cells during resize drag.
+        # set_col_width_for_drag / set_row_height_for_drag skip mark_needs_layout,
+        # so existing cells keep stale bounds. Update them here (O(active_cells)).
+        if resize_axis != ResizeAxis::None
+          sticky_rows_val = sticky_row_count
+          sticky_cols_val = sticky_col_count
+          @active_cells.each do |key, widget|
+            next if new_cells.includes?(widget) # Already laid out above
+            row, col = key
+            # Only content cells — sticky cells handled by reposition_sticky_cells
+            next unless row >= sticky_rows_val && col >= sticky_cols_val
+
+            bounding = get_bounding_box(key)
+
+            # Skip cells entirely unaffected (left of resized col / above resized row)
+            case resize_axis
+            when ResizeAxis::Col
+              next if bounding[1][1] < resize_index # max_col < resized col
+            when ResizeAxis::Row
+              next if bounding[1][0] < resize_index # max_row < resized row
+            end
+
+            x = ruler_col_width_pixels.to_i + col_physical_cum[col]
+            y = ruler_row_height_pixels.to_i + row_physical_cum[row]
+            cell_width = calculate_merged_width(bounding, col_sizes)
+            cell_height = calculate_merged_height(bounding, row_sizes)
+            cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
+            widget.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
+
+            # Only invalidate cells whose SIZE changed (spans the resized dimension).
+            # Moved-only cells keep valid widget_backend → fast-path blit at new position.
+            size_changed = case resize_axis
+                           when ResizeAxis::Col
+                             bounding[0][1] <= resize_index && resize_index <= bounding[1][1]
+                           when ResizeAxis::Row
+                             bounding[0][0] <= resize_index && resize_index <= bounding[1][0]
+                           else false
+                           end
+            if size_changed
+              widget.invalidate_primitive_cache
+              widget.needs_fresh_background = true
+            end
+          end
+          # Clear buffer (erases ghost pixels at old positions) and trigger full render.
+          # Most cells hit the fast path (blit cached widget_backend) — only size-changed
+          # cells do full re-render.
+          @content_layer.try(&.mark_needs_clear_and_render)
+        end
+
+        # Re-layout existing COMPOUND cells with updated visible sizes (WU3)
+        # Only sticky compound cells need re-layout because their visible portion changes with scroll.
+        # Content compound cells have FIXED sizes in content space; buffer_origin handles viewport shift.
+        if compound_visible_sizes.any?
+          sticky_rows_val = sticky_row_count
+          sticky_cols_val = sticky_col_count
+          @active_cells.each do |key, widget|
+            next unless compound_visible_sizes.has_key?(key)
+            next if new_cells.includes?(widget)  # Already laid out above
+
+            row, col = key
+            # Bug A fix: Content cells have fixed sizes — only re-layout sticky compound cells
+            next if row >= sticky_rows_val && col >= sticky_cols_val
+            # Use absolute content positions from pre-computed cumulative arrays
+            x = col_physical_cum[col]
+            y = row_physical_cum[row]
+
+            compound_size = compound_visible_sizes[key]
+            cell_width = compound_size[0]
+            cell_height = compound_size[1]
+            if clipped = compound_clipped_pos[key]?
+              x = clipped[0].to_i32
+              y = clipped[1].to_i32
+            end
+            cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
+            widget.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
+          end
+        end
+        # Update visual states for all cells
+        update_cell_states
+
+        # Reposition sticky cells to account for scroll offset
+        # Sticky layers are non-viewport_cache, so cells need screen-space positions
+        # During resize: force reposition path (blit plan uses cached textures with stale sizes)
+        if sticky_cells_can_use_blit_plan? && resize_axis == ResizeAxis::None
+          compute_sticky_blit_plans
+        else
+          reposition_sticky_cells
+        end
+
+        # Sync cell widgets to appropriate layers and mark new cells for render
+        if cells_created || cells_destroyed || @active_cells.any?
+          sync_cells_to_layers(new_cells)
+
+          if new_cells_count > 0
+            @@update_visible_cells_call_count += 1
+          end
+          if @proxy_focused_widget.nil? && focused?
+            update_proxy_focus
+          end
+        end
+      end
+      {% if flag?(:PERF_LOG) %}
+        _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+        if _uvc_elapsed > 0.1
+          File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC FULL: #{_uvc_elapsed.round(2)}ms scroll=#{@scroll_offset.x.round(0)},#{@scroll_offset.y.round(0)} active=#{@active_cells.size} new=#{new_cells_count || 0}" }
+        end
+      {% end %}
+      {% if flag?(:CURSOR_PERF) %}
+        _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+        File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(full): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size} new=#{new_cells_count || 0} destroyed=#{cells_to_remove.try(&.size) || 0}" }
+      {% end %}
+    end
+
+    # Repopulate all layer widget lists from @active_cells, assigning each cell
+    # to content/sticky layers by position, then optionally mark new_cells for render.
+    # When render_all is true (deferred sync), marks ALL cells for render.
+    private def sync_cells_to_layers(new_cells : Array(Widget)? = nil, render_all : Bool = false)
+      content_layer = @content_layer
+      return unless content_layer
+
+      sv = @content_scroll_view
+      sticky_row_layer = sv.try(&.sticky_row_layer)
+      sticky_col_layer = sv.try(&.sticky_col_layer)
+      sticky_corner_layer = sv.try(&.sticky_corner_layer)
+
+      content_layer.widgets.clear
+      sticky_row_layer.try(&.widgets.clear)
+      sticky_col_layer.try(&.widgets.clear)
+      sticky_corner_layer.try(&.widgets.clear)
+
+      sticky_rows = sticky_row_count
+      sticky_cols = sticky_col_count
+
+      @active_cells.each do |key, widget|
+        row, col = key
+        layer = get_cell_layer(row, col, sticky_rows, sticky_cols,
+                               content_layer, sticky_row_layer, sticky_col_layer, sticky_corner_layer)
+        layer.try do |l|
+          l.widgets << widget
+          widget.render_layer = l
+        end
+      end
+      add_ruler_widgets_to_layers
+      @layer_widgets_need_sync = false
+
+      # Mark cells for render: either new cells only (creation path) or all cells (deferred sync)
+      cells_to_render = render_all ? @active_cells.values : (new_cells || [] of Widget)
+      cells_to_render.each do |cell|
+        key = @active_cells.key_for?(cell)
+        next unless key
+        row, col = key
+        layer = get_cell_layer(row, col, sticky_rows, sticky_cols,
+                               content_layer, sticky_row_layer, sticky_col_layer, sticky_corner_layer)
+        layer.try(&.mark_needs_render(cell))
+      end
+
+      {% if flag?(:DEBUG_BLIT) %}
+        if @scroll_offset.x < 1.0
+          File.open("/tmp/blit_trace.log", "a") do |f|
+            content_count = content_layer.widgets.size
+            f.puts "FINAL_STATE: scroll=#{@scroll_offset} active=#{@active_cells.size} content_layer=#{content_count}"
+            if cell_1_1 = @active_cells[{1, 1}]?
+              f.puts "  CELL(1,1): bounds=#{cell_1_1.bounds} has_backend=#{!cell_1_1.widget_backend.nil?}"
+            end
+          end
+        end
+      {% end %}
+    end
+
+    # Bug 2 fix: Ensure layer.widgets matches @active_cells.
+    # Called on early-exit path when no cells created/destroyed but layer may be fresh.
+    private def ensure_layer_widgets_synced
+      return unless @layer_widgets_need_sync
+      return if @active_cells.empty?
+      sync_cells_to_layers(render_all: true)
+    end
+
+    # Determine which layer a cell should be assigned to based on sticky configuration
+    private def get_cell_layer(
+      row : Int32,
+      col : Int32,
+      sticky_rows : Int32,
+      sticky_cols : Int32,
+      content_layer : Layer?,
+      sticky_row_layer : Layer?,
+      sticky_col_layer : Layer?,
+      sticky_corner_layer : Layer?
+    ) : Layer?
+      is_sticky_row = row < sticky_rows
+      is_sticky_col = col < sticky_cols
+
+      if is_sticky_row && is_sticky_col
+        # Corner cell - fixed position
+        sticky_corner_layer || content_layer
+      elsif is_sticky_row
+        # Header row cell - scrolls X only
+        sticky_row_layer || content_layer
+      elsif is_sticky_col
+        # Header column cell - scrolls Y only
+        sticky_col_layer || content_layer
+      else
+        # Normal content cell - scrolls both X and Y
+        content_layer
+      end
+    end
+
+    # Update cell states. Cursor visuals are handled by the cursor overlay layer.
+    private def update_cell_states
+    end
+
+    # Variable size helpers (include grid spacing)
+    private def col_width_pixels(col : Int32) : Float64
+      grid_spacing + get_col_width(col) * frame_height
+    end
+
+    private def row_height_pixels(row : Int32) : Float64
+      grid_spacing + get_row_height(row) * frame_height
+    end
+
+    # Calculate total width for a merged cell region
+    # Compute visible indices in a buffered region around the scroll offset, with caching.
+    # The cache key is {num_shifted, index_beyond} from bsearch — only recomputes when
+    # a boundary element shifts in or out of the region.
+    # Yields (key, result) to store in caller-specific cache instance variables.
+    private def compute_region_cached(
+        buffer : Float64, viewport_size : Float64, scroll_pos : Float64,
+        cumulative : Array(Int32), physical_cum : Array(Int32),
+        scroll_order : Array(Int32), sticky_count : Int32,
+        last_key : Tuple(Int32, Int32?)?, last_result : Array(Int32)?,
+        & : Tuple(Int32, Int32?), Array(Int32) ->
+    ) : Array(Int32)
+      min_pos = (scroll_pos - buffer).floor.to_i32.clamp(0, Int32::MAX)
+      max_pos = (scroll_pos + viewport_size + buffer).ceil.to_i32
+
+      ns = cumulative.bsearch_index { |p| p >= min_pos } || scroll_order.size
+      ib = cumulative.bsearch_index { |p| p > max_pos }
+      key = {ns, ib}
+
+      if last_key == key && last_result
+        return last_result
+      end
+
+      result = Widgets::VirtualMatrix::StickyMath.visible_indices_in_range(
+        physical_cum, scroll_order, ns, min_pos, max_pos, sticky_count)
+      result = result.select { |i| i < sticky_count || (physical_cum[i] < max_pos && physical_cum[i + 1] > min_pos) }
+      yield key, result
+      result
+    end
+
+    private def calculate_merged_width(bounding : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32)), col_sizes : Array(Int32)) : Float64
+      min_col = bounding[0][1]
+      max_col = bounding[1][1]
+      (min_col..max_col).sum { |c| col_sizes[c]? || col_width_pixels(c).to_i32 }.to_f64
+    end
+
+    # Calculate total height for a merged cell region
+    private def calculate_merged_height(bounding : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32)), row_sizes : Array(Int32)) : Float64
+      min_row = bounding[0][0]
+      max_row = bounding[1][0]
+      (min_row..max_row).sum { |r| row_sizes[r]? || row_height_pixels(r).to_i32 }.to_f64
+    end
+
+    # === WU3: Compute visible compound sizes using viewport StickyMath ===
+    #
+    # Compound (merged) cells span multiple rows/columns. When partially scrolled
+    # off-screen, their visible size shrinks. This computes {width, height} for each
+    # compound cell by summing the pixel sizes of its constituent columns/rows that
+    # are currently visible, minus any clipping at the shifting edge.
+    #
+    # Returns: {compound_visible_sizes, compound_clipped_pos}
+    private def compute_compound_visible_sizes(
+        handle_cells : Set(Tuple(Int32, Int32)),
+        visible_cols : Array(Int32), visible_rows : Array(Int32),
+        col_sizes : Array(Int32), row_sizes : Array(Int32),
+        col_offset : Int32, col_positions : Hash(Int32, Int32), col_shifting_index : Int32,
+        row_offset : Int32, row_positions : Hash(Int32, Int32), row_shifting_index : Int32,
+        row_sorted_shifted : Array(Int32), col_sorted_shifted : Array(Int32)
+    ) : {Hash(Tuple(Int32, Int32), {Float64, Float64}), Hash(Tuple(Int32, Int32), {Float64, Float64})}
+      compound_visible_sizes = Hash(Tuple(Int32, Int32), {Float64, Float64}).new
+      compound_clipped_pos = Hash(Tuple(Int32, Int32), {Float64, Float64}).new
+
+      visible_col_set = visible_cols.to_set
+      visible_row_set = visible_rows.to_set
+
+      handle_cells.each do |handle_key|
+        bounding = get_bounding_box(handle_key)
+        next if bounding[0] == bounding[1]  # Skip non-merged
+
+        handle = dynamic_handle_cell(handle_key, row_sorted_shifted, col_sorted_shifted)
+        next unless handle
+
+        w = 0.0
+        h = 0.0
+
+        # Accumulate width from visible columns in bounding box
+        (bounding[0][1]..bounding[1][1]).each do |ci|
+          next unless visible_col_set.includes?(ci)
+
+          pos_x = (col_offset + (col_positions[ci]? || 0)).to_f64
+          pos_clipped_x = pos_x
+          if ci == col_shifting_index
+            pos_clipped_x = {@scroll_offset.x, pos_x}.max
+          end
+
+          w += col_sizes[ci].to_f64 + (pos_x - pos_clipped_x)
+
+          if ci == handle[1]
+            pos_clipped_y_for_handle = (row_offset + (row_positions[handle[0]]? || 0)).to_f64
+            if handle[0] == row_shifting_index
+              pos_clipped_y_for_handle = {@scroll_offset.y, pos_clipped_y_for_handle}.max
+            end
+            compound_clipped_pos[handle_key] = {pos_clipped_x, pos_clipped_y_for_handle}
+          end
+        end
+
+        # Accumulate height from visible rows in bounding box
+        (bounding[0][0]..bounding[1][0]).each do |ri|
+          next unless visible_row_set.includes?(ri)
+
+          pos_y = (row_offset + (row_positions[ri]? || 0)).to_f64
+          pos_clipped_y = pos_y
+          if ri == row_shifting_index
+            pos_clipped_y = {@scroll_offset.y, pos_y}.max
+          end
+
+          h += row_sizes[ri].to_f64 + (pos_y - pos_clipped_y)
+        end
+
+        compound_visible_sizes[handle_key] = {w, h} if w > 0 && h > 0
+      end
+
+      {compound_visible_sizes, compound_clipped_pos}
+    end
+
+    # Total content dimensions (cached for performance)
+    # Includes ruler offset since content cells are positioned at ruler_offset + col_cum
+    private def total_content_width : Float64
+      @cached_total_width ||= ruler_col_width_pixels + (0...@cols).sum { |c| col_width_pixels(c) }
+    end
+
+    private def total_content_height : Float64
+      @cached_total_height ||= ruler_row_height_pixels + (0...@rows).sum { |r| row_height_pixels(r) }
+    end
+
+    # Compute content dimensions excluding scrollbar space.
+    # Two-pass: one scrollbar appearing may trigger the other.
+    private def effective_content_size(full_width : Float64, full_height : Float64) : Tuple(Float64, Float64)
+      w = full_width
+      h = full_height
+      needs_vscroll = total_content_height > h
+      needs_hscroll = total_content_width > w
+      if needs_vscroll
+        w -= ScrollView::SCROLLBAR_WIDTH
+        needs_hscroll = total_content_width > w unless needs_hscroll
+      end
+      if needs_hscroll
+        h -= ScrollView::SCROLLBAR_WIDTH
+        needs_vscroll = total_content_height > h unless needs_vscroll
+      end
+      w -= ScrollView::SCROLLBAR_WIDTH if needs_vscroll && w == full_width
+      h -= ScrollView::SCROLLBAR_WIDTH if needs_hscroll && h == full_height
+      {w, h}
+    end
+
+    # Invalidate dimension caches (call when sizes change)
+    private def invalidate_dimension_caches
+      @cached_total_width = nil
+      @cached_total_height = nil
+      @cached_col_sizes = nil
+      @cached_row_sizes = nil
+      @cached_col_cumulative = nil
+      @cached_row_cumulative = nil
+      @cached_col_physical_cum = nil
+      @cached_row_physical_cum = nil
+      @cached_col_scroll_order = nil
+      @cached_row_scroll_order = nil
+      @last_col_sticky_key = nil
+      @last_row_sticky_key = nil
+      @last_col_sticky_result = nil
+      @last_row_sticky_result = nil
+      @cached_col_sorted_shifted = nil
+      @cached_row_sorted_shifted = nil
+      @last_creation_col_key = nil
+      @last_creation_row_key = nil
+      @last_creation_col_result = nil
+      @last_creation_row_result = nil
+      @last_destruction_col_key = nil
+      @last_destruction_row_key = nil
+      @last_destruction_col_result = nil
+      @last_destruction_row_result = nil
+      @cached_sticky_row_count = nil
+      @cached_sticky_col_count = nil
+      @last_visible_key = nil
+    end
+
+    private def max_content_scroll_y : Float64
+      viewport_height = @content_layer.try(&.bounds.height) || @bounds.height
+      (total_content_height - viewport_height).clamp(0.0, Float64::MAX)
+    end
+
+    private def max_content_scroll_x : Float64
+      viewport_width = @content_layer.try(&.bounds.width) || @bounds.width
+      (total_content_width - viewport_width).clamp(0.0, Float64::MAX)
+    end
+
+    # === LAYER OWNER NOTIFICATION HANDLERS ===
+
+    # Get z_index from parent layer (for proper z-ordering)
+    private def parent_layer_z_index : Int32
+      widget = self.parent
+      while widget
+        if widget.responds_to?(:layer)
+          if layer = widget.layer
+            return layer.z_index
+          end
+        end
+        widget = widget.parent
+      end
+      0
+    end
+
+    def on_ancestor_position_changed(delta : Vec2)
+      # Update content layer position
+      if l = @content_layer
+        l.bounds = Rect.new(
+          l.bounds.x + delta.x,
+          l.bounds.y + delta.y,
+          l.bounds.width,
+          l.bounds.height
+        )
+      end
+
+      # Propagate to ScrollView child (for scrollbar layer position)
+      @content_scroll_view.try(&.on_ancestor_position_changed(delta))
+    end
+
+    def on_ancestor_resize_start
+      # Capture original bounds for delta calculation
+      @resize_start_content_bounds = @content_layer.try(&.bounds.dup)
+
+      # Propagate to ScrollView child
+      @content_scroll_view.try(&.on_ancestor_resize_start)
+    end
+
+    def on_ancestor_resize_move(dw : Float64, dh : Float64)
+      # Update content layer
+      if orig = @resize_start_content_bounds
+        clamped_dw = dw < 0 ? dw : 0.0
+        clamped_dh = dh < 0 ? dh : 0.0
+        @content_layer.try do |l|
+          l.bounds = Rect.new(orig.x, orig.y, orig.width + clamped_dw, orig.height + clamped_dh)
+        end
+      end
+
+      # Propagate to ScrollView child
+      @content_scroll_view.try(&.on_ancestor_resize_move(dw, dh))
+    end
+
+    def on_ancestor_resize_end
+      @resize_start_content_bounds = nil
+
+      # Propagate to ScrollView child
+      @content_scroll_view.try(&.on_ancestor_resize_end)
+    end
+
+    def on_ancestor_z_index_changed(base_z : Int32)
+      @content_layer.try { |l| l.z_index = base_z + CONTENT_LAYER_Z }
+      @cursor_overlay_layer.try { |l| l.z_index = base_z + CURSOR_OVERLAY_Z }
+
+      # Propagate to ScrollView child (for scrollbar layer z-index)
+      @content_scroll_view.try(&.on_ancestor_z_index_changed(base_z + 2))
+
+      # Mark layer for re-render
+      @content_layer.try(&.mark_needs_layout)
+    end
+
+    # === RECONCILIATION ===
+
+    # Reconciliation: transfer state from the old widget instance to this new one.
+    #
+    # Preserved across rebuilds:
+    #   - @scroll_offset, @cursor_rc (via @[Reconcile] properties + clamping)
+    #   - @col_widths, @row_heights (user's drag-resize state, if grid dims match)
+    #   - @last_zoom_factor (prevents false zoom transitions)
+    #   - Layer ownership (content_layer.owner_widget → self)
+    #   - Adapter invalidation callbacks (re-bound to new instance)
+    #
+    # Invalidated on rebuild:
+    #   - All dimension caches (sizes, cumulative arrays, sticky results)
+    #   - Active cells (force_cell_update triggers fresh creation)
+    #   - Content layer buffer (cleared if grid dimensions changed)
+    def copy_state_from(old_widget : Widget)
+      auto_copy_reconcile_properties(old_widget)
+      super
+
+      if old = old_widget.as?(VirtualMatrix)
+        # Fix: Update owner_widget on reconciled content_layer.
+        # Without this, Layer.active_layers can't find the layer after rebuild
+        # (in_tree? walks from owner_widget up to root — stale owner = not found),
+        # so zoom invalidation skips it → stale backend → corruption.
+        @content_layer.try { |l| l.owner_widget = self }
+
+        # Fix: Preserve zoom tracking so perform_layout doesn't see false 1.0→1.0
+        # transition (new instance defaults @last_zoom_factor = 1.0)
+        @last_zoom_factor = old.@last_zoom_factor
+
+        # Preserve col/row size arrays if grid dimensions match (drag resize survives rebuild).
+        # If dimensions changed (adapter reconfigured), keep the fresh sizes from get_sizes.
+        if old.rows == @rows && old.cols == @cols
+          @col_widths = old.col_widths
+          @row_heights = old.row_heights
+        else
+          # Grid dimensions changed — clear content layer to erase stale pixels from old layout.
+          # Without this, the reconciled buffer retains old cell content (e.g. header columns)
+          # that "shines through" where new cells don't cover the same positions.
+          @content_layer.try(&.mark_needs_clear_and_render)
+          @content_layer.try { |l| l.buffer_origin = Vec2.zero }
+        end
+        @cached_total_width = nil
+        @cached_total_height = nil
+        invalidate_dimension_caches
+        @force_cell_update = true
+
+        # Clamp cursor to new matrix size if needed
+        row = @cursor_rc[0].clamp(0, {@rows - 1, 0}.max)
+        col = @cursor_rc[1].clamp(0, {@cols - 1, 0}.max)
+        @cursor_rc = {row, col}
+
+        # Clamp scroll offset to new grid bounds (e.g. after switching to smaller adapter)
+        @scroll_offset = Vec2.new(
+          @scroll_offset.x.clamp(0.0, max_content_scroll_x),
+          @scroll_offset.y.clamp(0.0, max_content_scroll_y)
+        )
+
+        # Rebind adapter callbacks to this (new) widget instance
+        if adapter = @adapter
+          bind_adapter_invalidation(adapter)
+        end
+      end
+    end
+
+    # Default adapter for the (rows, cols) constructor.
+    # Returns Text cells with "row,col" content.
+    private class DefaultAdapter
+      include Widgets::VirtualMatrix::HeaderlessMatrixAdapter
+
+      def initialize(@rows : Int32, @cols : Int32)
+      end
+
+      def row_count : Int32
+        @rows
+      end
+
+      def col_count : Int32
+        @cols
+      end
+
+      def cell_paint(row : Int32, col : Int32) : Widget
+        Text.new("#{row},#{col}")
+      end
+    end
+
+  end
+end

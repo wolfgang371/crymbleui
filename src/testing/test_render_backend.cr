@@ -109,6 +109,38 @@ module CrymbleUI
         pixels
       end
 
+      # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)
+      # Used by cache validation framework for pixel comparison
+      def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
+        result = Array(UInt32).new(w * h, 0_u32)
+        h.times do |dy|
+          w.times do |dx|
+            px = x + dx
+            py = y + dy
+            if color = get_pixel(px, py)
+              result[dy * w + dx] = (color.r.to_u32 << 24) | (color.g.to_u32 << 16) | (color.b.to_u32 << 8) | color.a.to_u32
+            end
+          end
+        end
+        result
+      end
+
+      # Save buffer to PPM image file (no dependencies required)
+      def save_ppm(path : String)
+        File.open(path, "w") do |f|
+          f.puts "P3"
+          f.puts "#{@width} #{@height}"
+          f.puts "255"
+          @height.times do |y|
+            @width.times do |x|
+              px = @pixels[y * @width + x]
+              f.print "#{px.r} #{px.g} #{px.b} "
+            end
+            f.puts
+          end
+        end
+      end
+
       # Set pixels in rectangular region (for background restoration)
       # Expects array in row-major order (top-to-bottom, left-to-right)
       def set_pixels(x : Int32, y : Int32, width : Int32, height : Int32, pixels : Array(Color))
@@ -407,7 +439,7 @@ module CrymbleUI
       # - COPY mode (use_alpha_blend=false): Replace pixels even if transparent (widget restoration)
       # clip_width/clip_height specify the visible portion to blit (defaults to full buffer)
       # opacity: Layer opacity multiplier (0.0-1.0), applied to source alpha during blending
-      def blit_to(target : TestRenderBackend, offset_x : Int32, offset_y : Int32, clip_width : Int32 = @width, clip_height : Int32 = @height, use_alpha_blend : Bool = true, opacity : Float64 = 1.0)
+      def blit_to(target : TestRenderBackend, offset_x : Int32, offset_y : Int32, clip_width : Int32 = @width, clip_height : Int32 = @height, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
         clip_height.times do |src_y|
           clip_width.times do |src_x|
             src_color = get_pixel(src_x, src_y)
@@ -417,16 +449,37 @@ module CrymbleUI
             target_y = src_y + offset_y
 
             if use_alpha_blend
-              # BLEND mode: Alpha blending (matches SFML's default for compositor)
               # Apply layer opacity multiplier to source alpha
               effective_alpha = (src_color.a / 255.0) * opacity
               next if effective_alpha == 0.0  # Skip fully transparent
 
-              if effective_alpha >= 1.0
+              if blend_mode == BlendMode::Additive
+                # ADDITIVE: result = src * alpha + dst (non-damping, for glow/highlight)
+                if bg = target.get_pixel(target_x, target_y)
+                  blended = Color.new(
+                    (bg.r + src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.g + src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.b + src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    255_u8
+                  )
+                  target.set_pixel(target_x, target_y, blended)
+                end
+              elsif blend_mode == BlendMode::Subtractive
+                # SUBTRACTIVE: result = dst - src * alpha (for darkening highlight on light bg)
+                if bg = target.get_pixel(target_x, target_y)
+                  blended = Color.new(
+                    (bg.r - src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.g - src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.b - src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    255_u8
+                  )
+                  target.set_pixel(target_x, target_y, blended)
+                end
+              elsif effective_alpha >= 1.0
                 # Fully opaque after opacity, just copy
                 target.set_pixel(target_x, target_y, src_color)
               else
-                # Partial transparency, blend with existing pixel
+                # ALPHA BLEND: result = src * alpha + dst * (1 - alpha)
                 if bg = target.get_pixel(target_x, target_y)
                   blended = Color.new(
                     ((src_color.r * effective_alpha + bg.r * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
@@ -467,7 +520,7 @@ module CrymbleUI
       # Blit rectangular region from this backend to target with alpha blending
       # Copies pixels from (src_x, src_y, width, height) to target at (dest_x, dest_y)
       # Supports alpha blending and opacity (for viewport_cache layer compositing)
-      def blit_region_to(target : TestRenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32, use_alpha_blend : Bool = true, opacity : Float64 = 1.0)
+      def blit_region_to(target : TestRenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
         height.times do |dy|
           width.times do |dx|
             src_color = get_pixel(src_x + dx, src_y + dy)
@@ -477,13 +530,35 @@ module CrymbleUI
             target_y = dest_y + dy
 
             if use_alpha_blend
-              # BLEND mode: Alpha blending (matches SFML's default for compositor)
               effective_alpha = (src_color.a / 255.0) * opacity
               next if effective_alpha == 0.0  # Skip fully transparent
 
-              if effective_alpha >= 1.0
+              if blend_mode == BlendMode::Additive
+                # ADDITIVE: result = src * alpha + dst (non-damping)
+                if bg = target.get_pixel(target_x, target_y)
+                  blended = Color.new(
+                    (bg.r + src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.g + src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.b + src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    255_u8
+                  )
+                  target.set_pixel(target_x, target_y, blended)
+                end
+              elsif blend_mode == BlendMode::Subtractive
+                # SUBTRACTIVE: result = dst - src * alpha (for darkening highlight on light bg)
+                if bg = target.get_pixel(target_x, target_y)
+                  blended = Color.new(
+                    (bg.r - src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.g - src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    (bg.b - src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                    255_u8
+                  )
+                  target.set_pixel(target_x, target_y, blended)
+                end
+              elsif effective_alpha >= 1.0
                 target.set_pixel(target_x, target_y, src_color)
               else
+                # ALPHA BLEND: result = src * alpha + dst * (1 - alpha)
                 if bg = target.get_pixel(target_x, target_y)
                   blended = Color.new(
                     ((src_color.r * effective_alpha + bg.r * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,

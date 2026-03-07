@@ -1,4 +1,4 @@
-require "../src/crymble-ui"
+require "../../src/crymble-ui"
 
 # Automated SFML visual test for ScrollView-in-Panel bugs
 # Uses ACTUAL SCREEN PIXEL SAMPLING (from RenderWindow) to detect visual bugs

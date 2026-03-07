@@ -490,7 +490,7 @@ layer.bounds = Rect.new(
 **Solution:** Overlay layer with opacity:
 - Drop zone background stays static (no cache invalidation)
 - `HighlightWidget` renders on separate layer at 40% opacity
-- `layer.opacity` applied during compositing (sfml_renderer line 130)
+- `layer.opacity` applied during compositing (`sfml_renderer.cr` lines 223-226 for standard layers, lines 333-334 for viewport-cache layers)
 - Result: O(1) visual feedback, no widget cache touched
 
 ### DSL Usage
@@ -910,23 +910,21 @@ Panel background color changes: gray → blue
 Result: Button shows gray background, rest of panel shows blue
 ```
 
-**Solution: Invalidate children's backgrounds when parent changes**
+**Solution: Chrome/content split makes cascade unnecessary**
 
 ```crystal
 class Widget
   def mark_needs_render
-    @state = WidgetState::NeedsRender
-    layer.mark_needs_render(self) if layer
+    # Don't downgrade from NeedsLayout to NeedsRender
+    @state = WidgetState::NeedsRender if @state == WidgetState::Clean
 
-    # Invalidate children's backgrounds (O(children) cascade)
-    invalidate_children_backgrounds
-  end
+    # Chrome/content split eliminates need for invalidate_children_backgrounds!
+    # Chrome and content have non-overlapping bounds, so chrome re-render
+    # cannot overwrite content. Content uses selective rendering (dirty widgets only).
+    # This achieves O(1) performance instead of O(children) cascade.
 
-  private def invalidate_children_backgrounds
-    @children.each do |child|
-      child.background_backend = nil  # Force re-capture
-      child.invalidate_children_backgrounds  # Recursive
-    end
+    # Propagate to containing layer (replaces parent propagation for rendering)
+    propagate_to_layer
   end
 end
 ```
@@ -935,20 +933,19 @@ end
 ```
 Common case (90-95%): Leaf widget changes (button hover, text update)
   → Only that widget marked dirty
-  → No children to invalidate
   → O(1) selective rendering ✓
 
 Uncommon case (5-10%): Parent changes (panel background color)
-  → Parent + all descendants marked dirty
-  → O(children) cascade
-  → Acceptable because rare! ✓
+  → Parent marked dirty; chrome/content split means children are NOT
+     invalidated (their non-overlapping bounds are unaffected)
+  → O(1) — no cascade needed ✓
 
 Rare case (<1%): Layout changes (panel resize)
   → Full re-layout + re-render
   → O(n) - expected and acceptable ✓
 ```
 
-**Key insight**: The O(children) cascade when parent changes is CORRECT behavior, not a performance bug. The architecture optimizes for the common case (leaf changes).
+**Key insight**: The chrome/content split architecture means `mark_needs_render` never needs to cascade to children. Each widget's `background_backend` captures only the layer region behind it (not the widget itself), and because siblings/chrome cannot overlap content, a parent re-render does not corrupt children's cached backgrounds. This keeps all selective-render paths at O(1).
 
 ### Rendering Invariants (Enforced with Assertions)
 
@@ -1670,12 +1667,115 @@ Widget State Machine:
 - Background color architecture prevents selective render bugs
 - Constraint caching = O(path) layout for single dirty widget
 
-## TODO: Document Window.overlays System
+## Proxy Focus
 
-The new overlay system (Window.overlays) for persistent popups/tooltips/modals
-is not yet documented. Key points to document:
-- Window.overlays array (separate from children)
-- add_overlay/remove_overlay methods
-- Auto-migration during reconciliation
-- Use case: popup menus that persist across DSL rebuilds
+Proxy focus is the mechanism by which a container widget (currently VirtualMatrix) delegates keyboard events and focus visuals to a child widget without transferring real FocusManager focus. The container retains focus ownership for grid-level navigation while child widgets (TextInput, Button, etc.) behave as if focused.
+
+### Pattern
+
+```
+VirtualMatrix (real focus, owns grid nav)
+  └── @proxy_focused_widget → TextInput cell
+        @proxy_focused = true
+        effectively_focused? = true → renders cursor, handles text
+```
+
+VirtualMatrix manages `@proxy_focused_widget`. When the cursor moves to a new cell, it calls `deactivate_proxy_focus` on the old cell and `activate_proxy_focus` on the new one (if the cell is `focusable?`).
+
+### Widget Contract
+
+| Method | Purpose |
+|--------|---------|
+| `focusable?` | Container checks this to decide if a cell can receive proxy focus |
+| `activate_proxy_focus` | Called on cell when it gains proxy focus (setup: start cursor blink, etc.) |
+| `deactivate_proxy_focus` | Called on cell when it loses proxy focus (teardown) |
+| `effectively_focused?` | Returns true if real-focused OR proxy-focused — use for render decisions |
+| `wants_arrow_keys?` | If true, container forwards arrow keys to cell instead of grid-navigating |
+| `is_focus_scope?` | Container returns true so FocusCycler won't Tab into individual cells |
+
+### Event Forwarding
+
+VirtualMatrix's `on_key_down` dispatches events in two phases:
+
+1. **Proxy forwarding** (if `@proxy_focused_widget` exists):
+   - Arrow keys → forwarded only if `wants_arrow_keys?` (TextInput FullEdit mode)
+   - Tab → never forwarded (falls through to FocusManager)
+   - Everything else (Enter, Escape, Backspace, Delete, etc.) → forwarded to cell
+
+2. **Grid navigation** (runs if proxy didn't consume the event):
+   - Arrow keys → `move_cursor` + `snap_to_cursor`
+   - Tab → returns false (FocusManager handles it)
+
+Text input (`on_text_input`) is always forwarded to the proxy widget if one exists.
+
+### Example: TextInput in VirtualMatrix
+
+TextInput overrides the proxy focus methods:
+- `activate_proxy_focus`: sets `@proxy_focused = true`, starts cursor blink timer
+- `deactivate_proxy_focus`: sets `@proxy_focused = false`, stops cursor blink
+- `wants_arrow_keys?`: returns true in FullEdit mode (after Enter), false in QuickEntry mode
+
+In QuickEntry mode (default), arrow keys move the VirtualMatrix cursor between cells. In FullEdit mode (after pressing Enter), arrows move the text cursor within the TextInput.
+
+## Window.overlays System
+
+Overlays are widgets (typically `Popup` instances) managed by `Window` separately from
+the DSL child tree. They are used for popup menus, tooltips, and modals that must
+persist across DSL rebuilds.
+
+### Why a Separate List?
+
+DSL-style apps recreate the entire widget tree on every `build()` call. A popup opened
+in response to a click would be destroyed on the next rebuild. Overlays solve this:
+they live outside the DSL tree, so reconciliation cannot touch them.
+
+### API
+
+```crystal
+# Add a popup or modal that persists across rebuilds
+window.add_overlay(popup)   # Sets popup.parent = window, calls mark_needs_layout
+
+# Remove it when dismissed
+window.remove_overlay(popup)  # Clears popup.parent, calls mark_needs_layout
+```
+
+Both methods are defined in `src/widgets/window.cr`.
+
+### Auto-Migration During Reconciliation
+
+`Window.copy_state_from` migrates overlays from the old Window instance to the new one:
+
+```crystal
+def copy_state_from(old : Widget)
+  super
+  return unless old.is_a?(Window)
+  old_window = old.as(Window)
+  return if old_window.same?(self)
+
+  old_window.overlays.each do |overlay|
+    overlay.parent = self
+    @overlays << overlay
+  end
+  old_window.overlays.clear
+end
+```
+
+This ensures that an open popup is not lost when the DSL app rebuilds.
+
+### Hit Testing and Click-Outside Behavior
+
+`Window.hit_test` checks overlays first (before DSL children), sorted by `z_index`
+descending, so the topmost overlay always receives clicks first.
+
+`Window.notify_overlays_of_click(point)` is called by `App` on every `mouse_down`
+event. Any `Popup` overlay whose bounds do not contain the click receives
+`on_click_outside`, which is the standard mechanism for closing popups on
+outside-click.
+
+### Layout
+
+Overlays are laid out by `Window.perform_layout` after all DSL children. They
+position themselves (their `bounds.position` is used as the layout origin), so the
+caller is responsible for placing the overlay at the correct screen position before
+adding it.
 

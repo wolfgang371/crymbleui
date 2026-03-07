@@ -41,7 +41,9 @@ module CrymbleUI
             return unless font = @default_font
 
             sf_text = SF::Text.new(text, font, size.round.to_u32)
-            sf_text.position = SF.vector2f(position.x, position.y)
+            # Round to integers to avoid GPU bilinear interpolation blur on glyph atlas
+            # (see commit 20a683b — fractional coords cause washed-out text)
+            sf_text.position = SF.vector2f(position.x.round.to_f32, position.y.round.to_f32)
             sf_text.fill_color = to_sf_color(color)
 
             @render_target.draw(sf_text)

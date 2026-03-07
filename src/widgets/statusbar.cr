@@ -124,9 +124,9 @@ module CrymbleUI
             @text : String = "Ready",
             id : String? = nil,
             font_scale : Int32 = -1,
-            @text_color : Color = Color.new(50, 50, 50, 255),
-            @background_color : Color = Color.new(240, 240, 240, 255),
-            @border_color : Color = Color.new(180, 180, 180, 255),
+            @text_color : Color = Theme.current.statusbar_text,
+            @background_color : Color = Theme.current.statusbar_background,
+            @border_color : Color = Theme.current.statusbar_border,
             @height : Float64 = 24.0,
             @padding : Float64 = 5.0
         )

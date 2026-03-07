@@ -390,8 +390,11 @@ module CrymbleUI
     # Cursor types (renderer-agnostic)
     enum CursorType
         Arrow
+        Text
         SizeHorizontal
         SizeVertical
+        SizeNWSE
+        SizeNESW
         SizeAll
     end
 
@@ -405,9 +408,9 @@ module CrymbleUI
     # Blend modes for layer composition
     enum BlendMode
         Normal    # Standard alpha blending (default)
-        Additive  # Add colors (for glow effects)
-        Multiply  # Multiply colors (for shadows)
-        # More modes can be added later (Screen, Overlay, etc.)
+        Additive    # Add colors (for glow effects)
+        Subtractive # Subtract colors (for darkening highlight on light bg)
+        Multiply    # Multiply colors (for shadows)
     end
 
     # Alignment positions for layer-based widgets (LayerBox)

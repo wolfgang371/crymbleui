@@ -74,8 +74,8 @@ module CrymbleUI
         def initialize(
             @width : Float64? = nil,
             @height : Float64? = nil,
-            @background_color : Color = Color.new(255, 255, 255, 255),
-            @border_color : Color = Color.new(180, 180, 180, 255),
+            @background_color : Color = Theme.current.popup_background,
+            @border_color : Color = Theme.current.popup_border,
             @padding : Float64 = 0.0,
             @z_index : Int32 = 1000,  # High z-index for popups
             id : String? = nil

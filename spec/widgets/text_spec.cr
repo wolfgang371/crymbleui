@@ -168,11 +168,18 @@ describe CrymbleUI::Text do
             primitives = text.to_primitives(bounds)
             primitive = primitives[0].as(CrymbleUI::DrawText)
 
-            # Widget-local coordinates: origin is (0,0)
-            # draw_text compensates for SFML local_bounds offsets (typically left=1, top varies)
-            # So position is adjusted backwards by offset amount
-            primitive.position.x.should be_close(0.0, 2.0)  # Allow offset tolerance
-            primitive.position.y.should be_close(0.0, 10.0) # top offset varies by font/size
+            # Text is left-aligned at x=padding (0 by default), vertically centered
+            font_size = text.font_size
+            expected_x = 0.0  # padding=0 default
+            expected_y = (30.0 - font_size) / 2.0
+            # draw_text compensates for SFML local_bounds offsets
+            if font = CrymbleUI::Widget.font
+                left_offset, top_offset = font.get_text_offsets("Hello", font_size)
+                expected_x -= left_offset
+                expected_y -= top_offset
+            end
+            primitive.position.x.should be_close(expected_x, 1.0)
+            primitive.position.y.should be_close(expected_y, 1.0)
         end
 
         it "primitive has correct color" do
@@ -196,6 +203,147 @@ describe CrymbleUI::Text do
             primitive.size.should be_close(24.77, 0.1)
         end
 
+    end
+
+    describe "vertical centering in constrained bounds" do
+        it "text is vertically centered when bounds are taller than natural" do
+            text = CrymbleUI::Text.new("Hello")
+            tall_bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 60.0)
+
+            # Layout with tight constraints (like VirtualMatrix cell)
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 60.0)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(tall_bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            # draw_text compensates for font offsets (SFML top_offset), so compute expected
+            # the same way: center with font_size, then subtract top_offset
+            font_size = text.font_size
+            expected_y = (60.0 - font_size) / 2.0
+            if font = CrymbleUI::Widget.font
+                _, top_offset = font.get_text_offsets("Hello", font_size)
+                expected_y -= top_offset
+            end
+            dt.position.y.should be_close(expected_y, 1.0)
+        end
+
+        it "text is vertically centered with background fill" do
+            text = CrymbleUI::Text.new("World", background_color: CrymbleUI::Color.new(255, 255, 255, 255))
+            tall_bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 40.0)
+
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 40.0)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(tall_bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            font_size = text.font_size
+            expected_y = (40.0 - font_size) / 2.0
+            if font = CrymbleUI::Widget.font
+                _, top_offset = font.get_text_offsets("World", font_size)
+                expected_y -= top_offset
+            end
+            dt.position.y.should be_close(expected_y, 1.0)
+        end
+
+        it "text stays at y=0 when bounds match natural height" do
+            text = CrymbleUI::Text.new("Hi")
+            natural_h = text.font_size
+            bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, natural_h)
+
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, natural_h)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            # At natural height, centering is no-op: (font_size - font_size) / 2 = 0
+            # draw_text subtracts top_offset, so expected = 0 - top_offset
+            expected_y = 0.0
+            if font = CrymbleUI::Widget.font
+                _, top_offset = font.get_text_offsets("Hi", text.font_size)
+                expected_y -= top_offset
+            end
+            dt.position.y.should be_close(expected_y, 1.0)
+        end
+    end
+
+    describe "padding" do
+        it "text is left-aligned with padding offset in wide bounds" do
+            text = CrymbleUI::Text.new("Hello", padding: 4.0)
+            wide_bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 30.0)
+
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 30.0)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(wide_bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            expected_x = 4.0
+            if font = CrymbleUI::Widget.font
+                left_offset, _ = font.get_text_offsets("Hello", text.font_size)
+                expected_x -= left_offset
+            end
+            dt.position.x.should be_close(expected_x, 1.0)
+        end
+
+        it "padding=0 gives x=0 (default, backward compatible)" do
+            text = CrymbleUI::Text.new("Hi")
+            bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, 30.0)
+
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 30.0)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            expected_x = 0.0
+            if font = CrymbleUI::Widget.font
+                left_offset, _ = font.get_text_offsets("Hi", text.font_size)
+                expected_x -= left_offset
+            end
+            dt.position.x.should be_close(expected_x, 1.0)
+        end
+
+        it "padding included in measure" do
+            text_no_pad = CrymbleUI::Text.new("X")
+            text_with_pad = CrymbleUI::Text.new("X", padding: 4.0)
+            constraints = CrymbleUI::BoxConstraints.new
+
+            size_no_pad = text_no_pad.measure(constraints)
+            size_with_pad = text_with_pad.measure(constraints)
+
+            size_with_pad.width.should be_close(size_no_pad.width + 8.0, 0.1)
+            size_with_pad.height.should be_close(size_no_pad.height + 8.0, 0.1)
+        end
+
+        it "vertical centering accounts for padding" do
+            text = CrymbleUI::Text.new("Hi", padding: 4.0)
+            bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, 40.0)
+
+            text.perform_layout(
+                CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 40.0)),
+                CrymbleUI::Vec2.zero
+            )
+            prims = text.to_primitives(bounds)
+            dt = prims.find { |p| p.is_a?(CrymbleUI::DrawText) }.as(CrymbleUI::DrawText)
+
+            font_size = text.font_size
+            # Vertical: padding + centered within content area
+            content_h = 40.0 - 4.0 * 2
+            expected_y = 4.0 + (content_h - font_size) / 2.0
+            if font = CrymbleUI::Widget.font
+                _, top_offset = font.get_text_offsets("Hi", font_size)
+                expected_y -= top_offset
+            end
+            dt.position.y.should be_close(expected_y, 1.0)
+        end
     end
 
     describe "primitive caching" do

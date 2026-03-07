@@ -3,6 +3,7 @@
 
 # Core types and foundation
 require "./core/types"
+require "./core/theme"
 require "./core/scheduler"
 require "./core/widget"
 require "./core/draggable"
@@ -15,6 +16,8 @@ require "./widgets/button"
 require "./widgets/window"
 require "./widgets/window_panel"
 require "./widgets/scroll_view"
+require "./widgets/virtual_matrix"
+require "./widgets/virtual_grid_base"
 
 # Layout containers
 require "./layout/vstack"
@@ -24,6 +27,7 @@ require "./layout/decorated_container"
 # Rendering
 require "./rendering/sfml_paint_context"
 require "./rendering/sfml_renderer"
+require "./rendering/cache_validation"
 
 # DSL and testing
 require "./dsl/builder"

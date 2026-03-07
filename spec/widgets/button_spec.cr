@@ -303,20 +303,21 @@ describe CrymbleUI::Button do
 
             text.text.should eq("Save")
 
-            # Text should be positioned with equal visual padding
-            # draw_text_aligned automatically compensates for SFML's left/top offsets
+            # Text should be centered both horizontally and vertically
+            # draw_text compensates for SFML's left/top offsets
             # Widget-local coordinates: origin is (0,0)
             text_size = CrymbleUI::Widget.measure_text("Save", font_size)
             # Horizontal: centered minus left offset (widget-local origin)
             expected_x_center = 0.0 + (bounds.width - text_size.width) / 2.0
-            # Vertical: padding minus top offset (widget-local origin)
+            # Vertical: centered minus top offset (widget-local origin)
+            expected_y_center = 0.0 + (bounds.height - font_size) / 2.0
             if font = CrymbleUI::Widget.font
                 left_offset, top_offset = font.get_text_offsets("Save", font_size)
                 expected_x = expected_x_center - left_offset
-                expected_y = 0.0 + 10.0 - top_offset
+                expected_y = expected_y_center - top_offset
             else
                 expected_x = expected_x_center
-                expected_y = 0.0 + 10.0
+                expected_y = expected_y_center
             end
 
             text.position.x.should eq(expected_x)

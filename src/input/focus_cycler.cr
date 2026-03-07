@@ -47,6 +47,10 @@ module CrymbleUI
       # Add widget if focusable
       result << widget if widget.focusable?
 
+      # Don't recurse into focus scope widgets (e.g., VirtualMatrix)
+      # Their children are managed internally, not part of the tab order
+      return if widget.is_focus_scope?
+
       # Recurse into children
       widget.children.each do |child|
         collect_recursive(child, result)

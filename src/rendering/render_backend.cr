@@ -69,6 +69,11 @@ module CrymbleUI
       # Default: no-op (test backend doesn't use GL scissor)
     end
 
+    # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)
+    # Used by cache validation framework to compare cached vs uncached renders
+    # Returns row-major array of width*height packed pixel values
+    abstract def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
+
     # Explicitly release GPU resources (textures, framebuffers)
     # Called when backend is being replaced due to size change
     # Without explicit disposal, old backends are orphaned and rely on GC

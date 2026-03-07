@@ -7,143 +7,16 @@ module CrymbleUI
   # SFML render backend wrapper
   # Wraps SF::RenderTexture to implement RenderBackend interface
   # Allows LayerRenderer to work with SFML without knowing SFML specifics
-  #
-  # ## Texture Pooling
-  # RenderTextures are expensive GPU resources. SFML best practice is to pool and reuse them
-  # rather than creating/destroying frequently. This class implements texture pooling:
-  # - Textures are bucketed by size (64px increments) for reuse
-  # - dispose() returns textures to pool instead of destroying
-  # - acquire() gets from pool or creates new
-  # See: https://en.sfml-dev.org/forums/index.php?topic=18428.0
   class CrSFMLBackend
     include RenderBackend
-
-    # Texture pool for reusing GPU resources
-    # Key: (bucketed_width, bucketed_height), Value: available textures with their fonts
-    @@texture_pool = Hash(Tuple(Int32, Int32), Array(Tuple(SF::RenderTexture, SF::Font))).new
-    @@pool_memory_usage : Int64 = 0_i64
-
-    # Pool limits to prevent unbounded growth
-    MAX_POOL_MEMORY  = 100 * 1024 * 1024 # 100MB total GPU memory in pool
-    MAX_PER_BUCKET   =                50 # Max textures per size bucket
-    BUCKET_INCREMENT =                64 # Round sizes up to this increment
 
     @texture : SF::RenderTexture
     @font : SF::Font
     @clip_stack : Array(SF::IntRect) # Stack of scissor clip rectangles
 
-    # Round dimension up to next bucket increment (64px)
-    # This allows textures of similar sizes to be reused
-    private def self.bucket_size(dimension : Int32) : Int32
-      ((dimension + BUCKET_INCREMENT - 1) // BUCKET_INCREMENT) * BUCKET_INCREMENT
-    end
-
-    # Acquire a backend from the pool or create a new one
-    # This is the primary way to get a CrSFMLBackend - prefer over new()
+    # Factory method - creates a new backend
     def self.acquire(width : Int32, height : Int32, font : SF::Font) : CrSFMLBackend
-      # POOLING DISABLED: Causes rendering artifacts (garbled text, ghost backgrounds)
-      # All attempted fixes failed. See docs/TEXTURE_POOLING_INVESTIGATION.md for details.
-      # When pooling works, remove this early return to re-enable.
-      return new(width, height, font)
-
-      # --- POOLING CODE (disabled) ---
-      bucket_w = bucket_size(width)
-      bucket_h = bucket_size(height)
-      key = {bucket_w, bucket_h}
-
-      if (textures = @@texture_pool[key]?) && (entry = textures.pop?)
-        texture, pooled_font = entry
-        texture_memory = bucket_w.to_i64 * bucket_h.to_i64 * 4
-        @@pool_memory_usage -= texture_memory
-
-        # Texture was already cleared on release - ready to use immediately
-        # (Clearing on release gives GPU time to finish before next acquire)
-
-        {% if flag?(:DEBUG_POOL) %}
-          puts "[POOL] Reused #{bucket_w}x#{bucket_h} texture (pool: #{@@pool_memory_usage / 1024 / 1024}MB)"
-        {% end %}
-
-        # Create backend wrapping the pooled texture
-        new(texture, font, true)
-      else
-        {% if flag?(:DEBUG_POOL) %}
-          puts "[POOL] Created new #{width}x#{height} texture (no #{bucket_w}x#{bucket_h} in pool)"
-        {% end %}
-
-        # Create new texture at exact requested size
-        new(width, height, font)
-      end
-    end
-
-    # Return a backend's texture to the pool for reuse
-    # Called by dispose() - do not call directly
-    def self.release(backend : CrSFMLBackend)
-      texture = backend.@texture
-      font = backend.@font
-      bucket_w = bucket_size(texture.size.x.to_i)
-      bucket_h = bucket_size(texture.size.y.to_i)
-      texture_memory = bucket_w.to_i64 * bucket_h.to_i64 * 4
-
-      # Check if pool is full (memory limit)
-      if @@pool_memory_usage + texture_memory > MAX_POOL_MEMORY
-        {% if flag?(:DEBUG_POOL) %}
-          puts "[POOL] Memory limit reached, not pooling #{bucket_w}x#{bucket_h}"
-        {% end %}
-        return # Let GC handle it
-      end
-
-      key = {bucket_w, bucket_h}
-      textures = @@texture_pool[key]? || (@@texture_pool[key] = [] of Tuple(SF::RenderTexture, SF::Font))
-
-      # Check if bucket is full
-      if textures.size >= MAX_PER_BUCKET
-        {% if flag?(:DEBUG_POOL) %}
-          puts "[POOL] Bucket #{key} full (#{MAX_PER_BUCKET}), not pooling"
-        {% end %}
-        return # Let GC handle it
-      end
-
-      # Clear texture BEFORE adding to pool
-      # This gives the GPU time to finish clearing before next acquire()
-      # (Key insight: display() only initiates GPU commands, doesn't wait)
-      texture.clear(SF::Color::Transparent)
-      texture.display
-
-      # Add to pool (now clean)
-      textures << {texture, font}
-      @@pool_memory_usage += texture_memory
-
-      {% if flag?(:DEBUG_POOL) %}
-        puts "[POOL] Released #{bucket_w}x#{bucket_h} to pool (pool: #{@@pool_memory_usage / 1024 / 1024}MB, bucket: #{textures.size})"
-      {% end %}
-    end
-
-    # Get pool statistics for debugging/monitoring
-    def self.pool_stats : NamedTuple(buckets: Int32, textures: Int32, memory_mb: Float64)
-      total_textures = 0
-      @@texture_pool.each_value { |arr| total_textures += arr.size }
-      {
-        buckets:   @@texture_pool.size,
-        textures:  total_textures,
-        memory_mb: @@pool_memory_usage / (1024.0 * 1024.0),
-      }
-    end
-
-    # Clear all pooled textures (useful for tests or memory pressure)
-    def self.clear_pool
-      @@texture_pool.clear
-      @@pool_memory_usage = 0_i64
-    end
-
-    # Internal constructor for wrapping a pooled texture
-    # Uses a struct tag to distinguish from width/height constructor
-    protected def initialize(@texture : SF::RenderTexture, @font : SF::Font, _pooled : Bool)
-      @clip_stack = [] of SF::IntRect
-      # CRITICAL: Reset view to default - pooled textures retain view from previous widget
-      # Without this, rendering uses stale scale/offset/viewport from previous use
-      @texture.view = @texture.default_view
-      # Match the new constructor - clear the texture to ensure identical state
-      @texture.clear(SF::Color::Transparent)
+      new(width, height, font)
     end
 
     # Standard constructor - creates new RenderTexture
@@ -261,7 +134,9 @@ module CrymbleUI
       # Without this, text may render to wrong texture when multiple RenderTextures exist
       @texture.active = true
       sf_text = SF::Text.new(text, @font, size.round.to_u32)
-      sf_text.position = SF.vector2f(position.x, position.y)
+      # Round to integers to avoid GPU bilinear interpolation blur on glyph atlas
+      # (fractional coords from zoom centering arithmetic cause washed-out text — commit 20a683b)
+      sf_text.position = SF.vector2f(position.x.round.to_f32, position.y.round.to_f32)
       sf_text.fill_color = to_sf_color(color)
       @texture.draw(sf_text)
     end
@@ -441,15 +316,28 @@ module CrymbleUI
       end
     end
 
-    # Return this backend's texture to the pool for reuse
-    # Called when backend is being replaced due to widget size change
-    #
-    # NOTE: We do NOT call @texture.finalize here!
-    # Calling finalize while other code may still reference the backend causes crashes.
-    # Instead, we return the texture to the pool for reuse by future widgets.
-    # If the pool is full, the texture is simply abandoned for GC to clean up.
+    # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)
+    # GPU→CPU transfer via copy_to_image — use sparingly (cache validation only)
+    def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
+      image = @texture.texture.copy_to_image
+      result = Array(UInt32).new(w * h, 0_u32)
+      h.times do |dy|
+        w.times do |dx|
+          px = x + dx
+          py = y + dy
+          if px >= 0 && px < image.size.x.to_i && py >= 0 && py < image.size.y.to_i
+            sf_color = image.get_pixel(px, py)
+            result[dy * w + dx] = (sf_color.r.to_u32 << 24) | (sf_color.g.to_u32 << 16) | (sf_color.b.to_u32 << 8) | sf_color.a.to_u32
+          end
+        end
+      end
+      result
+    end
+
+    # No-op: let GC handle RenderTexture cleanup.
+    # Texture pooling was attempted but causes OpenGL FBO state corruption
+    # (garbled text, ghost backgrounds) with both SFML 2.5 and 3.0.
     def dispose
-      CrSFMLBackend.release(self)
     end
 
     # Convert CrymbleUI Color to SF::Color

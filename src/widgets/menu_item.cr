@@ -112,9 +112,9 @@ module CrymbleUI
             checkable : Bool = false,
             id : String? = nil,
             font_scale : Int32 = 0,
-            @text_color : Color = Color.new(0, 0, 0, 255),
-            @shortcut_color : Color = Color.new(100, 100, 100, 255),
-            @hover_color : Color = Color.new(0, 120, 215, 255),
+            @text_color : Color = Theme.current.menu_item_text,
+            @shortcut_color : Color = Theme.current.menu_item_shortcut,
+            @hover_color : Color = Theme.current.menu_item_hover,
             @padding : Float64 = 8.0,
             @min_width : Float64 = 150.0,
             &block : -> Nil
@@ -138,9 +138,9 @@ module CrymbleUI
             checkable : Bool = false,
             id : String? = nil,
             font_scale : Int32 = 0,
-            @text_color : Color = Color.new(0, 0, 0, 255),
-            @shortcut_color : Color = Color.new(100, 100, 100, 255),
-            @hover_color : Color = Color.new(0, 120, 215, 255),
+            @text_color : Color = Theme.current.menu_item_text,
+            @shortcut_color : Color = Theme.current.menu_item_shortcut,
+            @hover_color : Color = Theme.current.menu_item_hover,
             @padding : Float64 = 8.0,
             @min_width : Float64 = 150.0
         )

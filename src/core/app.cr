@@ -430,8 +430,8 @@ module CrymbleUI
         end
 
         widget.on_mouse_down(point)
-        # Rebuild if widget needs layout or render (e.g., panel bring_to_front)
-        if root.needs_layout? || root.needs_render?
+        # Rebuild only if structural change needed (not for render-only changes like bring_to_front)
+        if root.needs_layout?
           # Save path_id before rebuild (widget will be replaced with new instance)
           widget_path = widget.path_id
           rebuild
@@ -513,11 +513,18 @@ module CrymbleUI
       if @mouse_down
         if widget = @mouse_down_widget
           widget.on_mouse_move(point)
-          # Rebuild if widget needs layout or render (e.g., ScrollView scrolling)
-          # Note: WindowPanel dragging doesn't need layout, but rebuild is fast if not needed
+          # Rebuild only if structural change needed (not for render-only changes)
+          # Scroll/drag is typically render-only (viewport offset change)
           if root = @root
-            if root.needs_layout? || root.needs_render?
+            if root.needs_layout?
+              # Save path_id before rebuild (widget will be replaced with new instance)
+              widget_path = widget.path_id
               rebuild
+              # Update @mouse_down_widget to point to NEW widget instance
+              # (old instance's parent chain is broken after rebuild)
+              if new_widget = find_by_path(widget_path)
+                @mouse_down_widget = new_widget
+              end
             end
           end
           # Return true to trigger redraw during drag
@@ -587,8 +594,9 @@ module CrymbleUI
         while current
           if current.responds_to?(:on_mouse_wheel)
             current.on_mouse_wheel(delta, point, shift: shift)
-            # Rebuild if widget needs layout or render
-            rebuild if root.needs_layout? || root.needs_render?
+            # Rebuild only if structural change needed (not for render-only changes)
+            # Mouse wheel is typically a render-only operation (viewport scroll)
+            rebuild if root.needs_layout?
             return
           end
           current = current.parent
@@ -665,8 +673,10 @@ module CrymbleUI
             resize_edge = panel.get_resize_edge(point)
             if resize_edge != ResizeEdge::None
               return case resize_edge
-              when ResizeEdge::TopLeft, ResizeEdge::TopRight, ResizeEdge::BottomLeft, ResizeEdge::BottomRight
-                CursorType::SizeAll
+              when ResizeEdge::TopLeft, ResizeEdge::BottomRight
+                CursorType::SizeNWSE
+              when ResizeEdge::TopRight, ResizeEdge::BottomLeft
+                CursorType::SizeNESW
               when ResizeEdge::Left, ResizeEdge::Right
                 CursorType::SizeHorizontal
               when ResizeEdge::Top, ResizeEdge::Bottom
@@ -676,13 +686,20 @@ module CrymbleUI
               end
             end
           end
-          # Over panel but not on resize edge - return arrow
-          return CursorType::Arrow
+          # Over panel but not on resize edge
+          return infer_widget_cursor(root, point)
         end
       end
 
       # Not over any panel or popup
-      CursorType::Arrow
+      infer_widget_cursor(root, point)
+    end
+
+    # Infer cursor from widget under point via preferred_cursor
+    private def infer_widget_cursor(root : Widget, point : Vec2) : CursorType
+      widget = root.hit_test(point)
+      return CursorType::Arrow if widget.nil?
+      widget.preferred_cursor(point) || CursorType::Arrow
     end
 
     # Clear all widget render states

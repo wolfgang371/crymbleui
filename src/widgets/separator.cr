@@ -30,7 +30,7 @@ module CrymbleUI
 
         def initialize(
             id : String? = nil,
-            @color : Color = Color.new(200, 200, 200, 255)
+            @color : Color = Theme.current.separator_color
         )
             super(id: id)
         end

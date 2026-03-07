@@ -17,8 +17,9 @@ Window (root)
 ```
 Layer "panel_<id>" (WindowPanel's internal layer)
 ├── [widgets list]:
-│   ├── WindowPanel (chrome only - title bar)
-│   └── BlackRectWidget (collected recursively)
+│   ├── Chrome (title bar - added directly to layer.widgets)
+│   └── Content (container - added directly to layer.widgets)
+│       └── BlackRectWidget (collected recursively from Content.children)
 ```
 
 ### Key Points
@@ -30,15 +31,15 @@ Layer "panel_<id>" (WindowPanel's internal layer)
 
 **Layer structure (`layer.widgets`):**
 - WindowPanel creates an internal layer (`@internal_layer`)
-- During layout, WindowPanel adds itself to `layer.widgets` (line 144 in window_panel.cr)
-- Children are NOT explicitly added to `layer.widgets`
-- Children are collected recursively during rendering via `collect_all_widgets_recursive`
+- During layout, WindowPanel populates `layer.widgets` with its internal `Chrome` and `Content` widgets (window_panel.cr lines 456-458)
+- User-added children live under `Content`; they are NOT explicitly added to `layer.widgets`
+- User children are collected recursively during rendering via `collect_all_widgets_recursive`
 
 **Rendering order:**
 1. Renderer calls `collect_all_widgets_recursive(layer.widgets)`
-2. Starts with `layer.widgets` = `[WindowPanel]`
-3. Recursively collects: `WindowPanel` → `BlackRectWidget`
-4. Result: `[WindowPanel, BlackRectWidget]` (parent-first order)
+2. Starts with `layer.widgets` = `[Chrome, Content]`
+3. Recursively collects: `Chrome`, then `Content` → `BlackRectWidget`
+4. Result: `[Chrome, Content, BlackRectWidget]` (parent-first order)
 5. Renders in this order, so parent captures background before children render
 
 ## General Structure
@@ -73,24 +74,25 @@ content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(WindowPanel) }
 - `@internal_layer` - Layer for panel chrome + content
 - `@children` - child widgets (content)
 
-**Layout logic (lines 142-178):**
+**Layout logic (lines 441-472):**
 ```crystal
-# Populate layer.widgets
+# Populate layer.widgets with internal chrome and content widgets
 layer.widgets.clear
-layer.widgets << self  # Panel chrome renders first
+layer.widgets << @chrome   # Chrome (title bar) renders first
+layer.widgets << @content  # Content container renders second
 
-# Separate children into menubar and content
-# Layout children with relative coordinates
+# Layout chrome (title bar area)
+# Layout content (content widget computes its own position below title bar)
 # Track position for drag offset
 
-# DON'T add children to layer.widgets - they're rendered recursively
-# (prevents double-rendering)
+# DON'T add user children directly to layer.widgets - they are collected
+# recursively from @content during rendering (prevents double-rendering)
 ```
 
-**to_primitives (lines 245-302):**
-- Only renders chrome: title bar, border, title text, close button
-- Does NOT render full panel background (intentional - see line 264 comment)
-- Comment: "No full-panel background fill needed here - prevents overwriting cached children!"
+**to_primitives (line 544):**
+- WindowPanel itself is a pure container: returns `[] of DrawPrimitive`
+- Chrome rendering (title bar, close button, etc.) is handled by `Chrome#to_primitives` (line 181)
+- Content rendering (background, user children) is handled by `Content#to_primitives` (returns empty — pure container)
 
 ## Rendering Process (src/rendering/layer_renderer.cr)
 
@@ -99,7 +101,7 @@ layer.widgets << self  # Panel chrome renders first
 # Collect ALL widgets recursively from layer.widgets
 all_widgets = []
 layer.widgets.each do |widget|
-  collect_all_widgets_recursive(widget, all_widgets)  # Parent-first traversal
+  collect_all_widgets_recursive(widget, all_widgets, layer)  # Parent-first traversal
 end
 # Render all_widgets in order
 ```
@@ -109,7 +111,7 @@ end
 # Collect all widgets recursively
 all_widgets = []
 layer.widgets.each do |widget|
-  collect_all_widgets_recursive(widget, all_widgets)
+  collect_all_widgets_recursive(widget, all_widgets, layer)
 end
 # Filter to dirty widgets ONLY (preserves parent-first order)
 dirty_set = layer.dirty_widgets
@@ -118,12 +120,14 @@ widgets_to_render = all_widgets.select { |w| dirty_set.includes?(w) }
 
 **Critical:** Selective render filters to dirty widgets but **preserves parent-first order** from recursive collection.
 
-### collect_all_widgets_recursive (lines 474-479)
+### collect_all_widgets_recursive (lines 1311-1340)
 ```crystal
-private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget))
+private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget), target_layer : Layer)
   result << widget        # Add parent first
+  # Stop recursion at layer boundaries: children of widgets with their own
+  # layer belong to that layer, not the parent layer
   widget.children.each do |child|
-    collect_all_widgets_recursive(child, result)  # Then recurse to children
+    collect_all_widgets_recursive(child, result, target_layer)  # Then recurse to children
   end
 end
 ```
@@ -134,29 +138,31 @@ end
 
 **For panel with children:**
 ```
-layer.widgets = [WindowPanel]
+layer.widgets = [Chrome, Content]
 
 collect_all_widgets_recursive:
-1. Add WindowPanel
-2. Recurse to WindowPanel.children
-3. Add BlackRectWidget
+1. Add Chrome
+2. Recurse to Chrome.children (none)
+3. Add Content
+4. Recurse to Content.children
+5. Add BlackRectWidget
 
-Result: [WindowPanel, BlackRectWidget]
+Result: [Chrome, Content, BlackRectWidget]
 ```
 
 **During selective render (without invalidate_children_backgrounds):**
 ```
-dirty_set = {WindowPanel}  # Only panel is dirty
+dirty_set = {Chrome}  # Only chrome is dirty (e.g., title bar color change)
 
-widgets_to_render = [WindowPanel, BlackRectWidget].select { |w| dirty_set.includes?(w) }
-                  = [WindowPanel]  # BlackRectWidget filtered out!
+widgets_to_render = [Chrome, Content, BlackRectWidget].select { |w| dirty_set.includes?(w) }
+                  = [Chrome]  # Content and BlackRectWidget filtered out!
 ```
 
-**This is the bug:** WindowPanel renders alone, blits its background over where BlackRectWidget should be.
+**This is the bug:** Chrome renders alone, blits its background over where BlackRectWidget should be.
 
 ## Why Parent-First Order Exists
 
-Comment in layer_renderer.cr:173-174:
+Comment in layer_renderer.cr:1498-1499:
 ```crystal
 # Selective render: only dirty widgets, but MUST preserve parent-first order!
 # CRITICAL: If child renders before parent, it captures wrong (old) background
@@ -174,13 +180,13 @@ Comment in layer_renderer.cr:173-174:
 
 ## Implications for Blank Panel Bug
 
-1. **Parent renders first** (correct for background capture)
-2. **Parent captures layer background** including areas where children will render
-3. **Children render after parent** and overwrite parent's areas
+1. **Chrome renders first** (correct for background capture)
+2. **Chrome captures layer background** including areas where children will render
+3. **Children render after Chrome** and overwrite Chrome's areas
 4. **On selective re-render:**
-   - Parent re-renders (restores background with layer-bg pixels in children's areas)
+   - Chrome re-renders (restores background with layer-bg pixels in children's areas)
    - Children DON'T re-render (not in dirty set without invalidate_children_backgrounds)
-   - Parent's widget_backend (with layer-bg pixels) blits over children's screen positions
+   - Chrome's widget_backend (with layer-bg pixels) blits over children's screen positions
    - **Result:** Children disappear (replaced with layer background color)
 
 ## Summary
@@ -189,8 +195,8 @@ Comment in layer_renderer.cr:173-174:
 
 - Window is the root
 - WindowPanel is a child of Window (not separate chrome/content)
-- WindowPanel internally has chrome (title bar) AND children (content)
-- WindowPanel adds itself to its layer.widgets
-- Children are collected recursively during rendering
+- WindowPanel internally has a `Chrome` widget (title bar) and a `Content` widget (container for user children)
+- WindowPanel populates `layer.widgets` with `[Chrome, Content]` during layout (not itself)
+- User children live under `Content` and are collected recursively during rendering
 - **Critical:** Parent renders before children (parent-first order) for correct background capture
 - **Bug:** This means parent's background contains "blank" pixels where children will later render

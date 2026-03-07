@@ -259,6 +259,9 @@ module CrymbleUI
         # Widget invalidation state (Clean, NeedsRender, NeedsLayout)
         property state : WidgetState
 
+        # Explicit layer override for propagate_to_layer (set by VirtualMatrix for sticky cells)
+        property render_layer : Layer?
+
         # Visibility - hidden widgets are skipped in layout/render/hit-test
         @visible : Bool = true
 
@@ -342,6 +345,7 @@ module CrymbleUI
             @children_escape_bounds = false
             @widget_backend = nil
             @background_backend = nil
+            @render_layer = nil
         end
 
         # Path-based ID for hierarchical identification (ImGui-inspired)
@@ -439,6 +443,16 @@ module CrymbleUI
         # Propagate state change to containing layer
         # Walks up parent chain to find a widget with a layer and marks it
         private def propagate_to_layer
+            # Check explicit render_layer override (e.g., VirtualMatrix sticky cells)
+            if rl = @render_layer
+                if @state == WidgetState::NeedsLayout
+                    rl.mark_needs_layout
+                else
+                    rl.mark_needs_render(self)
+                end
+                return
+            end
+
             # First check if THIS widget has its own layer (WindowPanel, MenuBar, Popup, LayerBox)
             if layer = self.layer
                 # This widget owns the layer - check if layout or just render is needed
@@ -627,6 +641,12 @@ module CrymbleUI
         # Used by widgets that can be hidden/closed (e.g., WindowPanel when closed)
         def skip_render? : Bool
             false  # Default: render everything
+        end
+
+        # Hook called by layer renderer before collecting widgets for rendering.
+        # Override to flush deferred state (e.g., VirtualMatrix defers cell updates
+        # during scrollbar drag to avoid running expensive work on every mouse event).
+        def pre_render_flush
         end
 
         # Get children in render order (for z-order sorting)
@@ -882,6 +902,12 @@ module CrymbleUI
             # Default: do nothing
         end
 
+        # Preferred cursor when hovering this widget (override in subclasses)
+        # Return nil to use default Arrow cursor
+        def preferred_cursor(point : Vec2) : CursorType?
+            nil
+        end
+
         def on_mouse_enter
             # Default: do nothing
         end
@@ -949,6 +975,71 @@ module CrymbleUI
         def focused? : Bool
             Widget.focus_manager?.try(&.focused?(self)) || false
         end
+
+        # === PROXY FOCUS ===
+        #
+        # Proxy focus lets a parent container (e.g. VirtualMatrix) delegate focus
+        # visuals and keyboard events to a child widget without giving it real
+        # FocusManager focus. The container stays focused (owns grid navigation)
+        # but forwards events to the proxy-focused child.
+        #
+        # **Widget contract for cells/children:**
+        # - `focusable?` → return true so the container knows this widget can
+        #   accept proxy focus
+        # - `activate_proxy_focus` / `deactivate_proxy_focus` → override for
+        #   setup/teardown (e.g. TextInput starts/stops cursor blink)
+        # - `effectively_focused?` → returns true when either real-focused or
+        #   proxy-focused; use this for rendering decisions (cursor, highlight)
+        # - `wants_arrow_keys?` → return true to consume arrow keys (TextInput
+        #   FullEdit mode), return false to let the container handle grid nav
+        #   (TextInput QuickEntry mode)
+        #
+        # **Event forwarding rules (in VirtualMatrix):**
+        # - Enter, Escape, Backspace, Delete, Home, End → always forwarded
+        # - Arrow keys → forwarded only if `wants_arrow_keys?` returns true
+        # - Tab → never forwarded (falls through to FocusManager)
+        # - Text input → always forwarded
+        #
+        # **Default behavior:** The base Widget implementation works for simple
+        # widgets — just sets `@proxy_focused` bool and calls `mark_needs_render`.
+        # Only override for special behavior (e.g. TextInput cursor blink).
+
+        # Whether this widget has proxy focus (parent container delegates focus visuals)
+        property proxy_focused : Bool = false
+
+        # True if widget has real focus OR proxy focus (use for rendering decisions)
+        def effectively_focused? : Bool
+          focused? || @proxy_focused
+        end
+
+        # Called by parent container to activate proxy focus on this widget.
+        # Override for setup (e.g. TextInput starts cursor blink).
+        def activate_proxy_focus
+          @proxy_focused = true
+          mark_needs_render
+        end
+
+        # Called by parent container to deactivate proxy focus on this widget.
+        # Override for teardown (e.g. TextInput stops cursor blink).
+        def deactivate_proxy_focus
+          @proxy_focused = false
+          mark_needs_render
+        end
+
+        # Whether this widget defines a focus scope boundary.
+        # FocusCycler won't recurse into children of focus scope widgets.
+        def is_focus_scope? : Bool
+          false
+        end
+
+        # Whether this widget currently wants to consume arrow keys.
+        # Used by proxy focus containers to decide whether to forward arrows
+        # or handle grid navigation.
+        def wants_arrow_keys? : Bool
+          false
+        end
+
+        # === END PROXY FOCUS ===
 
         # === END FOCUS AND KEYBOARD INPUT ===
 

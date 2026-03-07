@@ -1,4 +1,4 @@
-require "../src/crymble-ui"
+require "../../src/crymble-ui"
 
 # Automated test to reproduce "slow resize finishes on its own" bug
 #

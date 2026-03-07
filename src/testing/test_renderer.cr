@@ -28,6 +28,7 @@ module CrymbleUI
       getter compositor_skip_count : Int32 = 0
       getter backend_blit_count : Int32 = 0
       getter exceptions_caught : Int32 = 0  # Graceful degradation counter
+      getter last_exception_message : String? = nil
 
       # Cursor tracking
       getter current_cursor : CursorType = CursorType::Arrow
@@ -144,6 +145,9 @@ module CrymbleUI
           window_size = Size.new(@backend.width.to_f, @backend.height.to_f)
           did_layout = app.prepare_layout(window_size)
 
+          # Invalidate layer cache after layout (layer set may have changed)
+          invalidate_layer_cache if did_layout
+
           # Re-detect hover after layout (restores hover state after rebuild)
           # Matches SFML renderer behavior
           app.redetect_hover if did_layout
@@ -165,6 +169,7 @@ module CrymbleUI
       # Handle exception during frame rendering (graceful degradation)
       private def handle_frame_exception(exception : Exception, app : App)
         @exceptions_caught += 1
+        @last_exception_message = "#{exception.message}\n#{exception.backtrace?.try(&.first(5).join("\n"))}"
         app.reset_all_caches
         app.root.try(&.mark_needs_layout)
       end
@@ -215,7 +220,7 @@ module CrymbleUI
         else
           # Standard compositing: blit layer to window at layer position
           backend.blit_to(@backend, layer.bounds.x.to_i, layer.bounds.y.to_i, clip_width, clip_height,
-                          use_alpha_blend: true, opacity: layer.opacity)
+                          use_alpha_blend: true, opacity: layer.opacity, blend_mode: layer.blend_mode)
           @backend_blit_count += 1
         end
 
@@ -277,7 +282,7 @@ module CrymbleUI
 
         # Blit from viewport position in buffer (NOT always 0,0)
         backend.blit_region_to(@backend, viewport_x, viewport_y, viewport_width, viewport_height,
-                                dest_x, dest_y, use_alpha_blend: true, opacity: layer.opacity)
+                                dest_x, dest_y, use_alpha_blend: true, opacity: layer.opacity, blend_mode: layer.blend_mode)
         @backend_blit_count += 1
       end
 

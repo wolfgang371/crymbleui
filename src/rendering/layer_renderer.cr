@@ -4,6 +4,7 @@ require "../core/widget"
 require "../core/assert"
 require "./draw_primitive"
 require "./render_backend"
+require "./cache_validation"
 
 module CrymbleUI
   # Layer rendering engine - shared logic for SFML and headless rendering
@@ -33,6 +34,8 @@ module CrymbleUI
     class_property frame_widgets_iterated : Int32 = 0              # widgets passed to render_single_widget (before cache check)
     class_property frame_pure_container_skips : Int32 = 0          # pure containers (VStack, HStack) skipped
     class_property frame_empty_leaf_primitives : Int32 = 0         # leaf widgets with empty primitives (potential bug)
+    class_property frame_blit_plan_count : Int32 = 0              # sticky layers rendered via blit-plan fast path
+    class_property frame_boundary_cells_invalidated : Int32 = 0   # cells at buffer boundary invalidated after blit-shift
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
 
     # Per-phase timing (in milliseconds)
@@ -53,6 +56,8 @@ module CrymbleUI
       @@frame_widgets_iterated = 0
       @@frame_pure_container_skips = 0
       @@frame_empty_leaf_primitives = 0
+      @@frame_blit_plan_count = 0
+      @@frame_boundary_cells_invalidated = 0
       @@rendered_widgets.clear
       @@phase_layout_ms = 0.0
       @@phase_render_ms = 0.0
@@ -63,9 +68,9 @@ module CrymbleUI
     # Simple profiling helper - wraps a block with timing
     private def profile(name : String, &block)
       if LayerRenderer.profile_enabled
-        start = Time.monotonic
+        start = Time.instant
         result = yield
-        elapsed = Time.monotonic - start
+        elapsed = Time.instant - start
         measurement = "#{name}: #{elapsed.total_milliseconds.round(2)}ms"
         LayerRenderer.profile_data << measurement
         result
@@ -138,21 +143,56 @@ module CrymbleUI
       {layer_local_x, layer_local_y}
     end
 
+    # Layer collection cache: avoids O(widget_tree) traversal on every frame.
+    # Invalidated when layout runs (which may add/remove layers).
+    @cached_layers : Array(Layer)? = nil
+    @layers_need_recollect : Bool = true
+    @cached_ghost_layer : Layer? = nil
+    @cached_highlight_layer : Layer? = nil
+
+    # Invalidate the collected-layers cache. Call after layout or when the
+    # layer set may have changed (zoom, panel add/remove, etc.).
+    def invalidate_layer_cache
+      @layers_need_recollect = true
+    end
+
     # Render all layers for a widget tree (called by render_frame)
     # ghost_layer: optional drag ghost layer to include in rendering
     # highlight_layer: optional drop zone highlight layer
     def render_all_layers(root_widget : Widget, ghost_layer : Layer? = nil, highlight_layer : Layer? = nil)
-      # Collect all layers from widget tree
-      layers = profile("collect_layers") { collect_layers(root_widget) }
+      {% if flag?(:cache_validation) %}
+        CacheValidation.increment_frame!
+      {% end %}
 
-      # Add highlight layer if present (for drop zone feedback)
-      if highlight = highlight_layer
-        layers << highlight
+      # Invalidate cache if ghost/highlight layer presence changed
+      if ghost_layer != @cached_ghost_layer || highlight_layer != @cached_highlight_layer
+        @layers_need_recollect = true
+        @cached_ghost_layer = ghost_layer
+        @cached_highlight_layer = highlight_layer
       end
 
-      # Add ghost layer if present (for drag-and-drop preview)
-      if ghost = ghost_layer
-        layers << ghost
+      # Collect layers (cached unless invalidated)
+      layers = if @layers_need_recollect
+        collected = profile("collect_layers") { collect_layers(root_widget) }
+
+        # Add highlight layer if present (for drop zone feedback)
+        if highlight = highlight_layer
+          collected << highlight
+        end
+
+        # Add ghost layer if present (for drag-and-drop preview)
+        if ghost = ghost_layer
+          collected << ghost
+        end
+
+        # Pre-sort by z_index (avoids allocation + sort every frame)
+        collected.sort_by!(&.z_index)
+
+        @cached_layers = collected
+        @layers_need_recollect = false
+        collected
+      else
+        @cached_layers.not_nil!
       end
 
       # Instrumentation: track total layers (use explicit module access for correct scoping)
@@ -201,15 +241,15 @@ module CrymbleUI
 
       # Composite layers to window (renderer-specific, timed)
       # NOTE: Must run even if rendered_count == 0 because layer.bounds might have changed (drag)
-      composite_start = Time.monotonic
+      composite_start = Time.instant
       profile("composite") do
         increment_compositor_call_count # Instrumentation
         clear_window_background
-        layers.sort_by(&.z_index).each do |layer|
+        layers.each do |layer|
           composite_layer_to_window(layer)
         end
       end
-      LayerRenderer.phase_composite_ms = (Time.monotonic - composite_start).total_milliseconds
+      LayerRenderer.phase_composite_ms = (Time.instant - composite_start).total_milliseconds
     end
 
     # Clear window to background color (renderer-specific)
@@ -247,6 +287,23 @@ module CrymbleUI
 
       return unless backend = layer.backend # Skip if no backend assigned
 
+      # FAST PATH: Blit-plan for sticky layers
+      # When set, skip full render pipeline — just clear and blit cached widget textures
+      if plan = layer.blit_plan
+        backend.clear(layer.background_color)
+        clip_rect = Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
+        backend.push_clip(clip_rect)
+        plan.each do |entry|
+          backend.blit(entry.source, entry.dest_x, entry.dest_y)
+        end
+        backend.pop_clip
+        backend.display
+        layer.blit_plan = nil # Consume (one-shot)
+        LayerRenderer.frame_blit_plan_count += 1
+        layer.clear_render_state
+        return
+      end
+
       # Panel bounds are updated immediately during drag (WindowPanel line 423-428)
       # So widget absolute_bounds are already correct - no offset needed
       # drag_offset was previously used to correct stale bounds, but bounds are no longer stale
@@ -282,12 +339,32 @@ module CrymbleUI
       # and shift viewport during composite
       if full_render
         backend.clear(layer.background_color)
+        # CRITICAL: Mark buffer as cleared so widgets capture clean background, not stale pixels
+        # Without this, SFML RenderTexture contains pre-clear content until display() is called
+        layer.buffer_just_cleared = true
         # For viewport_cache layers, initialize buffer_origin on first render
         if layer.viewport_cache
-          layer.buffer_origin = layer.scroll_offset - Vec2.new(layer.cache_extent, layer.cache_extent)
+          layer.buffer_origin = quantized_buffer_origin(layer)
         end
         {% if flag?(:DEBUG_RENDER) %}
           puts "  [CLEARED BUFFER to bg=#{layer.background_color}]"
+        {% end %}
+      elsif layer.needs_clear
+        # Buffer clear requested without NeedsLayout (e.g., cursor overlay ghost band prevention).
+        # Clear buffer and force full widget collection, but keep NeedsRender semantics
+        # (no sibling validation, viewport culling stays active).
+        backend.clear(layer.background_color)
+        layer.buffer_just_cleared = true
+        layer.needs_clear = false
+        full_render = true
+        # For viewport_cache layers, recenter buffer_origin to match current scroll position.
+        # Without this, an explicit buffer_origin reset (e.g., grid reconfiguration or zoom)
+        # leaves buffer_origin at zero while scroll_offset is large → wrong viewport composite.
+        if layer.viewport_cache
+          layer.buffer_origin = quantized_buffer_origin(layer)
+        end
+        {% if flag?(:DEBUG_RENDER) %}
+          puts "  [NEEDS_CLEAR → CLEARED BUFFER to bg=#{layer.background_color}]"
         {% end %}
       elsif layer.viewport_cache
         # Handle viewport_cache scroll: check if viewport moved beyond cache extent
@@ -301,48 +378,114 @@ module CrymbleUI
       layer_offset_x = layer.bounds.x
       layer_offset_y = layer.bounds.y
 
-      # Collect widgets to render (full or selective)
-      widgets_to_render = collect_widgets_to_render(layer, full_render)
-
-      # Validate that siblings don't overlap (invariant check)
-      # OPTIMIZATION: Only validate on first render or layout pass, not on scroll frames
-      # Scroll doesn't change widget structure, so re-validating is wasted O(n²) work
-      if layer.first_render? || layer.state == WidgetState::NeedsLayout
-        validate_sibling_bounds(widgets_to_render)
+      # Flush deferred state before collecting widgets (e.g., VirtualMatrix defers
+      # update_visible_cells during scrollbar drag to avoid running on every mouse event)
+      if owner = layer.owner_widget
+        owner.pre_render_flush
       end
 
-      # Push scissor clip for layer bounds to clip widgets at layer edges
-      # This allows smooth clipping of partially-visible widgets (e.g., ScrollView content)
-      # Note: scissor is suspended during background capture/restore in render_single_widget
-      # because OpenGL scissor is global state and would affect draws to other textures
-      #
-      # IMPORTANT: For viewport_cache layers, clip to BUFFER size not viewport size!
-      # Viewport_cache buffers are larger than viewport (viewport + 2*cache_extent), and widgets
-      # render to buffer-relative positions that can exceed viewport dimensions.
-      layer_clip_rect = if layer.viewport_cache
-                          # Viewport_cache: clip to buffer size (allows rendering beyond viewport)
-                          Rect.new(0.0, 0.0, backend.width.to_f64, backend.height.to_f64)
-                        else
-                          # Normal: clip to viewport (layer bounds)
-                          Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
-                        end
-      backend.push_clip(layer_clip_rect)
-
-      # Render each widget using per-widget texture approach
-      widgets_to_render.each do |widget|
-        render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
-      end
-
-      # Second pass: render foreground primitives for DecoratedContainers
-      # Foreground renders AFTER all children, on top of everything
-      widgets_to_render.each do |widget|
-        if widget.responds_to?(:has_foreground?) && widget.has_foreground?
-          render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
+      {% if flag?(:immediate_mode_only) %}
+        # IMMEDIATE-MODE ONLY: bypass all per-widget caching, re-render from scratch every frame
+        # using painter's algorithm via to_primitives(). Slow but correct ground truth.
+        viewport_w = layer.bounds.width.ceil.to_i
+        viewport_h = layer.bounds.height.ceil.to_i
+        if viewport_w > 0 && viewport_h > 0
+          fresh = render_layer_immediate(layer, layer_offset_x, layer_offset_y, viewport_w, viewport_h)
+          if layer.viewport_cache
+            viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
+            viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
+            backend.blit(fresh, viewport_x, viewport_y)
+          else
+            backend.clear(layer.background_color)
+            backend.blit(fresh, 0, 0)
+          end
+          fresh.dispose
         end
-      end
+        backend.display
+      {% else %}
+        # Collect widgets to render (full or selective)
+        widgets_to_render = collect_widgets_to_render(layer, full_render)
 
-      backend.pop_clip
-      backend.display
+        {% if flag?(:cache_validation) %}
+          # CV render trace: log collected widgets for content layers
+          if layer.id.starts_with?("matrix_content") && CacheValidation.enabled?(:immediate_mode)
+            frame = CacheValidation.frame_counter
+            File.open("/tmp/cv_render_trace_f#{frame}.log", "w") do |f|
+              f.puts "=== RENDER TRACE: #{layer.id} frame=#{frame} ==="
+              f.puts "  full_render=#{full_render} buffer_just_cleared=#{layer.buffer_just_cleared}"
+              f.puts "  scroll_offset=#{layer.scroll_offset} buffer_origin=#{layer.buffer_origin}"
+              f.puts "  layer.widgets.size=#{layer.widgets.size}"
+              f.puts "  widgets_to_render.size=#{widgets_to_render.size}"
+              # Log widgets with Y near the buffer boundary (content_y 830-900)
+              # Find buffer overlap boundary (buffer_origin_y + buffer extent where blit-shift clears)
+              lo_y = layer.bounds.y.to_i
+              f.puts "--- Widgets near buffer boundary (buf_y 815..845) ---"
+              widgets_to_render.each do |w|
+                ab = w.absolute_bounds
+                buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i
+                next unless buf_y >= 815 && buf_y <= 845
+                has_wb = !w.widget_backend.nil?
+                f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} abs_y=#{ab.y} buf_y=#{buf_y} " \
+                       "span=[#{buf_y}..#{buf_y + ab.height.to_i}] backend=#{has_wb} dirty=#{w.needs_render?} " \
+                       "prim_cache=#{w.has_valid_primitive_cache?} fresh_bg=#{w.needs_fresh_background?}"
+              end
+              f.puts "--- ALL layer.widgets near buf boundary 815..845 ---"
+              layer.widgets.each do |root_w|
+                all_w = [root_w]
+                root_w.children.each { |c| all_w << c }
+                all_w.each do |w|
+                  ab = w.absolute_bounds
+                  buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i
+                  next unless buf_y >= 815 && buf_y <= 845
+                  collected = widgets_to_render.includes?(w)
+                  f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} abs_y=#{ab.y} buf_y=#{buf_y} " \
+                         "span=[#{buf_y}..#{buf_y + ab.height.to_i}] COLLECTED=#{collected} backend=#{!w.widget_backend.nil?}"
+                end
+              end
+            end
+          end
+        {% end %}
+
+        # Validate that siblings don't overlap (invariant check)
+        # OPTIMIZATION: Only validate on first render or layout pass, not on scroll frames
+        # Scroll doesn't change widget structure, so re-validating is wasted O(n²) work
+        if layer.first_render?
+          validate_sibling_bounds(widgets_to_render)
+        end
+
+        # Push scissor clip for layer bounds to clip widgets at layer edges
+        # This allows smooth clipping of partially-visible widgets (e.g., ScrollView content)
+        # Note: scissor is suspended during background capture/restore in render_single_widget
+        # because OpenGL scissor is global state and would affect draws to other textures
+        #
+        # IMPORTANT: For viewport_cache layers, clip to BUFFER size not viewport size!
+        # Viewport_cache buffers are larger than viewport (viewport + 2*cache_extent), and widgets
+        # render to buffer-relative positions that can exceed viewport dimensions.
+        layer_clip_rect = if layer.viewport_cache
+                            # Viewport_cache: clip to buffer size (allows rendering beyond viewport)
+                            Rect.new(0.0, 0.0, backend.width.to_f64, backend.height.to_f64)
+                          else
+                            # Normal: clip to viewport (layer bounds)
+                            Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
+                          end
+        backend.push_clip(layer_clip_rect)
+
+        # Render each widget using per-widget texture approach
+        widgets_to_render.each do |widget|
+          render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
+        end
+
+        # Second pass: render foreground primitives for DecoratedContainers
+        # Foreground renders AFTER all children, on top of everything
+        widgets_to_render.each do |widget|
+          if widget.responds_to?(:has_foreground?) && widget.has_foreground?
+            render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
+          end
+        end
+
+        backend.pop_clip
+        backend.display
+      {% end %}
 
       # Clear the "just cleared" flag - texture now reflects the rendered content
       layer.buffer_just_cleared = false
@@ -352,8 +495,257 @@ module CrymbleUI
         check_layer_transparency(layer, backend)
       {% end %}
 
+      {% if flag?(:cache_validation) %}
+        # Immediate mode validation: painter's algorithm via to_primitives() vs cached buffer
+        if CacheValidation.enabled?(:immediate_mode) && layer.viewport_cache && backend.responds_to?(:capture_region_pixels)
+          validate_immediate_mode(layer, backend, layer_offset_x, layer_offset_y)
+        end
+      {% end %}
+
       layer.clear_render_state
     end
+
+    {% if flag?(:cache_validation) || flag?(:immediate_mode_only) %}
+      # Immediate-mode validation: re-render every visible widget from scratch
+      # using to_primitives() (painter's algorithm, bypasses ALL caches), then
+      # compare the result pixel-by-pixel against the cached buffer viewport
+      # region.  This catches primitive cache bugs, compositing bugs, AND
+      # content-positioning bugs in a single pass.
+      private def validate_immediate_mode(layer : Layer, backend : RenderBackend,
+                                           layer_offset_x : Float64, layer_offset_y : Float64)
+        # 1. Capture cached viewport region from the buffer
+        viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
+        viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
+        viewport_w = layer.bounds.width.ceil.to_i
+        viewport_h = layer.bounds.height.ceil.to_i
+
+        # Clamp to buffer bounds
+        buf_w = backend.width
+        buf_h = backend.height
+        viewport_x = viewport_x.clamp(0, [buf_w - viewport_w, 0].max)
+        viewport_y = viewport_y.clamp(0, [buf_h - viewport_h, 0].max)
+
+        return if viewport_w <= 0 || viewport_h <= 0
+
+        cached_pixels = backend.capture_region_pixels(viewport_x, viewport_y, viewport_w, viewport_h)
+
+        # 2. Re-render from scratch via get_primitives
+        fresh_backend = render_layer_immediate(layer, layer_offset_x, layer_offset_y, viewport_w, viewport_h)
+
+        fresh_pixels = fresh_backend.capture_region_pixels(0, 0, viewport_w, viewport_h)
+        fresh_backend.dispose
+
+        # 3. Compare
+        mismatch_count, total, first_mismatch = CacheValidation.compare_pixels(
+          cached_pixels, fresh_pixels, viewport_w, viewport_h
+        )
+
+        if mismatch_count > 0 && first_mismatch
+          frame = CacheValidation.frame_counter
+          # Save diff image for first 5 failures only (PPM writing is slow)
+          if CacheValidation.failures.size < 5
+            CacheValidation.save_diff_ppm(cached_pixels, fresh_pixels, viewport_w, viewport_h,
+              "/tmp/cv_diff_#{layer.id}_f#{frame}.ppm")
+          end
+
+          CacheValidation.record_failure(
+            CacheValidation::CacheLevel::ImmediateMode,
+            layer.id,
+            mismatch_count,
+            total,
+            first_mismatch
+          )
+
+          # === CV DIAGNOSTIC: dump widget info near first mismatch ===
+          fm_vx, fm_vy = first_mismatch[0], first_mismatch[1]
+          fm_buffer_x = fm_vx + viewport_x
+          fm_buffer_y = fm_vy + viewport_y
+          # Correct absolute Y: buffer_y + buffer_origin_y + layer_offset_y
+          fm_abs_y = fm_buffer_y + layer.buffer_origin.y.to_i + layer.bounds.y.to_i
+          layer_off_y = layer.bounds.y.to_i
+          File.open("/tmp/cv_diag_#{layer.id}_f#{frame}.log", "w") do |f|
+            f.puts "=== CV DIAGNOSTIC: #{layer.id} frame=#{frame} ==="
+            f.puts "  mismatch_count=#{mismatch_count}/#{total}"
+            f.puts "  first_mismatch: viewport=(#{fm_vx},#{fm_vy}) buffer=(#{fm_buffer_x},#{fm_buffer_y}) abs_y=#{fm_abs_y}"
+            f.puts "  scroll_offset=#{layer.scroll_offset} buffer_origin=#{layer.buffer_origin} layer_offset=(#{layer.bounds.x.to_i},#{layer_off_y})"
+            f.puts "  viewport_in_buffer=(#{viewport_x},#{viewport_y}) #{viewport_w}x#{viewport_h}"
+            f.puts "  buffer_just_cleared=#{layer.buffer_just_cleared}"
+            f.puts "  layer.state=#{layer.state}"
+            f.puts "  layer.widgets.size=#{layer.widgets.size}"
+            f.puts ""
+            # Search for widgets that STRADDLE buffer_y=fm_buffer_y (the overlap boundary)
+            f.puts "--- Widgets straddling buffer_y=#{fm_buffer_y} (buf_y in [#{fm_buffer_y-25}..#{fm_buffer_y+5}]) ---"
+            layer.widgets.each do |root_w|
+              all_w = [root_w]
+              root_w.children.each { |c| all_w << c }
+              all_w.each do |w|
+                ab = w.absolute_bounds
+                buf_y = (ab.y - layer_off_y).to_i - layer.buffer_origin.y.to_i
+                # Show widgets whose buffer_y range includes or is near fm_buffer_y
+                next unless buf_y <= fm_buffer_y + 5 && buf_y + ab.height.to_i >= fm_buffer_y - 25
+                f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} bounds=#{w.bounds} abs=#{ab}"
+                f.puts "    buf_y=#{buf_y} span=[#{buf_y}..#{buf_y + ab.height.to_i}] has_backend=#{!w.widget_backend.nil?} dirty=#{w.needs_render?}"
+                f.puts "    prim_cache=#{w.has_valid_primitive_cache?} fresh_bg=#{w.needs_fresh_background?}"
+                if wb = w.widget_backend
+                  f.puts "    widget_backend: #{wb.width}x#{wb.height}"
+                end
+              end
+            end
+            f.puts ""
+            f.puts "--- Pixel data: cached.size=#{cached_pixels.size} fresh.size=#{fresh_pixels.size} viewport=#{viewport_w}x#{viewport_h} ---"
+            f.puts "--- Buffer pixel dump at mismatch Y (buffer_y=#{fm_buffer_y}, ±5 rows) ---"
+            begin
+              # Array(UInt32): each element = one pixel packed as (R<<24|G<<16|B<<8|A)
+              ((fm_vy - 5)..(fm_vy + 5)).each do |vy|
+                next if vy < 0 || vy >= viewport_h
+                line_parts = [] of String
+                5.times do |i|
+                  vx = fm_vx + i * 50
+                  if vx < 0 || vx >= viewport_w
+                    line_parts << "?"
+                    next
+                  end
+                  idx = vy * viewport_w + vx
+                  if idx < cached_pixels.size
+                    rgba = cached_pixels[idx]
+                    r = (rgba >> 24) & 0xFF
+                    g = (rgba >> 16) & 0xFF
+                    b = (rgba >> 8) & 0xFF
+                    line_parts << "(#{r},#{g},#{b})"
+                  else
+                    line_parts << "OOB"
+                  end
+                end
+                f.puts "  cached y=#{vy} (buf_y=#{vy + viewport_y}): #{line_parts.join(" ")}"
+              end
+            rescue ex
+              f.puts "  ERROR in cached dump: #{ex.message}"
+            end
+            f.puts ""
+            f.puts "--- Fresh (immediate) pixel dump at same position ---"
+            begin
+              ((fm_vy - 5)..(fm_vy + 5)).each do |vy|
+                next if vy < 0 || vy >= viewport_h
+                line_parts = [] of String
+                5.times do |i|
+                  vx = fm_vx + i * 50
+                  if vx < 0 || vx >= viewport_w
+                    line_parts << "?"
+                    next
+                  end
+                  idx = vy * viewport_w + vx
+                  if idx < fresh_pixels.size
+                    rgba = fresh_pixels[idx]
+                    r = (rgba >> 24) & 0xFF
+                    g = (rgba >> 16) & 0xFF
+                    b = (rgba >> 8) & 0xFF
+                    line_parts << "(#{r},#{g},#{b})"
+                  else
+                    line_parts << "OOB"
+                  end
+                end
+                f.puts "  fresh  y=#{vy}: #{line_parts.join(" ")}"
+              end
+            rescue ex
+              f.puts "  ERROR in fresh dump: #{ex.message}"
+            end
+          end
+        end
+      end
+
+      # True immediate-mode reference renderer: painter's algorithm using
+      # to_primitives() (bypasses ALL caches).
+      #
+      # For each widget (parent-first order):
+      #   1. Copy current viewport surface at widget position into a temp backend
+      #      → gives correct background (parent content already painted)
+      #   2. Render to_primitives() at (0,0) on temp backend
+      #      → matches cached pipeline's coordinate space (SFML edge-clip compat)
+      #   3. Blit temp backend back to viewport surface
+      #   4. Dispose temp backend
+      #
+      # Why to_primitives(): bypasses primitive cache (get_primitives returns stale)
+      # Why temp backends: draw_rect edge-clip simulation is position-dependent;
+      #   rendering at (0,0) on a widget-sized backend matches the cached pipeline
+      # Why painter's algorithm: parent paints first so children copy correct
+      #   background from the viewport surface, not a flat layer.background_color
+      private def render_layer_immediate(layer : Layer,
+                                          layer_offset_x : Float64, layer_offset_y : Float64,
+                                          viewport_w : Int32, viewport_h : Int32) : RenderBackend
+        fresh_backend = create_widget_backend(viewport_w, viewport_h)
+        fresh_backend.clear(layer.background_color)
+
+        # Collect ALL widgets on this layer in parent-first order (no viewport
+        # culling — we need the ground-truth set).
+        all_widgets = [] of Widget
+        layer.widgets.each do |root_widget|
+          collect_all_widgets_recursive(root_widget, all_widgets, layer)
+        end
+
+        viewport_clip = Rect.new(0.0, 0.0, viewport_w.to_f64, viewport_h.to_f64)
+        fresh_backend.push_clip(viewport_clip)
+
+        # Pass 1: background + content primitives (painter's algorithm)
+        all_widgets.each do |widget|
+          next if widget.skip_render?
+          next unless valid_widget_dimensions?(widget)
+
+          widget_abs = widget.absolute_bounds
+          widget_width = widget_abs.width.ceil.to_i
+          widget_height = widget_abs.height.ceil.to_i
+          next if widget_width <= 0 || widget_height <= 0
+
+          # Viewport-relative position
+          local_x = (widget_abs.x - layer_offset_x).to_i - layer.scroll_offset.x.to_i
+          local_y = (widget_abs.y - layer_offset_y).to_i - layer.scroll_offset.y.to_i
+
+          # Skip widgets completely outside viewport
+          next if local_x + widget_width <= 0 || local_y + widget_height <= 0
+          next if local_x >= viewport_w || local_y >= viewport_h
+
+          # FRESH primitives — bypasses primitive cache entirely
+          primitives = widget.to_primitives(widget.bounds)
+
+          # Skip pure containers (empty primitives + has children)
+          next if !widget.children.empty? && primitives.empty?
+
+          # Render on temp widget-sized backend at (0,0) for correct edge clipping
+          wb = create_widget_backend(widget_width, widget_height)
+          # Copy current viewport surface as background (painter's algorithm:
+          # parent content already painted → correct background, not flat bg color)
+          wb.blit_region(fresh_backend, local_x, local_y, widget_width, widget_height, 0, 0)
+
+          widget_clip = Rect.new(0.0, 0.0, widget_width.to_f64, widget_height.to_f64)
+          wb.push_clip(widget_clip)
+          primitives.each do |prim|
+            execute_primitive_on_widget_backend(prim, wb)
+          end
+          wb.pop_clip
+          wb.display
+
+          # Blit back to viewport
+          fresh_backend.blit(wb, local_x, local_y)
+          wb.dispose
+        end
+
+        # Pass 2: foreground primitives for DecoratedContainers (borders/overlays)
+        all_widgets.each do |widget|
+          if widget.responds_to?(:has_foreground?) && widget.has_foreground?
+            widget_abs = widget.absolute_bounds
+            local_x = (widget_abs.x - layer_offset_x).to_i - layer.scroll_offset.x.to_i
+            local_y = (widget_abs.y - layer_offset_y).to_i - layer.scroll_offset.y.to_i
+
+            widget.foreground_primitives.each do |prim|
+              execute_primitive_with_offset(prim, fresh_backend, local_x.to_f64, local_y.to_f64)
+            end
+          end
+        end
+
+        fresh_backend.pop_clip
+        fresh_backend.display
+        fresh_backend
+      end
+    {% end %}
 
     # Check a layer's backend for transparent pixels (debug helper)
     private def check_layer_transparency(layer : Layer, backend : RenderBackend)
@@ -393,18 +785,18 @@ module CrymbleUI
     # Render a single dirty widget (selective rendering optimization)
     # Uses per-widget texture: widget renders to own backend, then blits to layer
     # Directly renders the widget without tree traversal - O(1) instead of O(n)
-    private def render_single_widget(widget : Widget, backend : RenderBackend, offset_x : Float64, offset_y : Float64, layer : Layer, drag_offset : Vec2)
+    private def render_single_widget(widget : Widget, backend : RenderBackend, offset_x : Float64, offset_y : Float64, layer : Layer, drag_offset : Vec2) : Nil
       # Instrumentation: count all widgets passed to this method (before any early exits)
       LayerRenderer.frame_widgets_iterated += 1
 
-      return if widget.skip_render?
+      return nil if widget.skip_render?
 
       # Get widget absolute bounds for rendering
       widget_abs = widget.absolute_bounds
 
       # Validation (Option C): Skip widgets with invalid dimensions
       # Catches NaN, Infinity, and zero/negative sizes early
-      return unless valid_widget_dimensions?(widget)
+      return nil unless valid_widget_dimensions?(widget)
 
       # Apply drag offset for resizing/dragging panels (corrects stale absolute_bounds)
       adjusted_x = widget_abs.x + drag_offset.x
@@ -418,7 +810,7 @@ module CrymbleUI
       widget_height = widget_abs.height.ceil.to_i
 
       # Skip zero-size widgets (no visible content)
-      return if widget_width <= 0 || widget_height <= 0
+      return nil if widget_width <= 0 || widget_height <= 0
 
       # Calculate layer-local position for visibility check
       # Round absolute coords relative to root BEFORE subtracting layer offset
@@ -447,7 +839,7 @@ module CrymbleUI
           {% if flag?(:DEBUG_RENDER) %}
             puts "    [SKIP OFF-BUFFER] #{widget.class.name.split("::").last}##{widget.path_id} buffer(#{buffer_x},#{buffer_y})"
           {% end %}
-          return
+          return nil
         end
 
         # Use buffer-relative position for rendering (NOT viewport-relative)
@@ -462,7 +854,7 @@ module CrymbleUI
           {% if flag?(:DEBUG_RENDER) %}
             puts "    [SKIP OFF-SCREEN] #{widget.class.name.split("::").last}##{widget.path_id} at layer(#{layer_local_x},#{layer_local_y})"
           {% end %}
-          return
+          return nil
         end
       end
 
@@ -472,12 +864,87 @@ module CrymbleUI
         if existing_backend = widget.widget_backend
           if existing_backend.width == widget_width && existing_backend.height == widget_height
             # Widget has valid cached backend - check if content changed
-            if widget.has_valid_primitive_cache? && !widget.needs_render?
+            # IMPORTANT: Also check needs_fresh_background - new cells replacing destroyed ones
+            # must go through full render path to capture clean background (fixes ghosting)
+            if widget.has_valid_primitive_cache? && !widget.needs_render? && !widget.needs_fresh_background?
               # Fast path: blit cached content, skip ALL other work including get_primitives
+              {% if flag?(:DEBUG_RENDER) %}
+                puts "    [FAST_PATH] #{widget.class.name.split("::").last}##{widget.path_id} blitting to (#{layer_local_x}, #{layer_local_y})"
+              {% end %}
+              {% if flag?(:cache_validation) %}
+                # CV trace: capture widget_backend content for cells near buffer boundary
+                if layer.id.starts_with?("matrix_content") && layer_local_y >= 815 && layer_local_y <= 830
+                  if existing_backend.responds_to?(:capture_region_pixels)
+                    frame = CacheValidation.frame_counter
+                    File.open("/tmp/cv_fast_path_f#{frame}.log", "a") do |f|
+                      f.puts "FAST_PATH: buf_y=#{layer_local_y} size=#{existing_backend.width}x#{existing_backend.height}"
+                      # Capture bottom 5 rows of widget_backend
+                      cap_y = [existing_backend.height - 5, 0].max
+                      cap_h = [5, existing_backend.height].min
+                      pixels = existing_backend.capture_region_pixels(0, cap_y, [existing_backend.width, 10].min, cap_h)
+                      cap_h.times do |dy|
+                        line_parts = [] of String
+                        [existing_backend.width, 10].min.times do |dx|
+                          idx = dy * [existing_backend.width, 10].min + dx
+                          rgba = pixels[idx]
+                          r = (rgba >> 24) & 0xFF
+                          g = (rgba >> 16) & 0xFF
+                          b = (rgba >> 8) & 0xFF
+                          line_parts << "(#{r},#{g},#{b})"
+                        end
+                        f.puts "  wb_row[#{cap_y + dy}]: #{line_parts.join(" ")}"
+                      end
+                    end
+                  end
+                end
+              {% end %}
               backend.blit(existing_backend, layer_local_x, layer_local_y)
+              {% if flag?(:cache_validation) %}
+                # CV trace: verify buffer content AFTER fast-path blit
+                if layer.id.starts_with?("matrix_content") && layer_local_y >= 815 && layer_local_y <= 830
+                  if backend.responds_to?(:capture_region_pixels)
+                    frame = CacheValidation.frame_counter
+                    # Capture the bottom 5 rows of the blit area from the buffer
+                    check_y = layer_local_y + widget_height - 5
+                    check_h = 5
+                    if check_y >= 0 && check_y + check_h <= backend.height
+                      # Need display() to update texture before capture
+                      backend.display
+                      buf_pixels = backend.capture_region_pixels(layer_local_x, check_y, [existing_backend.width, 10].min, check_h)
+                      File.open("/tmp/cv_fast_path_f#{frame}.log", "a") do |f|
+                        f.puts "  POST_BLIT buf_y=#{check_y}..#{check_y + check_h - 1}:"
+                        check_h.times do |dy|
+                          line_parts = [] of String
+                          [existing_backend.width, 10].min.times do |dx|
+                            idx = dy * [existing_backend.width, 10].min + dx
+                            rgba = buf_pixels[idx]
+                            r = (rgba >> 24) & 0xFF
+                            g = (rgba >> 16) & 0xFF
+                            b = (rgba >> 8) & 0xFF
+                            line_parts << "(#{r},#{g},#{b})"
+                          end
+                          f.puts "    buf_row[#{check_y + dy}]: #{line_parts.join(" ")}"
+                        end
+                      end
+                    end
+                  end
+                end
+              {% end %}
               return
+            else
+              {% if flag?(:DEBUG_RENDER) %}
+                puts "    [NO_FAST_PATH] #{widget.class.name.split("::").last}##{widget.path_id} at (#{layer_local_x}, #{layer_local_y}) cache=#{widget.has_valid_primitive_cache?} needs_render=#{widget.needs_render?} needs_fresh=#{widget.needs_fresh_background?}"
+              {% end %}
             end
+          else
+            {% if flag?(:DEBUG_RENDER) %}
+              puts "    [SIZE_MISMATCH] #{widget.class.name.split("::").last}##{widget.path_id} backend=#{existing_backend.width}x#{existing_backend.height} widget=#{widget_width}x#{widget_height}"
+            {% end %}
           end
+        else
+          {% if flag?(:DEBUG_RENDER) %}
+            puts "    [NO_BACKEND] #{widget.class.name.split("::").last}##{widget.path_id} at (#{layer_local_x}, #{layer_local_y})"
+          {% end %}
         end
       end
 
@@ -493,7 +960,7 @@ module CrymbleUI
         {% if flag?(:DEBUG_RENDER) %}
           puts "    [SKIP PURE CONTAINER] #{widget.class.name.split("::").last}##{widget.path_id} (children will render)"
         {% end %}
-        return
+        return nil
       end
 
       # DETECTION: Leaf widget with empty primitives is suspicious (potential bug)
@@ -577,6 +1044,16 @@ module CrymbleUI
       # OpenGL scissor is global state - if active on layer backend, it would incorrectly
       # clip draws to widget_backend and background_backend (different textures!)
       backend.suspend_clip
+
+      # When buffer was just cleared (full render after rebuild/recenter),
+      # cached backgrounds are stale — they contain pre-clear content (e.g. old theme colors).
+      # Dispose and force recapture from the freshly-cleared layer.
+      if layer.buffer_just_cleared
+        if stale_bg = widget.background_backend
+          stale_bg.dispose
+          widget.background_backend = nil
+        end
+      end
 
       if background_backend = widget.background_backend
         # Subsequent render: restore background from saved backend (GPU→GPU blit)
@@ -669,18 +1146,24 @@ module CrymbleUI
           end
         {% end %}
 
-        # WORKAROUND for SFML RenderTexture limitation (see widget.cr @needs_fresh_background):
-        # Layer texture may have stale content that we can't clear without breaking rendering.
-        # Two cases where we fill with background color instead of blit_region:
-        # 1. buffer_just_cleared: layer was cleared on recenter, texture is stale (Bug 1)
-        # 2. needs_fresh_background: widget exited viewport, layer has widget's OLD pixels (Bug 2)
-        if layer.buffer_just_cleared || widget.needs_fresh_background?
+        # needs_fresh_background: widget exited viewport, layer has widget's OLD pixels (Bug 2)
+        # Fill with background color instead of blit_region (can't trust layer content).
+        if widget.needs_fresh_background?
           background_backend.clear(layer.background_color)
-          # Clear the per-widget flag after use
           widget.needs_fresh_background = false
         else
-          # Normal path: Copy layer region to background backend (GPU→GPU, very fast)
-          background_backend.blit_region(backend, layer_local_x, layer_local_y, widget_width, widget_height, 0, 0)
+          # CRITICAL: Finalize layer backend texture before reading from it!
+          # SFML RenderTexture.getTexture() only reflects draws after display() is called.
+          # Without this, a child widget captures stale layer content (e.g. transparent
+          # instead of parent HStack's blue fill → white rectangles behind text).
+          # This also handles buffer_just_cleared: display() flushes the clear + any
+          # subsequent parent blits, so blit_region reads correct current content.
+          backend.display
+          # Use blit() with negative offsets instead of blit_region() to avoid
+          # Y-flip issues with SFML RenderTexture FBO (same fix as blit-shift bug).
+          # blit() lets SFML handle FBO orientation automatically; blit_region()'s
+          # manual Y-flip produces wrong results for FBO→FBO copies.
+          background_backend.blit(backend, -layer_local_x, -layer_local_y)
         end
         # CRITICAL: Finalize background_backend texture before using as blit source (SFML requirement)
         # Without this, SFML sprite creation gets stale/uninitialized texture data → artifacts!
@@ -948,6 +1431,31 @@ module CrymbleUI
         end
       end
 
+      # Check for sticky layers (ScrollView, VirtualMatrix)
+      # These layers render fixed headers that partially scroll with content
+      if widget.responds_to?(:sticky_row_layer)
+        if layer = widget.sticky_row_layer
+          layers << layer
+        end
+      end
+      if widget.responds_to?(:sticky_col_layer)
+        if layer = widget.sticky_col_layer
+          layers << layer
+        end
+      end
+      if widget.responds_to?(:sticky_corner_layer)
+        if layer = widget.sticky_corner_layer
+          layers << layer
+        end
+      end
+
+      # Check for cursor overlay layer (VirtualMatrix)
+      if widget.responds_to?(:cursor_overlay_layer)
+        if layer = widget.cursor_overlay_layer
+          layers << layer
+        end
+      end
+
       # Check children
       widget.children.each do |child|
         layers.concat(collect_layers(child))
@@ -982,8 +1490,14 @@ module CrymbleUI
 
         # OPTIMIZATION: For viewport_cache layers, only collect VISIBLE widgets
         # This reduces iteration from O(total) to O(visible) - huge win for large scroll content
-        # BUT: If layer.state is NeedsLayout, widget bounds may be stale (zero size), so skip culling
-        if layer.viewport_cache && layer.state != WidgetState::NeedsLayout
+        # Skip culling when:
+        #   - NeedsLayout: widget bounds may be stale (zero size)
+        #   - buffer_just_cleared: buffer was recentered and needs full repopulation;
+        #     viewport culling would miss widgets in the cache_extent margin.
+        #     render_single_widget's own buffer-bounds check (lines 443-451) still
+        #     skips off-buffer widgets. Actual rendering stays O(appearing) because
+        #     the fast path (line 471) blits cached widget_backends without re-rendering.
+        if layer.viewport_cache && layer.state != WidgetState::NeedsLayout && !layer.buffer_just_cleared
           # Calculate viewport bounds in content coordinates
           # Viewport is at scroll_offset, with size layer.bounds.width/height
           viewport = Rect.new(
@@ -1010,9 +1524,44 @@ module CrymbleUI
         layer.widgets.each do |widget|
           collect_all_widgets_recursive(widget, all_widgets, layer)
         end
-        # Filter to only dirty widgets (preserves parent-first order from collection)
+        # Filter to dirty widgets OR backend-less widgets within buffer bounds.
+        # Bug 2 fix: After buffer recenter clears widget_backends, widgets that become
+        # visible on subsequent frames need to be rendered even if not marked dirty.
+        # But we must NOT include all backend-less widgets (most are off-screen and never
+        # had a backend) — only those within the current buffer area.
         dirty_set = layer.dirty_widgets
-        result = all_widgets.select { |w| dirty_set.includes?(w) }
+        result = if layer.viewport_cache
+                   backend = layer.backend
+                   buf_origin = layer.buffer_origin
+                   buf_w = backend ? backend.width : 0
+                   buf_h = backend ? backend.height : 0
+                   all_widgets.select { |w|
+                     next true if dirty_set.includes?(w)
+                     next false unless w.widget_backend.nil?
+                     # Check if widget is within buffer bounds
+                     bx = w.bounds.x.to_i - buf_origin.x.to_i
+                     by = w.bounds.y.to_i - buf_origin.y.to_i
+                     bx + w.bounds.width.to_i > 0 && by + w.bounds.height.to_i > 0 &&
+                       bx < buf_w && by < buf_h
+                   }
+                 else
+                   all_widgets.select { |w| dirty_set.includes?(w) }
+                 end
+        {% if flag?(:DEBUG_RENDER) %}
+          if layer.viewport_cache
+            puts "    [SELECTIVE_RENDER] all_widgets=#{all_widgets.size} dirty_set=#{dirty_set.size} result=#{result.size}"
+            if all_widgets.size != result.size
+              # Find widgets not in dirty_set
+              missing = all_widgets.reject { |w| dirty_set.includes?(w) || w.widget_backend.nil? }
+              if missing.size > 0
+                puts "      MISSING from dirty_set (#{missing.size} widgets):"
+                missing.first(5).each do |w|
+                  puts "        #{w.class.name.split("::").last}##{w.path_id} obj_id=#{w.object_id}"
+                end
+              end
+            end
+          end
+        {% end %}
 
         result
       end
@@ -1078,13 +1627,30 @@ module CrymbleUI
         "(parent: #{parent ? parent.class.name.split("::").last + "#" + parent.path_id : "nil"})")
     end
 
+    # Compute quantized buffer_origin for viewport_cache layers.
+    # Quantizes to multiples of cache_extent so that recenters at intermediate scroll
+    # positions (e.g. scroll=19 during scroll-back) snap to the same grid as the initial
+    # position. Without this, buffer_origin drifts (e.g. -81 instead of -100) after
+    # scroll round-trips, causing a 19px viewport shift and black pixel artifacts.
+    private def quantized_buffer_origin(layer : Layer) : Vec2
+      ce = layer.cache_extent
+      if ce <= 0.0
+        return layer.scroll_offset - Vec2.new(ce, ce)
+      end
+      buf_x = ((layer.scroll_offset.x - ce) / ce).round * ce
+      buf_y = ((layer.scroll_offset.y - ce) / ce).round * ce
+      Vec2.new(buf_x, buf_y)
+    end
+
     # Handle viewport_cache buffer scroll: check if viewport moved beyond cached region
     # Returns true if buffer was recentered and needs full render of visible widgets
     #
     # Design (Hybrid approach):
     # - Buffer = viewport + 2×cache_extent (margin on each side)
     # - Small scroll (within cache_extent): Just move viewport, no re-render needed
-    # - Large scroll (beyond buffer bounds): Recenter buffer, full re-render
+    # - Large scroll (beyond buffer bounds): Recenter buffer
+    #   - Blit-shift: if overlap exists, shift overlapping content → O(edge_cells)
+    #   - Full recenter: no overlap → clear everything → O(all_visible_cells)
     #
     # The viewport position within buffer = scroll_offset - buffer_origin
     # Valid range: [0, 0] to [buffer_width - viewport_width, buffer_height - viewport_height]
@@ -1113,29 +1679,160 @@ module CrymbleUI
       end
 
       # Viewport moved outside buffer bounds - need to recenter buffer
-      # Clear buffer and reset buffer_origin so viewport is centered in buffer
-      {% if flag?(:DEBUG_RENDER) %}
-        puts "  [VIEWPORT_CACHE RECENTER] viewport_in_buffer=(#{viewport_in_buffer_x}, #{viewport_in_buffer_y})"
-        puts "    max_valid=(#{max_valid_x}, #{max_valid_y})"
-        puts "    Recentering buffer_origin from #{layer.buffer_origin} to scroll_offset - cache_extent"
-      {% end %}
+      new_origin = quantized_buffer_origin(layer)
+      old_origin = layer.buffer_origin
 
-      backend.clear(layer.background_color)
-      layer.buffer_origin = layer.scroll_offset - Vec2.new(layer.cache_extent, layer.cache_extent)
+      buf_w = backend.width
+      buf_h = backend.height
 
-      # Mark buffer as just cleared - widgets should NOT capture from stale texture
-      # They should fill with background_color instead (texture won't reflect clear until display())
-      layer.buffer_just_cleared = true
+      # Compute overlap between old and new buffer regions in content space
+      overlap_left = Math.max(old_origin.x, new_origin.x)
+      overlap_top = Math.max(old_origin.y, new_origin.y)
+      overlap_right = Math.min(old_origin.x + buf_w, new_origin.x + buf_w)
+      overlap_bottom = Math.min(old_origin.y + buf_h, new_origin.y + buf_h)
 
-      # Clear widget_backend for ALL widgets in content tree so they fully re-render
-      # Without this, the fast path (lines 468-479) would blit OLD cached content
-      # at NEW buffer positions after buffer_origin changes → shifted garbling bug.
-      if scroll_view = layer.owner_widget.as?(ScrollView)
-        scroll_view.clear_all_widget_backends
+      overlap_w = (overlap_right - overlap_left).to_i
+      overlap_h = (overlap_bottom - overlap_top).to_i
+
+      if overlap_w <= 0 || overlap_h <= 0
+        # No overlap → fall back to full recenter (clear everything, re-render all)
+        {% if flag?(:DEBUG_RENDER) %}
+          puts "  [VIEWPORT_CACHE FULL RECENTER] no overlap"
+          puts "    old_origin=#{old_origin} new_origin=#{new_origin}"
+        {% end %}
+
+        backend.clear(layer.background_color)
+        layer.buffer_origin = new_origin
+        layer.buffer_just_cleared = true
+
+        if owner = layer.owner_widget
+          if owner.responds_to?(:clear_all_widget_backends)
+            owner.clear_all_widget_backends
+          end
+        end
+
+        return true # Full render needed
       end
 
-      true # Signal that full render is needed
+      # Blit-shift: copy overlap to temp, clear, restore at new position
+      # This preserves cached content for overlap cells → only edge cells need rendering
+      src_x = (overlap_left - old_origin.x).to_i
+      src_y = (overlap_top - old_origin.y).to_i
+      dest_x = (overlap_left - new_origin.x).to_i
+      dest_y = (overlap_top - new_origin.y).to_i
+
+      {% if flag?(:DEBUG_RENDER) %}
+        puts "  [VIEWPORT_CACHE BLIT-SHIFT] overlap=#{overlap_w}x#{overlap_h}"
+        puts "    old_origin=#{old_origin} new_origin=#{new_origin}"
+        puts "    src=(#{src_x},#{src_y}) dest=(#{dest_x},#{dest_y})"
+      {% end %}
+
+      {% if flag?(:cache_validation) %}
+        # Blit-shift validation: capture pre-shift overlap pixels for comparison
+        pre_shift_pixels = if CacheValidation.enabled?(:blit_shift) && overlap_w > 0 && overlap_h > 0
+                             backend.capture_region_pixels(src_x, src_y, overlap_w, overlap_h)
+                           else
+                             nil
+                           end
+      {% end %}
+
+      # Copy overlap region to temp backend using blit() with negative offsets.
+      # IMPORTANT: We use blit() (full-texture draw) instead of blit_region() (partial texture
+      # with texture_rect) because SFML's FBO→FBO blit_region applies Y-flip handling
+      # (flipped_src_y + scale(-1) + position offset) that produces incorrect pixel positions
+      # for large-region copies. blit() avoids this because SFML handles FBO texture orientation
+      # automatically for full-texture sprites. The negative offset (-src_x, -src_y) causes
+      # SFML to clip the source, effectively extracting only the overlap region into temp.
+      temp = create_widget_backend(overlap_w, overlap_h)
+      temp.blit(backend, -src_x, -src_y)
+      temp.display # Required for SFML: update texture snapshot before reading back
+
+      # Clear buffer and restore overlap at new position
+      backend.clear(layer.background_color)
+      backend.blit(temp, dest_x, dest_y)
+      temp.dispose
+
+      # Update buffer_origin to new position
+      layer.buffer_origin = new_origin
+
+      # Update texture snapshot so edge cells can capture correct background
+      # (SFML texture is stale until display() - without this, blit_region reads old content)
+      backend.display
+
+      {% if flag?(:cache_validation) %}
+        # Blit-shift validation: compare pre-shift source pixels with post-shift destination pixels
+        # If blit_region is correct, these must be pixel-identical (pure copy)
+        if pre_shift_pixels
+          validate_blit_shift(layer, backend, pre_shift_pixels, overlap_w, overlap_h, dest_x, dest_y)
+        end
+      {% end %}
+
+      # Invalidate widget_backends of cells that were partially clipped at the old buffer
+      # boundary. After blit-shift, these cells take the fast path (valid primitive cache,
+      # existing widget_backend), but the fast-path blit reproduces the old truncated pixel
+      # count from the clipped position. Force full render path by clearing widget_backend
+      # so they get a fresh backend with correct blit dimensions at the new position.
+      lo_x = layer.bounds.x.round.to_i
+      lo_y = layer.bounds.y.round.to_i
+      layer.widgets.each do |widget|
+        next unless widget.widget_backend
+        wabs = widget.absolute_bounds
+        ob_x = (wabs.x.round.to_i - lo_x) - old_origin.x.to_i
+        ob_y = (wabs.y.round.to_i - lo_y) - old_origin.y.to_i
+        w_w = wabs.width.ceil.to_i
+        w_h = wabs.height.ceil.to_i
+        if ob_y + w_h > buf_h || ob_y < 0 || ob_x + w_w > buf_w || ob_x < 0
+          widget.widget_backend.try(&.dispose)
+          widget.widget_backend = nil
+          LayerRenderer.frame_boundary_cells_invalidated += 1
+        end
+      end
+
+      # Notify owner to prepare for blit-shift (e.g., VirtualMatrix forces cell update
+      # so edge cells for the newly exposed buffer strip get created)
+      if owner = layer.owner_widget
+        if owner.responds_to?(:prepare_backends_for_blit_shift)
+          owner.prepare_backends_for_blit_shift(layer)
+        end
+      end
+
+      # Return true → full_render with viewport culling (buffer_just_cleared stays false).
+      # Overlap cells: have valid widget_backend + background_backend → fast path (cheap blit)
+      # Edge cells: nil widget_backend → full render path → rendered normally
+      # Boundary cells: widget_backend cleared above → full render path → fresh blit
+      # Key insight: background_backend content (solid bg_color) is position-independent,
+      # so old background stays valid after buffer shift.
+      true
     end
+
+    {% if flag?(:cache_validation) %}
+      # Validate blit-shift: the pre-shift source pixels must exactly match
+      # the post-shift destination pixels. This verifies that blit_region
+      # performed a lossless copy during buffer recenter.
+      private def validate_blit_shift(layer : Layer, backend : RenderBackend,
+                                       pre_shift_pixels : Array(UInt32),
+                                       overlap_w : Int32, overlap_h : Int32,
+                                       dest_x : Int32, dest_y : Int32)
+        # Capture post-shift destination pixels
+        post_shift_pixels = backend.capture_region_pixels(dest_x, dest_y, overlap_w, overlap_h)
+
+        # Compare: pre-shift source should be identical to post-shift destination
+        mismatch_count, total, first_mismatch = CacheValidation.compare_pixels(
+          pre_shift_pixels, post_shift_pixels, overlap_w, overlap_h
+        )
+
+        if mismatch_count > 0 && first_mismatch
+          CacheValidation.record_failure(
+            CacheValidation::CacheLevel::BlitShift,
+            layer.id,
+            mismatch_count,
+            total,
+            first_mismatch
+          )
+        end
+      end
+    {% end %}
+
   end
 end
 

@@ -12,12 +12,16 @@ module CrymbleUI
         # Visual properties
         render_property text : String
         render_property color : Color
+        render_property background_color : Color?
+        layout_property padding : Float64 = 0.0
 
         def initialize(
             @text : String,
             id : String? = nil,
             font_scale : Int32 = 0,
-            @color : Color = Color.new(0, 0, 0, 255)
+            @color : Color = Theme.current.text_default,
+            @background_color : Color? = nil,
+            @padding : Float64 = 0.0
         )
             @font_scale = font_scale
             super(id: id)
@@ -31,8 +35,8 @@ module CrymbleUI
         # Measure the text size using proper text measurement
         def measure(constraints : BoxConstraints) : Size
             text_size = measure_text(@text, font_size)
-            width = text_size.width
-            height = text_size.height
+            width = text_size.width + @padding * 2
+            height = text_size.height + @padding * 2
 
             # Constrain to box constraints
             constrained = constraints.constrain(Size.new(width, height))
@@ -70,7 +74,11 @@ module CrymbleUI
             {% end %}
 
             primitives do
-                draw_text(@text, Vec2.zero, @color, @font_scale)
+                if bg = @background_color
+                    fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+                end
+                text_y = @padding + (bounds.height - @padding * 2 - font_size) / 2.0
+                draw_text(@text, Vec2.new(@padding, text_y), @color, @font_scale)
             end
         end
 

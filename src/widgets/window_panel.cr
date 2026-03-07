@@ -68,7 +68,7 @@ module CrymbleUI
 
         # Double-click detection for title bar maximize
         DOUBLE_CLICK_THRESHOLD_MS = 300
-        @last_title_click_time : Time::Span = Time::Span.zero
+        @last_title_click_time : Time::Instant = Time.instant
         @last_title_click_point : Vec2 = Vec2.new(0.0, 0.0)
 
         # Track last hit position for close button detection
@@ -95,10 +95,10 @@ module CrymbleUI
         @resize_start_bounds : Rect = Rect.zero
 
         # Visual properties - reconcile: true to preserve user color changes
-        render_property title_bar_color : Color = Color.new(0, 100, 180, 255), reconcile: true  # Dark blue
-        render_property title_text_color : Color = Color.new(255, 255, 255, 255), reconcile: true  # White
-        render_property border_color : Color = Color.new(0, 80, 160, 255), reconcile: true  # Darker blue
-        render_property background_color : Color = Color.new(240, 240, 240, 255), reconcile: true  # Light gray
+        render_property title_bar_color : Color = Theme.current.panel_title_bar, reconcile: true
+        render_property title_text_color : Color = Theme.current.panel_title_text, reconcile: true
+        render_property border_color : Color = Theme.current.panel_border, reconcile: true
+        render_property background_color : Color = Theme.current.panel_background, reconcile: true
         # Title font scale (relative sizing: 0 = base, +1 = larger, -1 = smaller)
         # Note: Uses layout_property because title_bar_height depends on font_scale
         layout_property title_font_scale : Int32 = 0
@@ -113,7 +113,7 @@ module CrymbleUI
 
         # Dynamic title bar height (scales with font zoom)
         def title_bar_height : Float64
-            FontSizing.calculate_size(@title_font_scale) + 16.0
+            (FontSizing.calculate_size(@title_font_scale) + 16.0).round
         end
 
         # Dynamic close button size (proportional to title bar)
@@ -140,8 +140,7 @@ module CrymbleUI
         def title_text_padding : Float64
             title_bar_height * 0.25
         end
-        TITLE_BAR_COLOR_ACTIVE = Color.new(0, 120, 215, 255)    # Bright blue (topmost panel)
-        TITLE_BAR_COLOR_INACTIVE = Color.new(0, 80, 150, 255)   # Darker blue (non-topmost)
+        # Title bar colors (dynamic - must follow theme changes)
 
         # Resize handle constants
         RESIZE_HANDLE_SIZE = 8.0  # Hit area for edge/corner resize
@@ -182,7 +181,7 @@ module CrymbleUI
                 return [] of DrawPrimitive if panel.closed
 
                 # Determine active color based on panel topmost status
-                active_color = panel.topmost? ? TITLE_BAR_COLOR_ACTIVE : TITLE_BAR_COLOR_INACTIVE
+                active_color = panel.topmost? ? Theme.current.panel_title_bar_active : Theme.current.panel_title_bar_inactive
 
                 # Get dynamic sizes
                 title_height = panel.title_bar_height
@@ -630,13 +629,13 @@ module CrymbleUI
                 end
 
                 # Check for double-click to toggle maximize
-                now = Time.monotonic
+                now = Time.instant
                 diff = @last_title_click_point - point
                 distance = Math.sqrt(diff.x * diff.x + diff.y * diff.y)
                 if (now - @last_title_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS &&
                    distance < 10.0
                     toggle_maximize
-                    @last_title_click_time = Time::Span.zero  # Reset to prevent triple-click
+                    @last_title_click_time = Time.instant  # Reset to prevent triple-click
                     return
                 end
                 @last_title_click_time = now

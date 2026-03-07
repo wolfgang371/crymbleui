@@ -90,10 +90,10 @@ module CrymbleUI
       value : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      @text_color : Color = Color.new(0, 0, 0, 255),
-      @background_color : Color = Color.new(255, 255, 255, 255),
-      @hover_color : Color = Color.new(230, 230, 230, 255),
-      @selected_color : Color = Color.new(120, 160, 220, 255), # Medium blue (can visibly brighten)
+      @text_color : Color = Theme.current.combo_text,
+      @background_color : Color = Theme.current.combo_background,
+      @hover_color : Color = Theme.current.combo_hover,
+      @selected_color : Color = Theme.current.combo_selected,
       @text_background_color : Color? = nil,
       on_click : Proc(String, Nil)? = nil,
     )
@@ -110,10 +110,10 @@ module CrymbleUI
       value : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      text_color : Color = Color.new(0, 0, 0, 255),
-      background_color : Color = Color.new(255, 255, 255, 255),
-      hover_color : Color = Color.new(230, 230, 230, 255),
-      selected_color : Color = Color.new(120, 160, 220, 255),
+      text_color : Color = Theme.current.combo_text,
+      background_color : Color = Theme.current.combo_background,
+      hover_color : Color = Theme.current.combo_hover,
+      selected_color : Color = Theme.current.combo_selected,
       text_background_color : Color? = nil,
       &block : String -> Nil
     )

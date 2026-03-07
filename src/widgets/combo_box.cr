@@ -162,12 +162,12 @@ module CrymbleUI
 
       primitives do
         # Background
-        fill_rect(local_bounds, Color.new(255, 255, 255, 255))
+        fill_rect(local_bounds, Theme.current.combo_background)
         # Border
-        draw_rect(local_bounds, Color.new(180, 180, 180, 255))
+        draw_rect(local_bounds, Theme.current.combo_border)
         # Text
         text_pos = Vec2.new(PADDING, PADDING)
-        draw_text(display_text, text_pos, Color.new(0, 0, 0, 255), FONT_SCALE)
+        draw_text(display_text, text_pos, Theme.current.combo_text, FONT_SCALE)
       end
     end
 

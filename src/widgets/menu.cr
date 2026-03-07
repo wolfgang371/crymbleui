@@ -20,8 +20,7 @@ module CrymbleUI
         include PrimitiveBuilder
         include FontScalable
 
-        # Layout constants
-        DEFAULT_BORDER_COLOR = Color.new(200, 200, 200, 255)
+        # Border color (dynamic - must follow theme changes)
 
         # Dynamic default height (fallback when not constrained by menubar)
         def default_height : Float64
@@ -61,9 +60,9 @@ module CrymbleUI
             label : String,
             id : String? = nil,
             font_scale : Int32 = 0,
-            @text_color : Color = Color.new(0, 0, 0, 255),
-            @background_color : Color = Color.new(250, 250, 250, 255),
-            @hover_color : Color = Color.new(230, 230, 230, 255),
+            @text_color : Color = Theme.current.menu_text,
+            @background_color : Color = Theme.current.menu_background,
+            @hover_color : Color = Theme.current.menu_hover,
             @padding : Float64 = 10.0
         )
             @font_scale = font_scale
@@ -311,7 +310,7 @@ module CrymbleUI
             border_rect = Rect.new(0.0, 0.0 + bounds.height - MenuBar::BORDER_WIDTH, bounds.width, MenuBar::BORDER_WIDTH)
 
             # Get border color from parent MenuBar if possible
-            border_color = DEFAULT_BORDER_COLOR
+            border_color = Theme.current.menu_border
             if mb = @parent
                 if mb.is_a?(MenuBar)
                     border_color = mb.as(MenuBar).border_color

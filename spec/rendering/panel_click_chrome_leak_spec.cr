@@ -73,8 +73,8 @@ describe "Panel chrome rendering on click" do
     content_x = (panel3.width / 2).to_i  # Center of panel
 
     # Define titlebar colors for comparison
-    titlebar_active_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_ACTIVE
-    titlebar_inactive_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_INACTIVE
+    titlebar_active_color = CrymbleUI::Theme.current.panel_title_bar_active
+    titlebar_inactive_color = CrymbleUI::Theme.current.panel_title_bar_inactive
 
     # Get initial gap pixel color (before click)
     initial_content_pixel = panel3_backend.get_pixel(content_x, content_y)

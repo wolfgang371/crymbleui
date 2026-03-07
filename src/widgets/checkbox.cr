@@ -99,6 +99,7 @@ module CrymbleUI
     layout_property box_scale : Int32 # Relative scale like font_scale: -2, -1, 0, +1, +2
     render_property box_color : Color
     render_property check_color : Color
+    render_property background_color : Color?
     layout_property spacing : Float64
 
     # Dynamic effective box size (always scales with zoom via FontSizing)
@@ -126,11 +127,12 @@ module CrymbleUI
       @check_state : CheckState = CheckState::Unchecked,
       id : String? = nil,
       font_scale : Int32 = 0,
-      @text_color : Color = Color.new(0, 0, 0, 255),
+      @text_color : Color = Theme.current.checkbox_text,
       @box_scale : Int32 = 0, # Relative scale like font_scale: -2, -1, 0, +1, +2
-      @box_color : Color = Color.new(100, 100, 100, 255),
-      @check_color : Color = Color.new(0, 120, 215, 255),
+      @box_color : Color = Theme.current.checkbox_box,
+      @check_color : Color = Theme.current.checkbox_check,
       @spacing : Float64 = 8.0,
+      @background_color : Color? = nil,
       on_click : Proc(Nil)? = nil,
     )
       @font_scale = font_scale
@@ -146,14 +148,15 @@ module CrymbleUI
       check_state : CheckState = CheckState::Unchecked,
       id : String? = nil,
       font_scale : Int32 = 0,
-      text_color : Color = Color.new(0, 0, 0, 255),
+      text_color : Color = Theme.current.checkbox_text,
       box_scale : Int32 = 0,
-      box_color : Color = Color.new(100, 100, 100, 255),
-      check_color : Color = Color.new(0, 120, 215, 255),
+      box_color : Color = Theme.current.checkbox_box,
+      check_color : Color = Theme.current.checkbox_check,
       spacing : Float64 = 8.0,
+      background_color : Color? = nil,
       &block : -> Nil
     )
-      new(text, checked, check_state, id, font_scale, text_color, box_scale, box_color, check_color, spacing, on_click: block)
+      new(text, checked, check_state, id, font_scale, text_color, box_scale, box_color, check_color, spacing, background_color: background_color, on_click: block)
     end
 
     # Override label for path_id generation
@@ -171,7 +174,7 @@ module CrymbleUI
       # Height: max of box and font size
       height = [box, font_size].max + 4.0 # Extra padding
 
-      Size.new(width, height)
+      constraints.constrain(Size.new(width, height))
     end
 
     # Layout the checkbox at the given position
@@ -180,8 +183,11 @@ module CrymbleUI
       @bounds = Rect.new(position, size)
     end
 
-    # Trigger click callback
+    # Toggle checked state and fire callback.
+    # Auto-toggles so Checkbox works without a user-provided block
+    # (e.g. as a VirtualMatrix cell or standalone widget).
     def trigger_click
+      self.checked = !@checked
       @on_click.try &.call
     end
 
@@ -193,11 +199,10 @@ module CrymbleUI
     # Generate primitives for rendering
     # Primitives are in widget-local coordinates (0,0 origin)
     # Renderer will add widget.bounds offset when drawing
-    # Focus highlight brightness offset (additive HSV V, works for black)
-    # Using 0.35 for checkbox text visibility (black→#595959 is more visible than black→#262626)
-    FOCUS_BRIGHTNESS = 0.35
+    # Focus highlight brightness (dynamic - must follow theme changes)
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+      focus_brightness = Theme.current.brightness_focus
       # Get dynamic sizes
       box = effective_box_size
       line_thickness = checkmark_line_thickness
@@ -221,11 +226,14 @@ module CrymbleUI
       text_position = Vec2.new(text_x, text_y)
 
       # Calculate box color (highlight when focus_highlighted, same as button hover)
-      actual_box_color = focus_highlighted? ? @box_color.highlight(FOCUS_BRIGHTNESS) : @box_color
+      actual_box_color = focus_highlighted? ? @box_color.highlight(focus_brightness) : @box_color
       # Calculate text color (highlight when focus_highlighted for visible flash)
-      actual_text_color = focus_highlighted? ? @text_color.highlight(FOCUS_BRIGHTNESS) : @text_color
+      actual_text_color = focus_highlighted? ? @text_color.highlight(focus_brightness) : @text_color
 
       primitives do
+        if bg = @background_color
+          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+        end
         # Draw checkbox box border as 4 filled rectangles (avoids SFML outline_thickness clipping)
         # Similar to panel borders - drawn INSIDE bounds for pixel-perfect alignment
         fill_rect(Rect.new(box_x, box_y, box, 1.0), actual_box_color)             # Top edge

@@ -19,17 +19,17 @@ module CrymbleUI
 
         # Class variables to preserve state across rebuilds
         @@last_cpu_time : UInt64 = 0_u64
-        @@last_wall_time : Time::Span = Time.monotonic
+        @@last_wall_time : Time::Instant = Time.instant
         @@cpu_percent : Float64 = 0.0
         @@timer_id : Int32? = nil
         @@initialized : Bool = false
         @@current_instance : CPUMonitor? = nil  # Updated on each rebuild
 
         # Visual properties
-        render_property text_color : Color = Color.new(0, 0, 0, 255)
+        render_property text_color : Color = Theme.current.text_default
         render_property background_color : Color = Color.new(255, 255, 255, 0)  # Transparent by default (alpha=0) for overlay use
 
-        def initialize(id : String? = nil, font_scale : Int32 = 0, text_color : Color = Color.new(0, 0, 0, 255))
+        def initialize(id : String? = nil, font_scale : Int32 = 0, text_color : Color = Theme.current.text_default)
             @font_scale = font_scale
             super(id: id)
             @text_color = text_color
@@ -40,7 +40,7 @@ module CrymbleUI
             # Initialize monitoring on first instance only (survives rebuilds)
             unless @@initialized
                 @@last_cpu_time = CPUMonitor.read_cpu_time
-                @@last_wall_time = Time.monotonic
+                @@last_wall_time = Time.instant
                 @@initialized = true
 
                 # Update every second (scheduler might not be initialized yet during build)
@@ -86,7 +86,7 @@ module CrymbleUI
         # Marks current instance for render (updated on each rebuild)
         def self.update_cpu_usage
             current_cpu_time = read_cpu_time
-            current_wall_time = Time.monotonic
+            current_wall_time = Time.instant
 
             # Calculate elapsed times
             cpu_delta = current_cpu_time - @@last_cpu_time

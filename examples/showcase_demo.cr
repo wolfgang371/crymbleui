@@ -58,6 +58,50 @@ class StatusIndicator < CrymbleUI::Widget
 end
 
 # =============================================================================
+# VirtualMatrix Adapter
+# =============================================================================
+
+class ShowcaseMatrixAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
+
+  PARAMS = ["Temperature", "Pressure", "Flow Rate", "Voltage", "Current",
+            "Resistance", "Humidity", "Speed", "Torque", "Power",
+            "Frequency", "Amplitude", "Phase", "Gain", "Offset",
+            "Threshold", "Delay", "Duration", "Interval", "Capacity"]
+  COLS   = ["Parameter", "Value", "Unit", "Min", "Max"]
+  UNITS  = ["°C", "bar", "L/min", "V", "A", "Ω", "%", "rpm", "Nm", "W",
+            "Hz", "dB", "°", "dB", "mV", "mV", "ms", "s", "ms", "Ah"]
+
+  def initialize
+    @data = Hash({Int32, Int32}, String).new do |h, key|
+      row, col = key
+      case col
+      when 0 then PARAMS[row]
+      when 1 then "#{(row + 1) * 10.5}"
+      when 2 then UNITS[row]
+      when 3 then "0.0"
+      when 4 then "#{(row + 1) * 100}"
+      else        ""
+      end
+    end
+  end
+
+  def row_count : Int32
+    20
+  end
+
+  def col_count : Int32
+    5
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    CrymbleUI::TextInput.new(value: @data[{row, col}], mode: CrymbleUI::TextInputMode::QuickEntry) do |v|
+      @data[{row, col}] = v
+    end
+  end
+end
+
+# =============================================================================
 # Main Showcase App
 # =============================================================================
 
@@ -73,7 +117,7 @@ class ShowcaseDemo < CrymbleUI::App
   state last_drop : String = "(none)"
   state items_count : Int32 = 10
 
-  THEMES = ["Light", "Dark", "Blue", "Green"]
+  THEMES = ["Light", "Dark"]
 
   def build : CrymbleUI::Widget
     window("CrymbleUI Showcase", 950, 780) do
@@ -128,6 +172,7 @@ class ShowcaseDemo < CrymbleUI::App
           hstack(spacing: 10.0) do
             text("Theme:", font_scale: -1)
             combo_box(items: THEMES, selected: combo_index) do |idx, val|
+              CrymbleUI::Theme.set(idx == 0 ? :light : :dark)
               self.combo_index = idx
               self.status_text = "Theme: #{val}"
             end
@@ -186,7 +231,7 @@ class ShowcaseDemo < CrymbleUI::App
       end
 
       # === Panel: Drag & Drop ===
-      window_panel(title: "Drag & Drop", x: 10.0, y: 300.0, width: 290.0, height: 220.0,
+      window_panel(title: "Drag & Drop", x: 10.0, y: 310.0, width: 290.0, height: 220.0,
                    resizable: true) do
         vstack(spacing: 10.0, padding: 10.0) do
           text("Drag items to zones:", font_scale: -1)
@@ -230,7 +275,7 @@ class ShowcaseDemo < CrymbleUI::App
       end
 
       # === Panel: Grid ===
-      window_panel(title: "RecursiveGrid", x: 310.0, y: 300.0, width: 290.0, height: 220.0,
+      window_panel(title: "RecursiveGrid", x: 310.0, y: 310.0, width: 290.0, height: 220.0,
                    resizable: true) do
         vstack(spacing: 10.0, padding: 10.0) do
           text("Auto-spanning grid:", font_scale: -1)
@@ -249,7 +294,18 @@ class ShowcaseDemo < CrymbleUI::App
         end
       end
 
-      # === Bottom section: Popup & Custom Widgets ===
+      # === Panel: VirtualMatrix ===
+      window_panel(title: "VirtualMatrix", x: 610.0, y: 310.0, width: 330.0, height: 220.0,
+                   resizable: true) do
+        expanded do
+          widget(CrymbleUI::VirtualMatrix.new(
+            adapter: ShowcaseMatrixAdapter.new,
+            id: "showcase_matrix",
+          ))
+        end
+      end
+
+      # === Panel: Extras ===
       window_panel(title: "Extras", x: 610.0, y: 10.0, width: 330.0, height: 280.0) do
         vstack(spacing: 15.0, padding: 10.0) do
           text("Popup & Custom Widgets", font_scale: 1, color: CrymbleUI::Color.new(100, 180, 255, 255))

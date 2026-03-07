@@ -27,17 +27,17 @@ class FlashingButton < CrymbleUI::Button
     background_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 120, 215, 255),
     border_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 100, 180, 255),
     padding : Float64 = 10.0,
-    &block : -> Nil
+    on_click : Proc(Nil)? = nil,
   )
-    super(text, shortcut: nil, id: id, font_scale: font_scale, text_color: text_color,
-          background_color: background_color, border_color: border_color, padding: padding, &block)
+    super(text, id: id, font_scale: font_scale, text_color: text_color,
+          background_color: background_color, border_color: border_color, padding: padding, on_click: on_click)
     @base_background_color = background_color
     @base_border_color = border_color
   end
 end
 
 describe "Drag Performance - Instrumented Reproduction" do
-  it "reproduces the 100% CPU issue during drag with 400 buttons" do
+  it "reproduces the 100% CPU issue during drag with 400 buttons", tags: "slow" do
       app = TestApp.new
     renderer = CrymbleUI::Testing::TestRenderer.new(1200, 900)
       app = TestApp.new
@@ -61,7 +61,7 @@ describe "Drag Performance - Instrumented Reproduction" do
     20.times do |row|
       hstack = CrymbleUI::HStack.new(spacing: 2.0)
       20.times do |col|
-        button = FlashingButton.new("#{row},#{col}", font_scale: -5, padding: 3.0) { }
+        button = FlashingButton.new("#{row},#{col}", font_scale: -5, padding: 3.0)
         hstack.add_child(button)
       end
       panel_vstack.add_child(hstack)

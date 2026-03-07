@@ -7,11 +7,11 @@ module CrymbleUI
         # Timer entry in the queue
         private class Timer
             getter id : Int32
-            property wake_time : Time::Span  # Monotonic time
+            property wake_time : Time::Instant  # Monotonic time
             getter interval : Time::Span?
             getter callback : Proc(Nil)
 
-            def initialize(@id : Int32, @wake_time : Time::Span, @interval : Time::Span?, @callback : Proc(Nil))
+            def initialize(@id : Int32, @wake_time : Time::Instant, @interval : Time::Span?, @callback : Proc(Nil))
             end
 
             def repeating?
@@ -40,7 +40,7 @@ module CrymbleUI
             id = @next_id
             @next_id += 1
 
-            wake_time = Time.monotonic + delay
+            wake_time = Time.instant + delay
             interval = repeating ? delay : nil
 
             timer = Timer.new(id, wake_time, interval, block)
@@ -62,7 +62,7 @@ module CrymbleUI
         def next_wake_time : Time::Span?
             return nil if @timers.empty?
 
-            now = Time.monotonic
+            now = Time.instant
             next_timer = @timers.first
             remaining = next_timer.wake_time - now
 
@@ -75,7 +75,7 @@ module CrymbleUI
         def run_expired_timers : Int32
             return 0 if @timers.empty?
 
-            now = Time.monotonic
+            now = Time.instant
             fired_count = 0
 
             # Find all expired timers
@@ -95,7 +95,7 @@ module CrymbleUI
 
                 # Reschedule if repeating
                 if timer.repeating? && timer.interval
-                    timer.wake_time = Time.monotonic + timer.interval.not_nil!
+                    timer.wake_time = Time.instant + timer.interval.not_nil!
                     @timers << timer
                 end
             end

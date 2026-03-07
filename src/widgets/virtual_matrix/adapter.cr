@@ -1,0 +1,146 @@
+module CrymbleUI::Widgets::VirtualMatrix
+  # Abstract interface for matrix data binding.
+  # Implement this module to connect VirtualMatrix to your data source.
+  #
+  # Example:
+  # ```
+  # class MyDataAdapter
+  #   include MatrixAdapter
+  #
+  #   def get_scrollorder : {Array(Int32), Array(Int32)}
+  #     {(0...@data.size).to_a, (0...@headers.size).to_a}
+  #   end
+  #
+  #   def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+  #     CrymbleUI::TextInput.new(value: @data[row][col])
+  #   end
+  #
+  #   # ... implement other methods
+  # end
+  # ```
+  module MatrixAdapter
+    DEFAULT_ROW_HEIGHT   = 1.0_f64  # In multiples of frame_height
+    DEFAULT_COLUMN_WIDTH = 5.0_f64  # In multiples of frame_height
+
+    # Scroll order for rows and columns.
+    # Returns {row_order, col_order} arrays.
+    # Array sizes implicitly define row_count and col_count.
+    # Controls both visibility lifetime AND sticky behavior:
+    # - Elements early in the array scroll out first
+    # - Elements at the tail that form a contiguous set {0,1,...,N-1}
+    #   are treated as sticky (rendered on fixed-position layers)
+    # Default: must be implemented by subclass
+    abstract def get_scrollorder : {Array(Int32), Array(Int32)}
+
+    # Create a widget for the given cell position.
+    # Called by VirtualMatrix when a cell enters the visible region.
+    abstract def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+
+    # Initial row/col sizes (frame_height multiples). Called at init + invalidate_all!.
+    # VirtualMatrix owns the mutable copy (drag resize modifies it directly).
+    # Override to set custom sizes (e.g. wider header columns, taller header rows).
+    def get_sizes : {Array(Float64), Array(Float64)}
+      row_order, col_order = get_scrollorder
+      {Array.new(row_order.size, DEFAULT_ROW_HEIGHT),
+       Array.new(col_order.size, DEFAULT_COLUMN_WIDTH)}
+    end
+
+    # Row operations (optional - default implementations do nothing)
+    def insert_row(at : Int32) : Int32
+      at
+    end
+
+    def delete_row(at : Int32)
+    end
+
+    # Check if cell has content (for cut/paste validation)
+    def cell_has_content?(row : Int32, col : Int32) : Bool
+      true
+    end
+
+    # Optional: Get bounding box for merged cells
+    # Default: cell spans only itself
+    def cell_get_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+      { {row, col}, {row, col} }
+    end
+
+    # Optional: Get header info for a cell
+    # Returns nil for non-header cells
+    # Returns {is_header_row, header_level} for header cells
+    def cell_get_header_info(row : Int32, col : Int32) : Tuple(Bool, Int32)?
+      nil
+    end
+
+    # Optional: Get cell name for tooltips/status bar
+    def cell_get_name(row : Int32, col : Int32) : String
+      "#{row},#{col}"
+    end
+
+    # Optional: Move cell content from one location to another
+    # Returns the new cursor position after move
+    def cell_move(from_row : Int32, from_col : Int32, to_row : Int32, to_col : Int32) : Tuple(Int32, Int32)
+      {to_row, to_col}
+    end
+
+    # === Push-Based Invalidation ===
+    # Callbacks set by VirtualMatrix during binding. Adapter authors call
+    # invalidate_cell! / invalidate_all! to notify the matrix of changes.
+    # Safe when unbound (nil procs = no-ops).
+
+    @_on_invalidate_cell : Proc(Int32, Int32, Nil)?
+    @_on_invalidate_all : Proc(Nil)?
+
+    # Framework-internal: called by VirtualMatrix to wire up callbacks
+    def _bind_invalidation(on_cell : Proc(Int32, Int32, Nil), on_all : Proc(Nil))
+      @_on_invalidate_cell = on_cell
+      @_on_invalidate_all = on_all
+    end
+
+    def _unbind_invalidation
+      @_on_invalidate_cell = nil
+      @_on_invalidate_all = nil
+    end
+
+    # Public API for adapter authors: signal that a single cell changed
+    def invalidate_cell!(row : Int32, col : Int32)
+      @_on_invalidate_cell.try &.call(row, col)
+    end
+
+    # Public API for adapter authors: signal that structure changed (dimensions, merges, etc.)
+    def invalidate_all!
+      @_on_invalidate_all.try &.call
+    end
+  end
+
+  # Convenience module for adapters without sticky headers.
+  # Provides a default sequential get_scrollorder derived from
+  # row_count and col_count, so implementors only need:
+  #
+  # ```
+  # class MySimpleAdapter
+  #   include HeaderlessMatrixAdapter
+  #
+  #   def row_count : Int32
+  #     @data.size
+  #   end
+  #
+  #   def col_count : Int32
+  #     @headers.size
+  #   end
+  #
+  #   def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+  #     CrymbleUI::TextInput.new(value: @data[row][col])
+  #   end
+  # end
+  # ```
+  module HeaderlessMatrixAdapter
+    include MatrixAdapter
+
+    abstract def row_count : Int32
+    abstract def col_count : Int32
+
+    def get_scrollorder : {Array(Int32), Array(Int32)}
+      {(0...row_count).to_a, (0...col_count).to_a}
+    end
+  end
+end

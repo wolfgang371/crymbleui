@@ -69,7 +69,7 @@ describe "Panel titlebar highlighting" do
     initial_color = panel1_backend.get_pixel(titlebar_x, titlebar_y)
 
     # Verify initial titlebar shows INACTIVE color (darker blue) since panel1 is not topmost
-    inactive_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_INACTIVE
+    inactive_color = CrymbleUI::Theme.current.panel_title_bar_inactive
     initial_color.should eq(inactive_color)
 
     # Mouse DOWN on panel1 titlebar (not mouse up yet!)
@@ -91,7 +91,7 @@ describe "Panel titlebar highlighting" do
 
     # Verify titlebar pixel color changed to ACTIVE (bright blue) immediately on mouse_down
     after_mousedown_color = panel1_backend.get_pixel(titlebar_x, titlebar_y)
-    active_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_ACTIVE
+    active_color = CrymbleUI::Theme.current.panel_title_bar_active
     after_mousedown_color.should eq(active_color)
     after_mousedown_color.should_not eq(inactive_color)
   end
@@ -136,7 +136,7 @@ describe "Panel titlebar highlighting" do
     titlebar_x = (panel1.width / 2).to_i
 
     initial_color = panel1_backend.get_pixel(titlebar_x, titlebar_y)
-    inactive_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_INACTIVE
+    inactive_color = CrymbleUI::Theme.current.panel_title_bar_inactive
     initial_color.should eq(inactive_color)
 
     # Click button1 (panel CONTENT, not titlebar) - should still bring panel to front
@@ -153,7 +153,7 @@ describe "Panel titlebar highlighting" do
 
     # Verify titlebar color updated to ACTIVE after clicking panel content
     after_content_click_color = panel1_backend.get_pixel(titlebar_x, titlebar_y)
-    active_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_ACTIVE
+    active_color = CrymbleUI::Theme.current.panel_title_bar_active
     after_content_click_color.should eq(active_color)
     after_content_click_color.should_not eq(inactive_color)
   end
@@ -191,7 +191,7 @@ describe "Panel titlebar highlighting" do
     titlebar_x = (panel2.width / 2).to_i
 
     panel2_initial_color = panel2_backend.get_pixel(titlebar_x, titlebar_y)
-    active_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_ACTIVE
+    active_color = CrymbleUI::Theme.current.panel_title_bar_active
     panel2_initial_color.should eq(active_color)
 
     # Click panel1 to bring it to front
@@ -207,7 +207,7 @@ describe "Panel titlebar highlighting" do
 
     # Panel2 titlebar should now be INACTIVE (dimmed)
     panel2_after_color = panel2_backend.get_pixel(titlebar_x, titlebar_y)
-    inactive_color = CrymbleUI::WindowPanel::TITLE_BAR_COLOR_INACTIVE
+    inactive_color = CrymbleUI::Theme.current.panel_title_bar_inactive
 
     # BUG: This should be inactive color, but the old topmost panel doesn't
     # update its titlebar when another panel is brought to front

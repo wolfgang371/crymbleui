@@ -62,8 +62,8 @@ module CrymbleUI
 
         def initialize(
             id : String? = nil,
-            @background_color : Color = Color.new(250, 250, 250, 255),
-            @border_color : Color = Color.new(200, 200, 200, 255)
+            @background_color : Color = Theme.current.menubar_background,
+            @border_color : Color = Theme.current.menubar_border
         )
             super(id: id)
             # Layer will be created conditionally in layout() based on parent context

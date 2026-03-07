@@ -1222,6 +1222,15 @@ module SF
     LibCSFML::BlendEquation::Add
   )
 
+  BlendSubtract = BlendMode.new(
+    LibCSFML::BlendFactor::SrcAlpha,
+    LibCSFML::BlendFactor::One,
+    LibCSFML::BlendEquation::ReverseSubtract,
+    LibCSFML::BlendFactor::One,
+    LibCSFML::BlendFactor::One,
+    LibCSFML::BlendEquation::ReverseSubtract
+  )
+
   BlendMultiply = BlendMode.new(
     LibCSFML::BlendFactor::DstColor,
     LibCSFML::BlendFactor::Zero,
