@@ -66,7 +66,7 @@ and many more in examples/
 ### **New:** Tutorial 22: Virtual Matrix
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-[![Tutorial 22: Virtual Matrix](screenshots/tutorial-22.png)](screenshots/tutorial-22.mp4)
+https://github.com/wolfgang371/crymbleui/releases/download/video-assets/tutorial-22.mp4
 
 <details>
 <summary>View source code</summary>
@@ -1302,7 +1302,7 @@ CrymbleUI.run(CustomWidgetDemo.new)
 ### Tutorial 22: VirtualMatrix with Sticky Headers
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-[![Tutorial 22: VirtualMatrix with Sticky Headers](screenshots/tutorial-22.png)](screenshots/tutorial-22.mp4)
+https://github.com/wolfgang371/crymbleui/releases/download/video-assets/tutorial-22.mp4
 
 <details>
 <summary>View source code</summary>
