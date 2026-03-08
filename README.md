@@ -22,8 +22,9 @@ But easily portable to e.g. Windows.
 - **Keyboard Navigation** - Tab focus, shortcuts, and accessibility support
 - **new since v0.3.0: VirtualMatrix widget**
   - arbitrary size matrix
-  - fully flexible sticky headers (both rows and columns, arbitrary nesting)
-  - fully flexible cell combination, indpendent of sticky headers
+  - arbitrary cell widgets
+  - fully flexible automatic sticky headers (both rows and columns, arbitrary nesting)
+  - fully flexible automatic cell combination, indpendent of sticky headers
   - fully transparent internal caching mechanisms to guarantee best performance
   - see tutorial-22.cr (<100LOC) or virtual_matrix_demo.cr
 - **new since v0.3.0: centralized color theme handling**
@@ -81,7 +82,7 @@ and many more in examples/
 ## New Features
 
 ### **New:** Tutorial 22: Virtual Matrix
-Run with: shards build tutorial-22 && ./bin/tutorial-22
+Grouped hierarchical headers: level 0 spans 4, level 1 spans 2 data cells.
 
 https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 
@@ -1317,7 +1318,7 @@ CrymbleUI.run(CustomWidgetDemo.new)
 
 ---
 ### Tutorial 22: VirtualMatrix with Sticky Headers
-Run with: shards build tutorial-22 && ./bin/tutorial-22
+Grouped hierarchical headers: level 0 spans 4, level 1 spans 2 data cells.
 
 https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 

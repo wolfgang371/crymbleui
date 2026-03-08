@@ -1,4 +1,5 @@
 # Tutorial 22: VirtualMatrix with Sticky Headers
+# ================================================
 # Grouped hierarchical headers: level 0 spans 4, level 1 spans 2 data cells.
 # Run with: shards build tutorial-22 && ./bin/tutorial-22
 
