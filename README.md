@@ -20,6 +20,16 @@ But easily portable to e.g. Windows.
 - **Rich Widget Set** - Buttons, text inputs, checkboxes, combo boxes, scroll views, menus, panels, and more
 - **Drag & Drop** - Type-safe drag and drop with accept filtering
 - **Keyboard Navigation** - Tab focus, shortcuts, and accessibility support
+- **new since v0.3.0: VirtualMatrix widget**
+  - arbitrary size matrix
+  - fully flexible sticky headers (both rows and columns, arbitrary nesting)
+  - fully flexible cell combination, indpendent of sticky headers
+  - fully transparent internal caching mechanisms to guarantee best performance
+  - see tutorial-22.cr (<100LOC) or virtual_matrix_demo.cr
+- **new since v0.3.0: centralized color theme handling**
+  - fully user controllable via JSON
+  - instance overrides
+  - see tutorial-23.cr
 
 ## Installation
 
@@ -36,10 +46,11 @@ Then run:
 ```bash
 source setup.sh
 shards install
-shards build
 ```
 
 ## Quick Start
+
+In `src/hello.cr`:
 
 ```crystal
 require "crymble-ui"
@@ -55,6 +66,12 @@ end
 CrymbleUI.run(HelloApp.new)
 ```
 
+Then run:
+
+```bash
+crystal run src/hello.cr
+```
+
 ## Examples
 
 ![Screenshot](screenshots/showcase.png)
@@ -66,7 +83,7 @@ and many more in examples/
 ### **New:** Tutorial 22: Virtual Matrix
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-https://github.com/wolfgang371/crymbleui/releases/download/video-assets/tutorial-22.mp4
+https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 
 <details>
 <summary>View source code</summary>
@@ -1302,7 +1319,7 @@ CrymbleUI.run(CustomWidgetDemo.new)
 ### Tutorial 22: VirtualMatrix with Sticky Headers
 Run with: shards build tutorial-22 && ./bin/tutorial-22
 
-https://github.com/wolfgang371/crymbleui/releases/download/video-assets/tutorial-22.mp4
+https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 
 <details>
 <summary>View source code</summary>
