@@ -45,7 +45,6 @@ dependencies:
 Then run:
 
 ```bash
-source setup.sh
 shards install
 ```
 
@@ -70,6 +69,7 @@ CrymbleUI.run(HelloApp.new)
 Then run:
 
 ```bash
+source lib/crymble-ui/setup.sh
 crystal run src/hello.cr
 ```
 
