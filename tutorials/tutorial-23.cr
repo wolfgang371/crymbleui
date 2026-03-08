@@ -1,8 +1,8 @@
 # Tutorial 23: Theme Switcher
 # ===========================
 # Demonstrates runtime theme switching via a menubar.
-# All widgets pick up Theme.current colors on rebuild.
 #
+# All widgets pick up Theme.current colors on rebuild.
 # Run with: shards build tutorial-23 && ./bin/tutorial-23
 
 require "../src/crymble-ui"

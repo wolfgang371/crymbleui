@@ -82,7 +82,7 @@ and many more in examples/
 ## New Features
 
 ### **New:** Tutorial 22: Virtual Matrix
-Grouped hierarchical headers: level 0 spans 4, level 1 spans 2 data cells.
+VirtualMatrix widget with arbitrary sized matrix, arbitrary cell widgets and fully flexible automatic sticky headers
 
 https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 
@@ -1318,7 +1318,7 @@ CrymbleUI.run(CustomWidgetDemo.new)
 
 ---
 ### Tutorial 22: VirtualMatrix with Sticky Headers
-Grouped hierarchical headers: level 0 spans 4, level 1 spans 2 data cells.
+VirtualMatrix widget with arbitrary sized matrix, arbitrary cell widgets and fully flexible automatic sticky headers
 
 https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
 
