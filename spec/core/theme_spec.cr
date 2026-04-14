@@ -169,7 +169,7 @@ describe CrymbleUI::Theme do
 
     it "has correct grid colors" do
       theme = CrymbleUI::Theme.current
-      theme.grid_content_background.should eq CrymbleUI::Color.new(40, 40, 40, 255)
+      theme.grid_content_background.should eq CrymbleUI::Color.new(240, 240, 240, 255)
     end
 
     it "has correct ruler colors" do
@@ -201,7 +201,7 @@ describe CrymbleUI::Theme do
     end
 
     it "has correct cursor delta" do
-      CrymbleUI::Theme.current.brightness_cursor_delta.should eq 40
+      CrymbleUI::Theme.current.brightness_cursor_delta.should eq -40
     end
   end
 

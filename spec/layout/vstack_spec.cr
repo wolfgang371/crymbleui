@@ -169,7 +169,7 @@ describe CrymbleUI::VStack do
             vstack.bounds.height.should eq(50.0)
         end
 
-        it "marks vstack as not dirty after layout" do
+        it "marks vstack as needing render after first layout (size changed from zero)" do
             vstack = CrymbleUI::VStack.new
             vstack.state = CrymbleUI::WidgetState::NeedsLayout
 
@@ -181,6 +181,28 @@ describe CrymbleUI::VStack do
 
             vstack.layout(constraints, position)
 
+            # First layout changes size from 0x0 → 100x50, so needs render
+            vstack.state.should eq(CrymbleUI::WidgetState::NeedsRender)
+        end
+
+        it "marks vstack as clean after layout with same size" do
+            vstack = CrymbleUI::VStack.new
+
+            child = TestWidget.new(measured_size: CrymbleUI::Size.new(100.0, 50.0))
+            vstack.add_child(child)
+
+            constraints = CrymbleUI::BoxConstraints.new
+            position = CrymbleUI::Vec2.new(0.0, 0.0)
+
+            # First layout (size change 0→50)
+            vstack.layout(constraints, position)
+            vstack.state.should eq(CrymbleUI::WidgetState::NeedsRender)
+
+            # Force NeedsLayout and re-layout with same constraints
+            vstack.state = CrymbleUI::WidgetState::NeedsLayout
+            vstack.layout(constraints, position)
+
+            # Same size → no size change → stays Clean
             vstack.state.should eq(CrymbleUI::WidgetState::Clean)
         end
     end

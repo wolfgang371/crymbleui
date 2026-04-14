@@ -317,6 +317,50 @@ describe CrymbleUI::RecursiveGrid do
       nested.bounds.width.should eq(natural_size.width + 50.0)
       nested.bounds.height.should eq(natural_size.height + 50.0)
     end
+
+    it "sub-grid content fills content area when parent uses all-nested column alignment" do
+      # Regression: when the outer grid has no direct leaves (all cells are sub-grids),
+      # it uses the all-nested measurement path which passes parent_col_widths to sub-grids.
+      # Sub-grids with border_color have border_padding that reduces the content area.
+      # The child widget must fill the content area (bounds minus border_padding on each side),
+      # not the full bounds.
+      #
+      # Structure: 2x2 outer grid, all cells are 1x1 sub-grids with border_color.
+      # Outer grid is given tight constraints larger than natural to exercise scaling.
+      border_color = CrymbleUI::Color.new(200, 50, 50, 255)
+      cell_bg = CrymbleUI::Color.new(180, 200, 220, 255)
+      border_padding = CrymbleUI::RecursiveGrid::BORDER_WIDTH + 4.0  # = 6.0
+
+      # Four sub-grids, each 1x1 with a button and border_color
+      sub_hello = CrymbleUI::RecursiveGrid.new([[CrymbleUI::Button.new("Hello", padding: 5.0)]])
+      sub_1 = CrymbleUI::RecursiveGrid.new([[CrymbleUI::Button.new("1", padding: 5.0)]])
+      sub_2 = CrymbleUI::RecursiveGrid.new([[CrymbleUI::Button.new("2", padding: 5.0)]])
+      sub_3 = CrymbleUI::RecursiveGrid.new([[CrymbleUI::Button.new("3", padding: 5.0)]])
+      [sub_hello, sub_1, sub_2, sub_3].each { |s| s.border_color = border_color }
+
+      # Outer grid: all cells are sub-grids → @has_direct_leaves = false
+      outer = CrymbleUI::RecursiveGrid.new([
+        [sub_hello.as(CrymbleUI::Widget), sub_1.as(CrymbleUI::Widget)],
+        [sub_2.as(CrymbleUI::Widget), sub_3.as(CrymbleUI::Widget)],
+      ])
+
+      # Layout with tight constraints larger than natural to exercise scaling path
+      outer.layout(
+        CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(300.0, 200.0)),
+        CrymbleUI::Vec2.zero
+      )
+
+      # Each sub-grid's child (button) must fill the sub-grid's CONTENT area:
+      # child.bounds.width == sub_grid.bounds.width - 2 * border_padding
+      # child.bounds.height == sub_grid.bounds.height - 2 * border_padding
+      [sub_hello, sub_1, sub_2, sub_3].each do |sub|
+        expected_w = sub.bounds.width - 2.0 * border_padding
+        expected_h = sub.bounds.height - 2.0 * border_padding
+        child = sub.children.first
+        child.bounds.width.should be_close(expected_w, 0.001)
+        child.bounds.height.should be_close(expected_h, 0.001)
+      end
+    end
   end
 
   describe "integration" do
@@ -429,8 +473,9 @@ describe CrymbleUI::RecursiveGrid do
       grid.layout(constraints, CrymbleUI::Vec2.new(0.0, 0.0))
 
       # Cell 2 should span 2 rows (same height as nested grid)
+      # Use tolerance for floating-point comparison
       expected_height = cell_3.bounds.height + cell_4.bounds.height + 6.0
-      cell_2.bounds.height.should be >= expected_height
+      (cell_2.bounds.height + 0.001).should be >= expected_height
 
       # Verify RENDERING fills the full height
       white = CrymbleUI::Color.new(255, 255, 255, 255)

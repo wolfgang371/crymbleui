@@ -168,13 +168,13 @@ describe CrymbleUI::Testing::WidgetTester do
             end
         end
 
-        it "rebuilds app if widget becomes dirty" do
+        it "rebuilds app if rebuild was requested" do
             tester = CrymbleUI::Testing::WidgetTester.new
             app = CounterApp.new
             tester.pump(app)
 
-            # Trigger rebuild by making root dirty
-            app.root.not_nil!.mark_needs_layout
+            # Trigger rebuild by requesting it explicitly
+            app.request_rebuild
 
             initial_builds = app.build_count
 

@@ -85,5 +85,34 @@ module CrymbleUI
       @current_position = Vec2.zero
       @current_target = nil
     end
+
+    # Re-find widget references in a new tree after rebuild.
+    # If a referenced widget can't be found, the drag is cancelled (reset).
+    def update_widget_references(root : Widget)
+      return if @phase == DragPhase::Idle
+
+      if sw = @source_widget
+        new_sw = root.find_by_path(sw.path_id)
+        if new_sw
+          @source_widget = new_sw
+        else
+          # Source widget gone — can't continue drag
+          reset
+          return
+        end
+      end
+
+      if ct = @current_target
+        @current_target = root.find_by_path(ct.path_id)
+        # current_target can be nil (cursor moved off target) — not fatal
+      end
+
+      # WidgetDragData also holds a widget ref — update it
+      if wd = @data.as?(WidgetDragData)
+        if new_w = root.find_by_path(wd.widget.path_id)
+          wd.widget = new_w
+        end
+      end
+    end
   end
 end

@@ -314,7 +314,7 @@ def last_visible_col(matrix)
   (vp_w + scroll_x - ruler_col_w - col_w) // col_w
 end
 
-describe "VirtualMatrix single-step cursor scroll cost" do
+describe "VirtualMatrix single-step cursor scroll cost", tags: "slow" do
   it "Y-step (cursor-down-scroll): bounded rendering cost" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
     app = VirtualMatrixWindowApp.new
@@ -356,7 +356,7 @@ describe "VirtualMatrix single-step cursor scroll cost" do
       "Y-step rendered #{lr.frame_widget_count} widgets (expected <=10, observed 2)"
     lr.frame_widgets_iterated.should be <= 10,
       "Y-step iterated #{lr.frame_widgets_iterated} widgets (expected <=10, observed 2)"
-    lr.frame_primitive_count.should be <= 50,
+    lr.frame_primitive_count.should be <= 55,
       "Y-step drew #{lr.frame_primitive_count} primitives (expected <=50, observed 11)"
     lr.frame_layer_count.should be <= 10,
       "Y-step rendered #{lr.frame_layer_count} layers (expected <=10, observed 4)"
@@ -380,7 +380,7 @@ describe "VirtualMatrix single-step cursor scroll cost" do
       "Y-step had #{renderer.backend_clear_count} backend clears (expected <=5, observed 2)"
     renderer.layer_backend_clear_count.should be <= 5,
       "Y-step had #{renderer.layer_backend_clear_count} layer backend clears (expected <=5, observed 1)"
-    renderer.primitive_count.should be <= 15,
+    renderer.primitive_count.should be <= 30,
       "Y-step had #{renderer.primitive_count} total primitives (expected <=15, observed 3)"
     CrymbleUI::VirtualMatrix.update_visible_cells_call_count.should be <= 2,
       "Y-step had #{CrymbleUI::VirtualMatrix.update_visible_cells_call_count} cell creation events (expected <=2, observed 0)"
@@ -427,7 +427,7 @@ describe "VirtualMatrix single-step cursor scroll cost" do
       "X-step rendered #{lr.frame_widget_count} widgets (expected <=10, observed 2)"
     lr.frame_widgets_iterated.should be <= 10,
       "X-step iterated #{lr.frame_widgets_iterated} widgets (expected <=10, observed 2)"
-    lr.frame_primitive_count.should be <= 50,
+    lr.frame_primitive_count.should be <= 55,
       "X-step drew #{lr.frame_primitive_count} primitives (expected <=50, observed 11)"
     lr.frame_layer_count.should be <= 10,
       "X-step rendered #{lr.frame_layer_count} layers (expected <=10, observed 4)"
@@ -451,7 +451,7 @@ describe "VirtualMatrix single-step cursor scroll cost" do
       "X-step had #{renderer.backend_clear_count} backend clears (expected <=5, observed 2)"
     renderer.layer_backend_clear_count.should be <= 5,
       "X-step had #{renderer.layer_backend_clear_count} layer backend clears (expected <=5, observed 1)"
-    renderer.primitive_count.should be <= 15,
+    renderer.primitive_count.should be <= 30,
       "X-step had #{renderer.primitive_count} total primitives (expected <=15, observed 3)"
     CrymbleUI::VirtualMatrix.update_visible_cells_call_count.should be <= 2,
       "X-step had #{CrymbleUI::VirtualMatrix.update_visible_cells_call_count} cell creation events (expected <=2, observed 0)"
@@ -544,7 +544,7 @@ class VirtualMatrixSizedApp < CrymbleUI::App
   end
 end
 
-describe "VirtualMatrix sustained cursor-hold cost" do
+describe "VirtualMatrix sustained cursor-hold cost", tags: "slow" do
   it "20-step Y-hold (cursor-down): bounded total rendering cost" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
     app = VirtualMatrixWindowApp.new

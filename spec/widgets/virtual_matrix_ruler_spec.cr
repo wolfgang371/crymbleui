@@ -65,7 +65,7 @@ private def make_ruler_dsl
   {renderer, app, matrix}
 end
 
-describe "VirtualMatrix rulers" do
+describe "VirtualMatrix rulers", tags: "slow" do
   describe "ruler visibility" do
     it "shifts cell (0,0) position by ruler dimensions" do
       renderer, app, matrix = make_ruler_dsl
@@ -467,7 +467,7 @@ describe "VirtualMatrix rulers" do
       app.handle_mouse_up(CrymbleUI::Vec2.new(border_x + 40.0, 10.0))
     end
 
-    it "corner row strip row 1 label still visible after sticky row resize" do
+    it "corner row strip row 1 label still visible after sticky row resize", tags: "slow" do
       renderer, app, matrix = make_ruler_dsl
 
       # Resize row 0 (sticky): drag border 30px down
@@ -493,7 +493,7 @@ describe "VirtualMatrix rulers" do
   end
 
   describe "performance" do
-    it "ruler render count bounded during resize drag" do
+    it "ruler render count bounded during resize drag", tags: "slow" do
       renderer, app, matrix = make_ruler_dsl
 
       renderer.settle_rendering(app)

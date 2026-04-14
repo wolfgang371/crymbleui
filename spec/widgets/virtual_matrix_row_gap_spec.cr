@@ -70,7 +70,7 @@ end
 #   With 1400×900 window, vstack overhead reduces effective viewport to ~753px
 #   → rows 31-33 fall at the viewport edge
 
-describe "VirtualMatrix row gap at header boundary" do
+describe "VirtualMatrix row gap at header boundary", tags: "slow" do
   it "data rows at level-0 header boundary are present in active_cells" do
     renderer = CrymbleUI::Testing::TestRenderer.new(1400, 900)
     app = RowGapDemoApp.new

@@ -33,6 +33,7 @@ Spec.before_each do
   CrymbleUI::FontSizing.reset_zoom
   CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
   CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
+  CrymbleUI::Layer.clear_registry  # Prevent orphaned layers from leaking between tests
 end
 
 # Concrete widget implementation for testing.

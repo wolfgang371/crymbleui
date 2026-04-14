@@ -56,8 +56,11 @@ module CrymbleUI
             # Compute screen-space bounding box using physical cumulative positions.
             # Pin compound left edge at sticky_col_w (the boundary), matching the
             # reference painters_algo where pos_compound = pos_clipped = sticky
-            # boundary position. Columns fully behind the boundary are skipped;
+            # boundary position. Columns fully behind the boundary are skipped.
             # viewport_col_positions.has_key? ensures shifted-out columns are excluded.
+            # BUG FIX: Also include columns NOT in viewport_col_positions if they are
+            # physically visible and not shifted out. This catches right-edge columns
+            # that the cached viewport_col_positions misses (max_x changed but sticky_key didn't).
             bb_c1 = bounding[0][1]
             bb_c2 = bounding[1][1]
             min_screen_x = Float64::MAX
@@ -67,8 +70,19 @@ module CrymbleUI
             visible_col_count = 0
             single_col_x = 0.0
             single_col_size = 0.0
+            col_shifted = @cached_col_sorted_shifted
             (bb_c1..bb_c2).each do |ci|
-              next unless @viewport_col_positions.has_key?(ci)
+              # Primary check: column is in the cached visible set (handles shift-out correctly)
+              unless @viewport_col_positions.has_key?(ci)
+                # Fallback for right-edge columns: include if NOT shifted out and
+                # physically within viewport bounds. The cache misses these because
+                # max_x changed (scroll) but the sticky cache key didn't update.
+                if shifted = col_shifted
+                  is_shifted = shifted.bsearch { |s| s >= ci }.try { |s| s == ci }
+                  next if is_shifted  # Column is shifted out — skip
+                end
+                # Not shifted (or no shift data) — check physical screen visibility below
+              end
               true_ci_x = ruler_x_offset + (col_cum ? col_cum[ci].to_f64 : (0...ci).sum { |c| col_sizes[c] }.to_f64)
               unclamped_scr_x = true_ci_x - @scroll_offset.x.to_i.to_f64
               col_right = unclamped_scr_x + col_sizes[ci].to_f64
@@ -200,20 +214,26 @@ module CrymbleUI
               f.puts "REPOSITION: #{widget.class.name.split("::").last}##{widget.path_id} (#{widget.bounds.width.round(1)}x#{widget.bounds.height.round(1)}) → (#{new_w.round(1)}x#{new_h.round(1)}) at (#{new_x.round(1)},#{new_y.round(1)})"
             end
           {% end %}
+          # Only invalidate primitive cache if SIZE changed (not just position).
+          # Position-only changes: cached widget_backend texture is still valid,
+          # just needs to be blitted at the new position. Avoids expensive primitive
+          # regeneration + full re-render for every scroll frame.
+          size_changed = widget.bounds.width != new_w || widget.bounds.height != new_h
           cell_constraints = BoxConstraints.tight(Size.new(new_w, new_h))
           widget.layout(cell_constraints, Vec2.new(new_x, new_y))
-          widget.invalidate_primitive_cache  # Primitives need regeneration for new bounds
-          widget.needs_fresh_background = true
+          widget.invalidate_primitive_cache if size_changed
           any_changed = true
         end
       end
 
-      # Force full re-render of sticky layers to clear old cell positions
+      # Clear and re-render sticky layers to reflect new cell positions.
+      # Use mark_needs_clear_and_render (NOT mark_needs_layout) — lighter:
+      # no sibling validation, NeedsRender semantics, but still clears old pixels.
       if any_changed
         sv = @content_scroll_view
-        sv.try(&.sticky_row_layer).try(&.mark_needs_layout)
-        sv.try(&.sticky_col_layer).try(&.mark_needs_layout)
-        sv.try(&.sticky_corner_layer).try(&.mark_needs_layout)
+        sv.try(&.sticky_row_layer).try(&.mark_needs_clear_and_render)
+        sv.try(&.sticky_col_layer).try(&.mark_needs_clear_and_render)
+        sv.try(&.sticky_corner_layer).try(&.mark_needs_clear_and_render)
       end
     end
   end

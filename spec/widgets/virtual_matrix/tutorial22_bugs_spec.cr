@@ -141,7 +141,7 @@ private def setup_tutorial22_with_offset(padding = 10.0, viewport_width = 600, v
   {matrix, app, renderer, adapter}
 end
 
-describe CrymbleUI::VirtualMatrix do
+describe CrymbleUI::VirtualMatrix, tags: "slow" do
   describe "Bug 1: Sticky header blit_plan positions with parent offset" do
     it "sticky row cells are blitted at correct positions after vertical scroll" do
       matrix, app, renderer, _ = setup_tutorial22_with_offset(padding: 10.0)

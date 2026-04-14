@@ -65,9 +65,24 @@ module CrymbleUI
             end
         end
 
-        # Read CPU time for current process (Linux /proc/self/stat)
+        # Read CPU time for current process.
+        # Returns time in 100-nanosecond units (Windows) or clock ticks (Linux).
         def self.read_cpu_time : UInt64
-            {% if flag?(:linux) %}
+            {% if flag?(:win32) %}
+                creation = LibC::FILETIME.new
+                exit_t   = LibC::FILETIME.new
+                kernel   = LibC::FILETIME.new
+                user     = LibC::FILETIME.new
+                if LibC.GetProcessTimes(LibC.GetCurrentProcess,
+                       pointerof(creation), pointerof(exit_t),
+                       pointerof(kernel), pointerof(user)) != 0
+                  kernel_time = kernel.dwLowDateTime.to_u64 | (kernel.dwHighDateTime.to_u64 << 32)
+                  user_time   = user.dwLowDateTime.to_u64   | (user.dwHighDateTime.to_u64 << 32)
+                  kernel_time + user_time  # in 100ns units
+                else
+                  0_u64
+                end
+            {% elsif flag?(:linux) %}
                 stat = File.read("/proc/self/stat")
                 fields = stat.split
                 # Fields 14 (utime) and 15 (stime) are CPU time in clock ticks
@@ -75,7 +90,6 @@ module CrymbleUI
                 stime = fields[14].to_u64
                 utime + stime
             {% else %}
-                # Fallback for non-Linux: return 0 (will show 0% CPU)
                 0_u64
             {% end %}
         rescue
@@ -92,8 +106,11 @@ module CrymbleUI
             cpu_delta = current_cpu_time - @@last_cpu_time
             wall_delta = (current_wall_time - @@last_wall_time).total_seconds
 
-            # CPU time is in clock ticks, convert to seconds
-            cpu_seconds = cpu_delta.to_f / CLOCK_TICKS_PER_SEC
+            # Convert CPU delta to seconds.
+            # Linux: clock ticks at CLOCK_TICKS_PER_SEC (100 Hz).
+            # Windows: 100-nanosecond units (10_000_000 per second).
+            cpu_ticks_per_sec = {% if flag?(:win32) %} 10_000_000.0 {% else %} CLOCK_TICKS_PER_SEC {% end %}
+            cpu_seconds = cpu_delta.to_f / cpu_ticks_per_sec
 
             # Calculate percentage
             if wall_delta > 0

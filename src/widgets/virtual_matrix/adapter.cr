@@ -36,13 +36,28 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Called by VirtualMatrix when a cell enters the visible region.
     abstract def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
 
+    # Called at the start of each render frame (for change animation buffer swap)
+    def start_frame : Nil
+    end
+
+    # Read cell value (for change detection). Default: no-op, returns empty string.
+    def cell_read(row : Int32, col : Int32) : String
+      ""
+    end
+
+    # Custom sizes persisted by VirtualMatrix after drag resize.
+    # When set, get_sizes returns these instead of defaults.
+    property custom_row_heights : Array(Float64)? = nil
+    property custom_col_widths : Array(Float64)? = nil
+
     # Initial row/col sizes (frame_height multiples). Called at init + invalidate_all!.
     # VirtualMatrix owns the mutable copy (drag resize modifies it directly).
     # Override to set custom sizes (e.g. wider header columns, taller header rows).
     def get_sizes : {Array(Float64), Array(Float64)}
       row_order, col_order = get_scrollorder
-      {Array.new(row_order.size, DEFAULT_ROW_HEIGHT),
-       Array.new(col_order.size, DEFAULT_COLUMN_WIDTH)}
+      rows = custom_row_heights || Array.new(row_order.size, DEFAULT_ROW_HEIGHT)
+      cols = custom_col_widths || Array.new(col_order.size, DEFAULT_COLUMN_WIDTH)
+      {rows, cols}
     end
 
     # Row operations (optional - default implementations do nothing)
@@ -53,15 +68,28 @@ module CrymbleUI::Widgets::VirtualMatrix
     def delete_row(at : Int32)
     end
 
+    # Assign a new string value to a cell (commit edit).
+    # Returns the (possibly adjusted) cursor position after assignment.
+    # Default: no-op, returns same position.
+    def cell_assign(row : Int32, col : Int32, value : String) : Tuple(Int32, Int32)
+      {row, col}
+    end
+
     # Check if cell has content (for cut/paste validation)
     def cell_has_content?(row : Int32, col : Int32) : Bool
       true
     end
 
-    # Optional: Get bounding box for merged cells
+    # Optional: Get bounding box for merged cells (used during painting)
     # Default: cell spans only itself
     def cell_get_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
       { {row, col}, {row, col} }
+    end
+
+    # Bounding box for drag/cut operations (may span more cells than painting bounds)
+    # Default: same as cell_get_bounding_box. Override for real record-level bounds.
+    def cell_get_drag_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+      cell_get_bounding_box(row, col)
     end
 
     # Optional: Get header info for a cell
@@ -74,6 +102,18 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Optional: Get cell name for tooltips/status bar
     def cell_get_name(row : Int32, col : Int32) : String
       "#{row},#{col}"
+    end
+
+    # Optional: Get highlight alpha for change animation (0 = no highlight, 1-255 = white border)
+    # Override in adapters that track cell changes across frames
+    def cell_highlight_alpha(row : Int32, col : Int32) : UInt8
+      0_u8
+    end
+
+    # Whether any cells currently have active change highlights
+    # Used to skip per-cell iteration in cursor overlay when no highlights exist
+    def has_active_highlights? : Bool
+      false
     end
 
     # Optional: Move cell content from one location to another

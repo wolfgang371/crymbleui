@@ -102,6 +102,11 @@ module CrymbleUI
         # Click callback
         @on_click : Proc(Nil)?
 
+        # Setter for click action (allows setting action without shortcut registration)
+        def on_click_action=(callback : Proc(Nil))
+            @on_click = callback
+        end
+
         # Maximum label width among sibling items (for shortcut alignment)
         layout_property max_label_width : Float64 = 0.0
 
@@ -173,6 +178,9 @@ module CrymbleUI
             # Use proper text measurement
             label_width = measure_text(@label, font_size).width
 
+            # Use max_label_width for alignment when set (ensures popup is wide enough for aligned shortcuts)
+            effective_label_width = @max_label_width > 0.0 ? @max_label_width : label_width
+
             # Minimum space between label and shortcut
             min_spacing = if @shortcut_display
                 LABEL_SHORTCUT_SPACING
@@ -187,7 +195,7 @@ module CrymbleUI
             end
 
             # Natural width needed
-            natural_width = check_width + label_width + min_spacing + shortcut_width + @padding * 2
+            natural_width = check_width + effective_label_width + min_spacing + shortcut_width + @padding * 2
 
             # Constrain to box constraints (use full width when tight)
             size = Size.new(natural_width, item_height)
@@ -202,6 +210,8 @@ module CrymbleUI
 
         # Trigger click callback - called by framework on mouse click
         def trigger_click
+            return unless enabled?
+
             # Execute callback
             @on_click.try &.call
 
@@ -243,8 +253,10 @@ module CrymbleUI
         # Renderer will add widget.bounds offset when drawing
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
 
-            # Determine text color based on hover state
-            text_color = if @hovered
+            # Determine text color based on enabled/hover state
+            text_color = if !enabled?
+                Color.new(@text_color.r, @text_color.g, @text_color.b, (@text_color.a // 3).to_u8)
+            elsif @hovered
                 Color.white
             else
                 @text_color

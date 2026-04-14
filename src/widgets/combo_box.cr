@@ -25,7 +25,8 @@ module CrymbleUI
     include PrimitiveBuilder
 
     # Layout constants
-    PADDING = 4.0
+    BORDER_WIDTH = 1.0
+    PADDING      = 4.0
     MIN_WIDTH = 80.0
     FONT_SCALE = 0  # Default font scale (uses FontSizing)
 
@@ -43,6 +44,10 @@ module CrymbleUI
 
     # Guard flag: true while expand() is transferring focus to popup's TextInput
     @expanding : Bool = false
+
+    # Saved proxy-focus state: true if we had proxy focus when expand() was called.
+    # Needed because on_blur → clear_proxy_focus resets @proxy_focused before collapse() runs.
+    @was_proxy_focused : Bool = false
 
     # Explicit width
     @explicit_width : Float64?
@@ -78,7 +83,15 @@ module CrymbleUI
     # Close popup when ComboBox loses focus (e.g., Tab key)
     # But NOT when we're expanding (focus transfers to popup's TextInput)
     def on_blur
+
       collapse if @popup_open && !@expanding
+    end
+
+    # Close popup when VirtualMatrix moves proxy focus away from this cell
+    # But NOT during expand (focus transfers to popup's TextInput)
+    def deactivate_proxy_focus
+      collapse if @popup_open && !@expanding
+      super
     end
 
     def items : Array(String)
@@ -105,6 +118,7 @@ module CrymbleUI
       super(id: id)
       @items = items
       @selected_index = items.empty? ? -1 : selected.clamp(0, items.size - 1)
+      @_build_selected_index = @selected_index
       @explicit_width = width
       @on_select = block
       # NO TextInput child - it's in the popup when expanded
@@ -122,6 +136,7 @@ module CrymbleUI
       super(id: id)
       @items = items
       @selected_index = items.empty? ? -1 : selected.clamp(0, items.size - 1)
+      @_build_selected_index = @selected_index
       @explicit_width = width
       @on_select = nil
       # NO TextInput child - it's in the popup when expanded
@@ -137,8 +152,25 @@ module CrymbleUI
       display_text = "»#{selected_value || ""}"
       font_size = FontSizing.calculate_size(FONT_SCALE)
       text_size = Widget.measure_text(display_text, font_size)
-      width = @explicit_width || [text_size.width + PADDING * 2, MIN_WIDTH].max
-      height = text_size.height + PADDING * 2
+
+      # Height: natural height, clamped to constraints
+      # For tight constraints from VirtualMatrix cells, fill exactly (small heights).
+      # But never expand beyond double the natural height — avoids filling entire
+      # window content area when combo is the sole child of a Window.
+      natural_height = text_size.height + (PADDING + BORDER_WIDTH) * 2
+      height = natural_height
+      max_reasonable = natural_height * 2
+      if constraints.min_height == constraints.max_height && constraints.max_height.finite?
+        height = Math.min(constraints.max_height, max_reasonable)  # Tight: fill cell, but cap
+      elsif constraints.max_height.finite?
+        height = Math.min(height, constraints.max_height)
+      end
+
+      # Width: prefer explicit, then constraint max, then natural
+      width = @explicit_width || constraints.max_width
+      width = Math.min(width, constraints.max_width) if constraints.max_width.finite?
+      width = 200.0 if !width.finite?
+
       Size.new(width, height)
     end
 
@@ -165,23 +197,31 @@ module CrymbleUI
         fill_rect(local_bounds, Theme.current.combo_background)
         # Border
         draw_rect(local_bounds, Theme.current.combo_border)
-        # Text
-        text_pos = Vec2.new(PADDING, PADDING)
+        # Text (vertically centered in content area, matching TextInput alignment)
+        font_size = FontSizing.calculate_size(FONT_SCALE)
+        content_y = BORDER_WIDTH + PADDING
+        content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
+        text_y = content_y + (content_height - font_size) / 2.0
+        text_pos = Vec2.new(PADDING, text_y)
         draw_text(display_text, text_pos, Theme.current.combo_text, FONT_SCALE)
       end
     end
 
     # ========== EVENT HANDLERS ==========
 
-    # Handle mouse up - expand when clicked on collapsed ComboBox
-    def on_mouse_up(point : Vec2)
-      expand if collapsed?
+    # Handle mouse up - expand when clicked on collapsed ComboBox (left-click only)
+    def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
+      expand if collapsed? && button == MouseButton::Left
     end
 
-    # Handle Enter key - expand when focused and collapsed
-    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool) : Bool
+    # Handle Enter/Escape keys
+    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
       if collapsed? && (key.return? || key.enter?)
         expand
+        return true
+      end
+      if @popup_open && key == SF::Keyboard::Key::Escape
+        collapse
         return true
       end
       false
@@ -189,6 +229,7 @@ module CrymbleUI
 
     # Handle text input - expand AND insert character
     def on_text_input(char : Char)
+
       if collapsed?
         expand(initial_char: char)
       end
@@ -200,11 +241,11 @@ module CrymbleUI
     def expand(initial_char : Char? = nil)
       return if @popup_open
 
+
       popup = ComboBoxPopup.new(
         items: @items,
         selected_index: @selected_index,
         max_height: 200.0,
-        width: @explicit_width || @bounds.width,
         text_background_color: @text_background_color,
         text_background_colors: @text_background_colors
       )
@@ -216,21 +257,82 @@ module CrymbleUI
       popup.on_cancel = -> {
         collapse
       }
+
+      # Type-to-filter mode: Up/Down also close popup + navigate grid
+      if initial_char
+        popup.text_input.on_vertical_arrow = ->(is_down : Bool) {
+          popup.select_highlighted
+          ancestor = @parent
+          while ancestor
+            if ancestor.is_focus_scope?
+              key = is_down ? SF::Keyboard::Key::Down : SF::Keyboard::Key::Up
+              ancestor.on_key_down(key, false, false)
+              break
+            end
+            ancestor = ancestor.parent
+          end
+          true
+        }
+      end
+
+      # Type-to-filter mode: Left/Right also close popup + navigate grid
+      # In Enter/click mode: Left/Right stay in TextInput for cursor movement
+      if initial_char
+        popup.text_input.on_horizontal_arrow = ->(is_right : Bool) {
+          popup.select_highlighted
+          ancestor = @parent
+          while ancestor
+            if ancestor.is_focus_scope?
+              key = is_right ? SF::Keyboard::Key::Right : SF::Keyboard::Key::Left
+              ancestor.on_key_down(key, false, false)
+              break
+            end
+            ancestor = ancestor.parent
+          end
+          true
+        }
+      end
+
       # Click-outside-to-close (notified by App.handle_mouse_down → Window.notify_overlays_of_click)
       popup.on_click_outside_callback = -> {
         collapse
       }
 
       # Add to Window overlays
-      if window = find_window
+      window = find_window
+      if window
         window.add_overlay(popup)
       end
 
       @current_popup = popup
       @popup_open = true
 
-      # Position popup below ComboBox
-      position_popup
+      # Lay out and position the popup immediately.
+      # The overlay system (Window.perform_layout) would lay it out on the
+      # next frame, but we need valid bounds NOW so it's visible and interactive.
+      abs = absolute_bounds
+      min_width = @explicit_width || abs.width
+      # Measure unconstrained to get natural width, then ensure at least cell width
+      natural_size = popup.measure(BoxConstraints.loose(Size.new(Float64::INFINITY, 200.0)))
+      popup_width = {min_width, natural_size.width}.max
+      popup.explicit_width = popup_width
+      popup_constraints = BoxConstraints.loose(Size.new(popup_width, 200.0))
+      popup_size = popup.measure(popup_constraints)
+
+      # Position below combo, but flip above if it would extend past window bottom
+      popup_y = abs.y + abs.height
+      if win = window
+        window_bottom = win.bounds.height
+        if popup_y + popup_size.height > window_bottom
+          # Flip above the combo box
+          popup_y = abs.y - popup_size.height
+        end
+      end
+      popup_pos = Vec2.new(abs.x, popup_y)
+      popup.layout(popup_constraints, popup_pos)
+
+      # Remember proxy focus state before focus transfer clears it
+      @was_proxy_focused = @proxy_focused
 
       # Focus TextInput inside popup (guard to prevent on_blur from closing)
       @expanding = true
@@ -242,13 +344,19 @@ module CrymbleUI
         popup.text_input.insert_char(char)
       end
 
-      mark_needs_layout
+      # Only mark_needs_render, NOT mark_needs_layout.
+      # mark_needs_layout propagates up and triggers DSL rebuild, which
+      # destroys/recreates VirtualMatrix cells — killing this ComboBox
+      # and orphaning the popup.  The popup is in Window overlays (not
+      # ComboBox children), so no layout change is needed.
       mark_needs_render
+
     end
 
     # Collapse - close popup without selecting
     def collapse
       return if collapsed?
+
 
       if popup = @current_popup
         # Stop flash timer before removing popup
@@ -260,9 +368,23 @@ module CrymbleUI
       @current_popup = nil
       @popup_open = false
 
-      # Return focus to ComboBox
-      request_focus
-      mark_needs_layout
+      # Return focus to focus-scope ancestor (VirtualMatrix) if we were proxy-focused
+      # when the popup opened, otherwise return focus to self (standalone usage).
+      # We check @was_proxy_focused (saved in expand()) because by now on_blur →
+      # clear_proxy_focus has already reset @proxy_focused to false.
+      if @was_proxy_focused
+        @was_proxy_focused = false
+        ancestor = @parent
+        while ancestor
+          if ancestor.is_focus_scope?
+            ancestor.request_focus
+            break
+          end
+          ancestor = ancestor.parent
+        end
+      else
+        request_focus
+      end
       mark_needs_render
     end
 
@@ -273,12 +395,23 @@ module CrymbleUI
       collapse
     end
 
-    # Position popup below ComboBox
+    # Position popup below ComboBox, flip above if near window bottom
     private def position_popup
       if popup = @current_popup
         abs = absolute_bounds
-        popup_pos = Vec2.new(abs.x, abs.y + abs.height)
-        popup.bounds = Rect.new(popup_pos, popup.bounds.size)
+        min_width = @explicit_width || abs.width
+        natural_size = popup.measure(BoxConstraints.loose(Size.new(Float64::INFINITY, 200.0)))
+        popup_width = {min_width, natural_size.width}.max
+        popup_constraints = BoxConstraints.loose(Size.new(popup_width, 200.0))
+        popup_size = popup.measure(popup_constraints)
+
+        popup_y = abs.y + abs.height
+        if window = find_window
+          if popup_y + popup_size.height > window.bounds.height
+            popup_y = abs.y - popup_size.height
+          end
+        end
+        popup.layout(popup_constraints, Vec2.new(abs.x, popup_y))
       end
     end
 

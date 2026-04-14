@@ -69,3 +69,25 @@ Bug A happened because WU3 visible-size shrinking was applied uniformly to all c
 A test asserting "content compound cell width == calculate_merged_width regardless of scroll position" would have caught Bug A at introduction time. Instead, the only tests verified final pixel output, which required both bugs to be fixed simultaneously.
 
 **Rule**: Write invariant tests for intermediate state (cell sizes, positions, layer contents), not just end-to-end pixel tests. These catch bugs earlier and isolate root causes.
+
+## Stale primitive cache after zoom (VHTree white lines)
+
+**Root cause**: HStack/VStack `perform_layout` set new bounds after zoom (e.g., 196x21 → 306x29) but never called `mark_needs_render`. `get_primitives()` returned cached primitives from the old size — a `fill_rect(0, 0, 196, 21)` rendered on a 306x29 widget_backend. The unfilled bottom region showed stale background content as "white lines" at every row boundary.
+
+**Secondary cause**: Some VHTree rows used `vstack` wrappers which pass loose height constraints, so their HStack children measured to natural height (28.15) instead of the required 29px.
+
+### Why diagnosis was slow
+
+1. **Misleading "healing" signal.** The user reported checkbox clicks "heal" the seams. The healing was actually the checkbox *deselecting* the row (changing its color), not a rendering fix. A pure `request_rebuild` didn't fix anything — but we didn't test that until late.
+
+2. **Layout was correct.** All widget bounds were integer-aligned, no gaps between rows. Every layout diagnostic said "all correct." The bug lived in the *cache invalidation* path between layout and rendering — invisible to bounds inspection.
+
+3. **Symptom color (TEXT_COLOR) suggested text rendering.** The seam pixels (240,240,240) matched text color, and HStack children (28px) were shorter than their parent (29px). Both looked like text-positioning bugs. We spent time on Button centering and row padding before realizing these were symptoms of the stale fill_rect, not the cause.
+
+### Rules
+
+**Rule**: When a "heal" action exists, first test with the *minimal* heal (pure rebuild, no state change). If the bug persists after rebuild, the heal action has side effects that mask the real situation.
+
+**Rule**: Stale primitive caches are invisible to layout diagnostics. When layout is correct but rendering is wrong, check whether `get_primitives()` returns primitives matching the current bounds. A `DEBUG_STALE_PRIMITIVES` flag that asserts fill_rect dimensions match widget_backend size would catch this instantly.
+
+**Rule**: Size-change detection should live in the base `Widget.layout()`, not in individual subclasses. Button already called `mark_needs_render` on size change; HStack/VStack forgot. Moving this to the framework prevents the same class of bug from recurring.

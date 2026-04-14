@@ -72,7 +72,7 @@ module CrymbleUI
             @internal_layer = nil
         end
 
-        # layer getter and can_skip_layout? provided by LayerOwner mixin
+        # layer getter provided by LayerOwner mixin
 
         # Override label for path_id generation
         def label : String?
@@ -96,12 +96,8 @@ module CrymbleUI
                 @internal_layer = Layer.new("menubar_#{id}", Rect.zero, z_index: MENUBAR_Z_INDEX, owner_widget: self)
             end
 
-            # Update internal layer bounds if we have our own layer (Window menubar only)
+            # Populate layer.widgets (Window menubar only)
             if layer = @internal_layer
-                abs_bounds = absolute_bounds
-                layer.bounds = abs_bounds
-
-                # Populate layer.widgets (menubar first for background, then menu children)
                 layer.widgets.clear
                 layer.widgets << self  # MenuBar renders background first
             end

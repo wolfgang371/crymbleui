@@ -2,7 +2,7 @@
 # This provides direct FFI bindings to the C library
 #
 # USAGE: Set LD_LIBRARY_PATH before running:
-#   source setup.sh  # Sets LD_LIBRARY_PATH to include locallib/sfml/lib and locallib/csfml3/lib
+#   source setup.sh  # Sets LD_LIBRARY_PATH to include locallib/sfml3/lib/linux and locallib/csfml3/lib/linux
 #
 # Or build with explicit paths using LIBRARY_PATH environment variable.
 
@@ -12,6 +12,14 @@
 @[Link("sfml-system")]
 @[Link("sfml-window")]
 @[Link("sfml-graphics")]
+{% if flag?(:win32) %}
+  @[Link("freetype")]
+  @[Link("gdi32")]
+  @[Link("winmm")]
+  @[Link("user32")]
+  @[Link("opengl32")]
+  @[Link("advapi32")]
+{% end %}
 lib LibCSFML
   # ============================================================
   # System Types
@@ -407,6 +415,7 @@ lib LibCSFML
   fun sfTexture_create(size : Vector2u) : Texture
   fun sfTexture_createFromFile(filename : LibC::Char*, area : IntRect*) : Texture
   fun sfTexture_createFromImage(image : Image, area : IntRect*) : Texture
+  fun sfTexture_createFromMemory(data : Void*, sizeInBytes : LibC::SizeT, area : IntRect*) : Texture
   fun sfTexture_copy(texture : Texture) : Texture
   fun sfTexture_destroy(texture : Texture)
   fun sfTexture_getSize(texture : Texture) : Vector2u
@@ -459,6 +468,7 @@ lib LibCSFML
   fun sfFont_getKerning(font : Font, first : UInt32, second : UInt32, character_size : LibC::UInt) : LibC::Float
   fun sfFont_getLineSpacing(font : Font, character_size : LibC::UInt) : LibC::Float
   fun sfFont_getGlyph(font : Font, code_point : UInt32, character_size : LibC::UInt, bold : Bool, outline_thickness : LibC::Float) : Glyph
+  fun sfFont_getTexture(font : Font, character_size : LibC::UInt) : Texture
 
   # ============================================================
   # Text Functions

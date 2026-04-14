@@ -271,7 +271,6 @@ module CrymbleUI
         next unless widget
 
         cells_created = true
-        widget.needs_fresh_background = true  # Clean background capture
         widget.parent = host_widget
         if hw = host_widget
           hw.children << widget

@@ -51,8 +51,8 @@ module CrymbleUI
         tight_width = constraints.min_width == constraints.max_width
         tight_height = constraints.min_height == constraints.max_height
 
-        width = tight_width ? constraints.max_width : child_size.width
-        height = tight_height ? constraints.max_height : child_size.height
+        width = tight_width ? constraints.max_width : child_size.width.clamp(constraints.min_width, constraints.max_width)
+        height = tight_height ? constraints.max_height : child_size.height.clamp(constraints.min_height, constraints.max_height)
       end
 
       @bounds = Rect.new(position.x, position.y, width, height)

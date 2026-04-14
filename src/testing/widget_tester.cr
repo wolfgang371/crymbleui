@@ -51,7 +51,7 @@ module CrymbleUI
                 widget.trigger_click
                 # Rebuild and re-layout if needs layout
                 if app = @app
-                    if app.root.try &.needs_layout?
+                    if app.needs_rebuild?
                         app.rebuild
                         # Re-layout the new tree
                         if root = app.root

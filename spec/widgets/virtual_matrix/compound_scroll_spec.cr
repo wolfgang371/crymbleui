@@ -1,6 +1,7 @@
 require "../../spec_helper"
 require "../../../src/widgets/virtual_matrix"
 require "../../../src/testing/test_renderer"
+require "../../../src/testing/configurable_matrix_adapter"
 
 # Test adapter with compound cells and configurable scroll_order
 class CompoundScrollAdapter
@@ -953,6 +954,208 @@ describe CrymbleUI::VirtualMatrix do
 
       failures.should be_empty,
         "Compound header went below sticky boundary at #{failures.size} positions:\n" +
+        failures.first(5).join("\n")
+    end
+  end
+
+  # Regression: compound header cells at the RIGHT edge of the viewport are blank
+  # after horizontal scroll. The compound cell width doesn't cover newly visible
+  # constituent columns until one more scroll step forces a recompute.
+  describe "Compound header right-edge coverage on hscroll" do
+    it "compound header right edge reaches rightmost visible constituent column after hscroll" do
+      # Setup: ConfigurableMatrixAdapter with 2-level col headers.
+      # Col header row 0 has compound cells spanning 30 data cols each.
+      # Scrolling right brings new constituent columns into view from the right edge.
+      # Bug: @viewport_col_positions was cached and didn't include newly-visible columns,
+      # causing compound cell width to miss right-edge columns.
+      adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
+      matrix, app, constraints = setup_compound_matrix(adapter, 800.0, 400.0)
+
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 400)
+      app.build_tree
+      renderer.settle_rendering(app)
+
+      center = CrymbleUI::Vec2.new(400.0, 200.0)
+      sticky_cols = matrix.sticky_col_count
+      failures = [] of String
+
+      20.times do |step|
+        matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), center, shift: true)
+        renderer.render_frame(app)
+
+        sticky_rows = matrix.sticky_row_count
+        row0_compounds = matrix.active_cells.select { |key, widget|
+          row, col = key
+          row < sticky_rows && col >= sticky_cols &&
+            matrix.get_bounding_box(key)[0] != matrix.get_bounding_box(key)[1]
+        }
+
+        # For each compound header, verify its right edge reaches the rightmost visible
+        # constituent column. The cell is in screen-space (pinned at sticky boundary),
+        # so we compare cell right edge with the content layer's viewport right edge.
+        viewport_w = matrix.content_scroll_view.try { |sv|
+          sv.sticky_row_layer.try(&.bounds.width)
+        } || 800.0
+
+        row0_compounds.each do |key, widget|
+          bb = matrix.get_bounding_box(key)
+          min_col = bb[0][1]
+          max_col = bb[1][1]
+
+          vis = matrix.visible_cell_indices[:cols]
+          visible_in_compound = vis.select { |c| c >= min_col && c <= max_col }
+          next if visible_in_compound.empty?
+
+          next if widget.bounds.x < -100.0  # parked off-screen
+          next if widget.bounds.width <= 1.0  # collapsed
+
+          # The compound cell should fill its portion of the sticky_row_layer.
+          # Its right edge (in layer-local coords) should reach the layer width
+          # OR at least the rightmost visible column's screen position.
+          cell_right_in_layer = widget.bounds.x + widget.bounds.width -
+            (matrix.sticky_col_width_pixels + matrix.ruler_col_width_pixels)
+
+          # Allow 2 column widths of tolerance (for capping + grid_spacing)
+          col_px = (CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter::DEFAULT_COLUMN_WIDTH *
+                    CrymbleUI::VirtualMatrix::FRAME_HEIGHT_BASE).to_f64
+          tolerance = col_px * 2
+
+          if cell_right_in_layer + tolerance < viewport_w
+            failures << "step=#{step} cell=#{key}: right_edge=#{cell_right_in_layer.round(1)} " \
+              "viewport_w=#{viewport_w.round(1)} gap=#{(viewport_w - cell_right_in_layer).round(1)}px " \
+              "(#{visible_in_compound.size} visible cols: #{visible_in_compound.first}..#{visible_in_compound.last})"
+          end
+        end
+      end
+
+      failures.should be_empty,
+        "Compound header right edge doesn't reach viewport for some scroll positions:\n" +
+        failures.first(5).join("\n")
+    end
+
+    it "compound header has non-blank pixels at right edge after scrollbar-style hscroll" do
+      # Verify the VISUAL result: after scrollbar-driven horizontal scroll (deferred path),
+      # the sticky_row_layer has non-background-color pixels in the header area at the
+      # right portion. This catches: compound cells created but not rendered (blank).
+      adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
+      matrix, app, constraints = setup_compound_matrix(adapter, 800.0, 400.0)
+
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 400)
+      app.build_tree
+      renderer.settle_rendering(app)
+
+      sv = matrix.content_scroll_view.not_nil!
+      bg_color = CrymbleUI::Color.new(230, 230, 230, 255)  # content_background_color
+
+      # Simulate scrollbar-driven scroll (deferred path via sync_from_scroll_view)
+      # by setting ScrollView offset directly — this mimics thumb drag behavior.
+      failures = [] of String
+      (1..30).each do |step|
+        scroll_x = step * 100.0  # 100px per step to cross compound boundaries
+        sv.scroll_offset = CrymbleUI::Vec2.new(scroll_x, 0.0)
+        renderer.render_frame(app)
+
+        row_layer = sv.sticky_row_layer
+        next unless row_layer
+        raw_backend = row_layer.backend
+        next unless raw_backend.is_a?(CrymbleUI::Testing::TestRenderBackend)
+        backend = raw_backend
+        next if backend.width < 10 || backend.height < 10
+
+        # Sample pixel at 75% of the layer width (right portion of header)
+        sample_x = (backend.width * 0.75).to_i.clamp(0, backend.width - 1)
+        # Sample in the middle of header row 1 (row 0 is at y≈0..30, row 1 at y≈33..63)
+        sample_y = (backend.height * 0.7).to_i.clamp(0, backend.height - 1)
+        pixel = backend.get_pixel(sample_x, sample_y)
+
+        # The pixel should NOT be the sticky background color (which is
+        # the same as content_background_color for this adapter)
+        if pixel == bg_color
+          failures << "step=#{step} scroll=#{scroll_x}: blank pixel at (#{sample_x},#{sample_y}) on sticky_row_layer"
+        end
+      end
+
+      failures.should be_empty,
+        "Compound header area has blank pixels after scrollbar-driven hscroll:\n" +
+        failures.first(5).join("\n")
+    end
+
+    it "compound header cells tile viewport without gaps during hscroll" do
+      # Verify: at every scroll position, compound header cells in each sticky row
+      # cover the full viewport width. Any gap = visible blank area in the header.
+      # Bug: the sticky cache key only updates when a full column scrolls past, so for
+      # intermediate scroll steps, new compound cells at the right edge aren't created.
+      adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
+      matrix, app, constraints = setup_compound_matrix(adapter, 800.0, 400.0)
+
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 400)
+      app.build_tree
+      renderer.settle_rendering(app)
+
+      center = CrymbleUI::Vec2.new(400.0, 200.0)
+      sticky_rows = matrix.sticky_row_count
+      sticky_cols = matrix.sticky_col_count
+      failures = [] of String
+
+      # Scroll through several compound cell boundaries
+      90.times do |step|
+        matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), center, shift: true)
+        renderer.render_frame(app)
+
+        sv = matrix.content_scroll_view
+        next unless sv
+        row_layer = sv.sticky_row_layer
+        next unless row_layer
+
+        # For each header row, collect compound cell bounds on the sticky_row_layer
+        # and check they cover from sticky_col_w to the layer's right edge.
+        sticky_col_w = matrix.sticky_col_width_pixels + matrix.ruler_col_width_pixels
+        layer_w = row_layer.bounds.width
+
+        (0...sticky_rows).each do |hdr_row|
+          # Collect active compound cells in this header row
+          cells = matrix.active_cells.select { |k, w|
+            k[0] == hdr_row && k[1] >= sticky_cols &&
+              matrix.get_bounding_box(k)[0] != matrix.get_bounding_box(k)[1]
+          }
+          next if cells.empty?
+
+          # Compute coverage: for each cell, what screen-space range does it cover?
+          # Cell bounds are in VirtualMatrix coords; convert to layer-local.
+          # Filter to cells actually visible on the layer (within layer bounds).
+          covered_ranges = cells.map { |k, w|
+            local_x = w.bounds.x - sticky_col_w
+            local_right = local_x + w.bounds.width
+            # Skip off-screen/collapsed/parked cells
+            next nil if w.bounds.x < -100.0 || w.bounds.width <= 1.0
+            next nil if local_right <= 0.0  # Entirely left of layer
+            next nil if local_x >= layer_w  # Entirely right of layer
+            {local_x, local_right}
+          }.compact.sort_by { |r| r[0] }
+
+          # Check for gaps: each range should start at or before the previous one ends
+          next if covered_ranges.empty?
+          # The first cell should start at or before 0 (covering the viewport left edge)
+          rightmost = covered_ranges.first[1]
+          covered_ranges.each_with_index do |range, i|
+            next if i == 0
+            gap = range[0] - rightmost
+            if gap > 5.0  # Allow small tolerance for grid_spacing
+              failures << "step=#{step} row=#{hdr_row}: #{gap.round(0)}px gap at x=#{rightmost.round(0)}"
+              break  # One failure per row per step is enough
+            end
+            rightmost = {rightmost, range[1]}.max
+          end
+
+          # The last cell should reach the viewport right edge
+          if rightmost + 5.0 < layer_w  # Allow tolerance
+            failures << "step=#{step} row=#{hdr_row}: right edge #{rightmost.round(0)} < layer_w #{layer_w.round(0)}"
+          end
+        end
+      end
+
+      failures.should be_empty,
+        "Compound header cells have gaps in viewport coverage:\n" +
         failures.first(5).join("\n")
     end
   end

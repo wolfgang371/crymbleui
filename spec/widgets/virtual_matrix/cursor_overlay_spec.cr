@@ -139,7 +139,7 @@ describe CrymbleUI::VirtualMatrix do
     end
 
     it "col band spans full viewport height at cursor col position" do
-      matrix, _, _ = setup_overlay_matrix
+      matrix, _, _ = setup_overlay_matrix(rows: 15)  # 15 rows to fill viewport (15*23+20=365 > 300)
       matrix.cursor_rc = {2, 3}
 
       overlay = matrix.cursor_overlay_layer.not_nil!
@@ -232,23 +232,22 @@ describe CrymbleUI::VirtualMatrix do
       overlay = matrix.cursor_overlay_layer.not_nil!
       backend = overlay.backend.as(CrymbleUI::Testing::TestRenderBackend)
 
-      # Verify overlay has content before scroll
-      # With rulers: ruler_x=40, ruler_y=20, row_h=23, col_w=103
-      # Col 0 band: x in [40..142], Row 2 band: y in [66..88]
-      # Pixel (50, 70): inside col 0 band and row 2 band
-      pixel_before = backend.get_pixel(50, 70)
+      # Verify row band has content before scroll at a pixel ONLY in the row band
+      # (outside col 0 band which is x in [40..142])
+      # Row 2 band: y in [66..88], full width
+      # Pixel (200, 70): inside row band only (not in col band)
+      pixel_before = backend.get_pixel(200, 70)
       pixel_before.should_not be_nil
       pixel_before.not_nil!.a.should be > 0_u8
 
       # Scroll row 2 far above viewport via on_mouse_wheel
-      # delta.y=-10 → scroll_y = 10 * 30 = 300px. Row 2 at content_y=66 → band_y=66-300=-234 (above viewport)
       center = CrymbleUI::Vec2.new(200.0, 150.0)
       matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -10.0), center)
       renderer.render_frame(app)
 
-      # With bug: ghost col band persists (stale background capture feedback loop)
-      # With fix: overlay fully transparent (mark_needs_layout → full clear)
-      pixel_after = backend.get_pixel(50, 70)
+      # Row band should be gone (row scrolled out), pixel should be transparent
+      # (Col band at x=40..142 may still be present, but x=200 is outside it)
+      pixel_after = backend.get_pixel(200, 70)
       (pixel_after.nil? || pixel_after.not_nil!.a == 0_u8).should be_true
     end
 
@@ -263,24 +262,22 @@ describe CrymbleUI::VirtualMatrix do
       overlay = matrix.cursor_overlay_layer.not_nil!
       backend = overlay.backend.as(CrymbleUI::Testing::TestRenderBackend)
 
-      # Verify overlay has content before scroll (pixel inside both bands)
-      # With rulers: ruler_x=40, ruler_y=20, row_h=23, col_w=103
-      # Row 0 band: y in [20..42] (cursor_y=ruler_y+0=20, effective_band_y=max(20,sticky_h=20)=20, row_h=23)
-      # Col 2 band: x in [246..348] (cursor_x=ruler_x+2*103=246, effective_band_x=max(246,sticky_w=40)=246, col_w=103)
-      # Pixel (250, 25): inside col 2 band and row 0 band
-      pixel_before = backend.get_pixel(250, 25)
+      # Verify col band has content before scroll at a pixel ONLY in the col band
+      # (outside row 0 band which is y in [20..42])
+      # Col 2 band: x in [246..348], full height
+      # Pixel (250, 100): inside col band only (not in row band)
+      pixel_before = backend.get_pixel(250, 100)
       pixel_before.should_not be_nil
       pixel_before.not_nil!.a.should be > 0_u8
 
       # Scroll col 2 left of viewport via on_mouse_wheel with shift
-      # shift+delta.y=-20 → scroll_x = 20 * 30 = 600px. Col 2 at content_x=246 → band_x=246-600=-354 (left of viewport)
       center = CrymbleUI::Vec2.new(200.0, 150.0)
       matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -20.0), center, shift: true)
       renderer.render_frame(app)
 
-      # With bug: ghost row band persists
-      # With fix: overlay fully transparent
-      pixel_after = backend.get_pixel(250, 25)
+      # Col band should be gone (col scrolled out), pixel should be transparent
+      # (Row band at y=20..42 may still be present, but y=100 is outside it)
+      pixel_after = backend.get_pixel(250, 100)
       (pixel_after.nil? || pixel_after.not_nil!.a == 0_u8).should be_true
     end
   end

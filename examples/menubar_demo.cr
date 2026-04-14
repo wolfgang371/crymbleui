@@ -54,6 +54,7 @@ class MenuBarDemo < CrymbleUI::App
                 menu("View") do
                     menu_item("Dark Mode", checked: self.dark_mode) do
                         self.dark_mode = !self.dark_mode
+                        CrymbleUI::Theme.set(self.dark_mode ? :dark : :light)
                     end
                     menu_item("Show Toolbar", checked: self.show_toolbar) do
                         self.show_toolbar = !self.show_toolbar

@@ -22,13 +22,13 @@ module CrymbleUI
 
     @accept_types : Array(String)
     @on_drop_handler : Proc(DragData, Vec2, Nil)?
-    @background_color : Color
+    @background_color : Color?
     @hover_color : Color
 
     def initialize(
       @accept_types : Array(String),
       @on_drop_handler : Proc(DragData, Vec2, Nil)? = nil,
-      @background_color : Color = Theme.current.dropzone_background,
+      @background_color : Color? = Theme.current.dropzone_background,
       @hover_color : Color = Theme.current.dropzone_hover,
       id : String? = nil
     )
@@ -64,7 +64,9 @@ module CrymbleUI
     # Draw background only - hover highlight is handled by overlay layer
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       primitives do
-        fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), @background_color)
+        if bg = @background_color
+          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+        end
       end
     end
   end

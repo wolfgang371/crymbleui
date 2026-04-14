@@ -48,26 +48,52 @@ module CrymbleUI
     # Widgets with conditional layers (MenuBar) create in perform_layout()
     @internal_layer : Layer?
 
+    # Resize clip delta: during ancestor resize drag, layers must shrink (not expand)
+    # to prevent ghost pixels from cache_extent pre-rendered content.
+    # Format: {dw, dh, dx, dy} — cumulative delta from resize start.
+    @resize_clip_delta : Tuple(Float64, Float64, Float64, Float64)?
+
     # Expose internal layer for renderer
     # Override this if using a different field name (e.g., Window uses @root_layer)
     def layer : Layer?
       @internal_layer
     end
 
-    # Layer-owning widgets should not skip layout
-    # Layer.bounds must stay synchronized with widget.absolute_bounds
-    # If we skip layout, bounds can drift and compositing breaks
-    #
-    # This guard is called by Widget#layout via can_skip_layout?
-    # Returns false if we have a layer, forcing layout to run
-    #
-    # Note: We call super instead of previous_def because Widget defines can_skip_layout?
-    protected def can_skip_layout?(constraints : BoxConstraints) : Bool
-      # Never skip if we own a layer - bounds must stay in sync
-      return false if layer
+    # Pull-based bounds: compute the correct bounds for a given layer.
+    # Override in each LayerOwner to return the appropriate bounds.
+    # Default: return absolute_bounds (correct for simple single-layer widgets).
+    def compute_bounds_for_layer(layer : Layer) : Rect
+      apply_resize_clip(absolute_bounds, layer)
+    end
 
-      # For conditional layer owners (MenuBar), allow skip if no layer yet
-      # Call super to check constraint caching in Widget base class
+    # Apply resize clamping during ancestor resize drag.
+    # Content layers only shrink (not expand) to prevent ghost pixels.
+    # Override shrink_on_resize? per-layer to allow expansion (e.g., cursor overlay).
+    protected def apply_resize_clip(natural : Rect, layer : Layer) : Rect
+      if delta = @resize_clip_delta
+        dw, dh, dx, dy = delta
+        # Capture baseline on first resize_move — stable for entire drag
+        orig = layer.resize_baseline || begin
+          layer.resize_baseline = natural
+          natural
+        end
+        clamped_dw = {dw, 0.0}.min  # Only shrink
+        clamped_dh = {dh, 0.0}.min
+        Rect.new(orig.x + dx, orig.y + dy, orig.width + clamped_dw, orig.height + clamped_dh)
+      else
+        layer.resize_baseline = nil  # Clear baseline when not resizing
+        natural
+      end
+    end
+
+    # Layer-owning widgets must not skip layout.
+    # Pull-based bounds handles position/size, but perform_layout also:
+    # - Populates layer.widgets (renderer needs correct widget references)
+    # - Syncs layer z_index (after reconciliation)
+    # - Updates layer-specific state (scroll offsets, cache_extent, etc.)
+    # Skipping layout could leave these stale, causing rendering artifacts.
+    protected def can_skip_layout?(constraints : BoxConstraints) : Bool
+      return false if layer
       super
     end
 
@@ -82,48 +108,21 @@ module CrymbleUI
       layer || raise "Layer not initialized for #{self.class.name}"
     end
 
-    # Helper to sync layer bounds with widget absolute_bounds
-    # Call this in perform_layout after setting @bounds
-    protected def sync_layer_bounds
-      if layer = self.layer
-        layer.bounds = absolute_bounds
-      end
-    end
-
-    # Helper to sync layer bounds with custom rect (for border expansion, etc.)
-    # Used by Popup which expands layer bounds for border stroke
-    protected def sync_layer_bounds(bounds : Rect)
-      if layer = self.layer
-        layer.bounds = bounds
-      end
-    end
-
     # === ANCESTOR NOTIFICATION CALLBACKS ===
-    # Override these in layer-owning widgets that need to respond to ancestor changes.
-    # Default implementations are no-ops.
-
-    # Called when an ancestor's position changed (e.g., during drag)
-    # delta: the position change in absolute coordinates
-    def on_ancestor_position_changed(delta : Vec2)
-      # Default: no-op
-    end
-
-    # Called when an ancestor starts resizing
-    # Capture any state needed to compute deltas during resize
-    def on_ancestor_resize_start
-      # Default: no-op
-    end
+    # With pull-based bounds, position_changed and resize_start are no longer needed.
+    # resize_move/end are kept to track @resize_clip_delta for content clamping.
 
     # Called during ancestor resize with cumulative delta from start
     # dw/dh: change from original size at resize start
-    def on_ancestor_resize_move(dw : Float64, dh : Float64)
-      # Default: no-op
+    # dx/dy: position change (for left/top resize)
+    def on_ancestor_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0)
+      @resize_clip_delta = {dw, dh, dx, dy}
     end
 
     # Called when ancestor resize completes
     # Clean up any captured state
     def on_ancestor_resize_end
-      # Default: no-op
+      @resize_clip_delta = nil
     end
 
     # Called when ancestor's z-index changed (e.g., bring-to-front)

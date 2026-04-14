@@ -86,7 +86,7 @@ private def find_button_in_matrix(matrix : CrymbleUI::VirtualMatrix) : CrymbleUI
   nil
 end
 
-describe "Button pixel colors in VirtualMatrix after zoom" do
+describe "Button pixel colors in VirtualMatrix after zoom", tags: "slow" do
   before_each do
     CrymbleUI::FontSizing.reset_zoom
   end
@@ -170,7 +170,7 @@ describe "Button pixel colors in VirtualMatrix after zoom" do
     post_corner.a.should eq(255_u8)
   end
 
-  it "button has same opaque blue pixels after two zoom steps" do
+  it "button has same opaque blue pixels after two zoom steps", tags: "slow" do
     adapter = ButtonZoomAdapter.new
     matrix = CrymbleUI::VirtualMatrix.new(
       adapter: adapter, id: "zoom_btn_test",

@@ -1,16 +1,19 @@
+
 # CrymbleUI
 
-**Version 0.3.0**
+**Version 0.4.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
 
 Its name is a pun of Crystal and nimble :smiley:
 
-CrymbleUI's first line of code emerged 2.11.2025, 19:46.
+Currently with SFML 3.0 backend, for Linux and Windows.
+(Windows needed slight patching of SFML.)
 
-Currently with SFML backend and for Linux.
-But easily portable to e.g. Windows.
+CrymbleUI is fully AI generated.
+Its first line of code emerged 2.11.2025, 19:46.
+Currently is has: src/: ~28384 LOC · spec/: ~47929 LOC
 
 ## Features
 
@@ -20,17 +23,24 @@ But easily portable to e.g. Windows.
 - **Rich Widget Set** - Buttons, text inputs, checkboxes, combo boxes, scroll views, menus, panels, and more
 - **Drag & Drop** - Type-safe drag and drop with accept filtering
 - **Keyboard Navigation** - Tab focus, shortcuts, and accessibility support
-- **new since v0.3.0: VirtualMatrix widget**
+- **VirtualMatrix widget** (since v0.3.0)
   - arbitrary size matrix
   - arbitrary cell widgets
   - fully flexible automatic sticky headers (both rows and columns, arbitrary nesting)
-  - fully flexible automatic cell combination, indpendent of sticky headers
+  - fully flexible automatic cell combination, independent of sticky headers
   - fully transparent internal caching mechanisms to guarantee best performance
+  - cell editing, keyboard actions (cut/paste/insert/delete), cell drag-and-drop
   - see tutorial-22.cr (<100LOC) or virtual_matrix_demo.cr
-- **new since v0.3.0: centralized color theme handling**
+- **Centralized color theme handling** (since v0.3.0)
+  - light and dark themes with runtime switching
   - fully user controllable via JSON
-  - instance overrides
+  - instance overrides, custom app background color
   - see tutorial-23.cr
+- **Image widget** (since v0.4.0) - display PNG/JPG with tinting and alpha
+- **TreeNode widget** (since v0.4.0) - collapsible sections for hierarchical content
+- **Disabled buttons and menu items** (since v0.4.0) - visual feedback, no click handling
+- **Right-click context menus** - handler bubbling up the widget tree
+- **Window title sync** - dynamic window title from root widget
 
 ## Installation
 
@@ -81,7 +91,168 @@ and many more in examples/
 
 ## New Features
 
-### **New:** Tutorial 22: Virtual Matrix
+### v0.4.0
+
+#### Tutorial 24: Image Widget
+Displaying images with tinting and sizing options.
+
+![Tutorial 24: Image Widget](screenshots/tutorial-24.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial24App < CrymbleUI::App
+  LOGO = "tutorials/crystal_logo.png"
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 24: Image Widget", 600, 400) do
+      vstack(padding: 15.0, spacing: 15.0) do
+        text("Image Widget Examples", font_scale: 1)
+
+        hstack(spacing: 20.0) do
+          vstack(spacing: 5.0) do
+            text("Original (128×128)", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0)
+          end
+
+          vstack(spacing: 5.0) do
+            text("Red tint", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(255, 100, 100, 255))
+          end
+
+          vstack(spacing: 5.0) do
+            text("Blue tint", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(100, 100, 255, 255))
+          end
+
+          vstack(spacing: 5.0) do
+            text("Semi-transparent", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(255, 255, 255, 128))
+          end
+        end
+
+        separator
+
+        text("Small (48×48):", font_scale: -1)
+        hstack(spacing: 10.0) do
+          image(LOGO, width: 48.0, height: 48.0)
+          image(LOGO, width: 48.0, height: 48.0, tint: Color.new(100, 255, 100, 255))
+          image(LOGO, width: 48.0, height: 48.0, tint: Color.new(255, 200, 50, 255))
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial24App.new)
+```
+
+</details>
+
+---
+#### Tutorial 25: TreeNode
+Collapsible tree sections for hierarchical content.
+
+![Tutorial 25: TreeNode](screenshots/tutorial-25.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial25App < CrymbleUI::App
+  state click_count : Int32 = 0
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 25: TreeNode", 500, 500) do
+      vstack(padding: 15.0, spacing: 10.0) do
+        text("Collapsible Tree Sections", font_scale: 1)
+
+        scroll_view(direction: ScrollDirection::Vertical) do
+          vstack(spacing: 4.0) do
+            tree_node("Getting Started", expanded: true, font_scale: 1) do
+              vstack(padding: 10.0, spacing: 5.0) do
+                text("CrymbleUI is a declarative GUI framework for Crystal.")
+                text("It uses a reactive state model for automatic UI updates.")
+              end
+            end
+
+            tree_node("Widgets", expanded: true) do
+              vstack(padding: 10.0, spacing: 4.0) do
+                tree_node("Basic Widgets", expanded: true) do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- Button: clickable actions")
+                    text("- Text: display labels")
+                    text("- TextInput: text entry")
+                    text("- Checkbox: boolean toggles")
+                    text("- ComboBox: dropdown selection")
+                  end
+                end
+
+                tree_node("Layout Widgets") do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- VStack: vertical arrangement")
+                    text("- HStack: horizontal arrangement")
+                    text("- Expanded: fill remaining space")
+                    text("- ScrollView: scrollable content")
+                    text("- RecursiveGrid: auto-spanning grids")
+                  end
+                end
+
+                tree_node("Advanced Widgets") do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- VirtualMatrix: large scrollable tables")
+                    text("- WindowPanel: floating panels")
+                    text("- TreeNode: collapsible sections (this!)")
+                    text("- Image: display images")
+                  end
+                end
+              end
+            end
+
+            tree_node("Interactive Example") do
+              vstack(padding: 10.0, spacing: 8.0) do
+                text("Buttons work inside tree nodes:")
+                hstack(spacing: 10.0) do
+                  button("Click me") { self.click_count += 1 }
+                  text("Clicked: #{click_count} times")
+                end
+              end
+            end
+
+            tree_node("About", text_color: Color.new(150, 150, 150, 255)) do
+              vstack(padding: 10.0, spacing: 5.0) do
+                text("CrymbleUI v#{`shards version`.chomp}", font_scale: -1,
+                     color: Color.new(150, 150, 150, 255))
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial25App.new)
+```
+
+</details>
+
+---
+### v0.3.0
+
+#### Tutorial 22: VirtualMatrix
 VirtualMatrix widget with arbitrary sized matrix, arbitrary cell widgets and fully flexible automatic sticky headers
 
 https://github.com/user-attachments/assets/6d237ce3-f7b2-49c7-aed8-9b40cf9d04cc
@@ -188,10 +359,10 @@ CrymbleUI.run(Tutorial22App.new)
 </details>
 
 ---
-### **New:** Tutorial 23: Theme Switcher
-Demonstrates runtime theme switching via a menubar.
+#### Tutorial 23: Color Themes
+Demonstrates runtime theme switching, custom app background color, and disabled buttons.
 
-![Tutorial 23: Theme Switcher](screenshots/tutorial-23.png)
+![Tutorial 23: Color Themes](screenshots/tutorial-23.png)
 
 <details>
 <summary>View source code</summary>
@@ -205,9 +376,19 @@ class Tutorial23App < CrymbleUI::App
   state current_theme : Symbol = :light
   state notify : Bool = false
   state input_value : String = ""
+  state bg_mode : Symbol = :theme  # :theme, :green, :blue
+
+  # Custom window background color based on bg_mode
+  def app_background_color : CrymbleUI::Color?
+    case @bg_mode
+    when :green then Color.new(0, 40, 0, 255)
+    when :blue  then Color.new(0, 0, 40, 255)
+    else             nil # use theme default
+    end
+  end
 
   def build : CrymbleUI::Widget
-    window("Tutorial 23: Theme Switcher", 700, 500) do
+    window("Tutorial 23: Theme Switcher", 700, 550) do
       menubar do
         menu("View") do
           menu_item("Light Theme", checked: current_theme == :light, checkable: true) do
@@ -218,17 +399,29 @@ class Tutorial23App < CrymbleUI::App
             Theme.set(:dark)
             self.current_theme = :dark
           end
+          separator
+          menu_item("Background: Theme Default", checked: bg_mode == :theme, checkable: true) do
+            self.bg_mode = :theme
+          end
+          menu_item("Background: Dark Green", checked: bg_mode == :green, checkable: true) do
+            self.bg_mode = :green
+          end
+          menu_item("Background: Dark Blue", checked: bg_mode == :blue, checkable: true) do
+            self.bg_mode = :blue
+          end
         end
       end
 
       vstack(padding: 15.0, spacing: 10.0, background_color: Theme.current.panel_background) do
-        text("Current theme: #{current_theme}")
+        text("Current theme: #{current_theme}, background: #{bg_mode}")
 
         separator
 
         hstack(spacing: 10.0) do
           button("Click Me") { }
           button("Another Button") { }
+          b = button("Disabled") { }
+          b.enabled = false
         end
 
         separator
@@ -245,10 +438,12 @@ class Tutorial23App < CrymbleUI::App
 
         separator
 
-        text("All widgets above respond to theme changes at runtime.")
+        text("Disabled buttons appear greyed out and don't respond to clicks.")
+        text("Custom backgrounds are set via app_background_color override.")
+        text("Try View menu to switch theme and background.")
       end
 
-      statusbar("Theme: #{current_theme}")
+      statusbar("Theme: #{current_theme} | Background: #{bg_mode}")
     end
   end
 end
@@ -1425,7 +1620,7 @@ CrymbleUI.run(Tutorial22App.new)
 
 ---
 ### Tutorial 23: Theme Switcher
-Demonstrates runtime theme switching via a menubar.
+Demonstrates runtime theme switching, custom app background color, and disabled buttons.
 
 ![Tutorial 23: Theme Switcher](screenshots/tutorial-23.png)
 
@@ -1441,9 +1636,19 @@ class Tutorial23App < CrymbleUI::App
   state current_theme : Symbol = :light
   state notify : Bool = false
   state input_value : String = ""
+  state bg_mode : Symbol = :theme  # :theme, :green, :blue
+
+  # Custom window background color based on bg_mode
+  def app_background_color : CrymbleUI::Color?
+    case @bg_mode
+    when :green then Color.new(0, 40, 0, 255)
+    when :blue  then Color.new(0, 0, 40, 255)
+    else             nil # use theme default
+    end
+  end
 
   def build : CrymbleUI::Widget
-    window("Tutorial 23: Theme Switcher", 700, 500) do
+    window("Tutorial 23: Theme Switcher", 700, 550) do
       menubar do
         menu("View") do
           menu_item("Light Theme", checked: current_theme == :light, checkable: true) do
@@ -1454,17 +1659,29 @@ class Tutorial23App < CrymbleUI::App
             Theme.set(:dark)
             self.current_theme = :dark
           end
+          separator
+          menu_item("Background: Theme Default", checked: bg_mode == :theme, checkable: true) do
+            self.bg_mode = :theme
+          end
+          menu_item("Background: Dark Green", checked: bg_mode == :green, checkable: true) do
+            self.bg_mode = :green
+          end
+          menu_item("Background: Dark Blue", checked: bg_mode == :blue, checkable: true) do
+            self.bg_mode = :blue
+          end
         end
       end
 
       vstack(padding: 15.0, spacing: 10.0, background_color: Theme.current.panel_background) do
-        text("Current theme: #{current_theme}")
+        text("Current theme: #{current_theme}, background: #{bg_mode}")
 
         separator
 
         hstack(spacing: 10.0) do
           button("Click Me") { }
           button("Another Button") { }
+          b = button("Disabled") { }
+          b.enabled = false
         end
 
         separator
@@ -1481,15 +1698,174 @@ class Tutorial23App < CrymbleUI::App
 
         separator
 
-        text("All widgets above respond to theme changes at runtime.")
+        text("Disabled buttons appear greyed out and don't respond to clicks.")
+        text("Custom backgrounds are set via app_background_color override.")
+        text("Try View menu to switch theme and background.")
       end
 
-      statusbar("Theme: #{current_theme}")
+      statusbar("Theme: #{current_theme} | Background: #{bg_mode}")
     end
   end
 end
 
 CrymbleUI.run(Tutorial23App.new)
+```
+
+</details>
+
+---
+### Tutorial 24: Image Widget
+Displaying images with tinting and sizing options.
+
+![Tutorial 24: Image Widget](screenshots/tutorial-24.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial24App < CrymbleUI::App
+  LOGO = "tutorials/crystal_logo.png"
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 24: Image Widget", 600, 400) do
+      vstack(padding: 15.0, spacing: 15.0) do
+        text("Image Widget Examples", font_scale: 1)
+
+        hstack(spacing: 20.0) do
+          vstack(spacing: 5.0) do
+            text("Original (128×128)", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0)
+          end
+
+          vstack(spacing: 5.0) do
+            text("Red tint", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(255, 100, 100, 255))
+          end
+
+          vstack(spacing: 5.0) do
+            text("Blue tint", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(100, 100, 255, 255))
+          end
+
+          vstack(spacing: 5.0) do
+            text("Semi-transparent", font_scale: -1)
+            image(LOGO, width: 128.0, height: 128.0,
+                  tint: Color.new(255, 255, 255, 128))
+          end
+        end
+
+        separator
+
+        text("Small (48×48):", font_scale: -1)
+        hstack(spacing: 10.0) do
+          image(LOGO, width: 48.0, height: 48.0)
+          image(LOGO, width: 48.0, height: 48.0, tint: Color.new(100, 255, 100, 255))
+          image(LOGO, width: 48.0, height: 48.0, tint: Color.new(255, 200, 50, 255))
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial24App.new)
+```
+
+</details>
+
+---
+### Tutorial 25: TreeNode
+Collapsible tree sections for hierarchical content.
+
+![Tutorial 25: TreeNode](screenshots/tutorial-25.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial25App < CrymbleUI::App
+  state click_count : Int32 = 0
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 25: TreeNode", 500, 500) do
+      vstack(padding: 15.0, spacing: 10.0) do
+        text("Collapsible Tree Sections", font_scale: 1)
+
+        scroll_view(direction: ScrollDirection::Vertical) do
+          vstack(spacing: 4.0) do
+            tree_node("Getting Started", expanded: true, font_scale: 1) do
+              vstack(padding: 10.0, spacing: 5.0) do
+                text("CrymbleUI is a declarative GUI framework for Crystal.")
+                text("It uses a reactive state model for automatic UI updates.")
+              end
+            end
+
+            tree_node("Widgets", expanded: true) do
+              vstack(padding: 10.0, spacing: 4.0) do
+                tree_node("Basic Widgets", expanded: true) do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- Button: clickable actions")
+                    text("- Text: display labels")
+                    text("- TextInput: text entry")
+                    text("- Checkbox: boolean toggles")
+                    text("- ComboBox: dropdown selection")
+                  end
+                end
+
+                tree_node("Layout Widgets") do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- VStack: vertical arrangement")
+                    text("- HStack: horizontal arrangement")
+                    text("- Expanded: fill remaining space")
+                    text("- ScrollView: scrollable content")
+                    text("- RecursiveGrid: auto-spanning grids")
+                  end
+                end
+
+                tree_node("Advanced Widgets") do
+                  vstack(padding: 10.0, spacing: 5.0) do
+                    text("- VirtualMatrix: large scrollable tables")
+                    text("- WindowPanel: floating panels")
+                    text("- TreeNode: collapsible sections (this!)")
+                    text("- Image: display images")
+                  end
+                end
+              end
+            end
+
+            tree_node("Interactive Example") do
+              vstack(padding: 10.0, spacing: 8.0) do
+                text("Buttons work inside tree nodes:")
+                hstack(spacing: 10.0) do
+                  button("Click me") { self.click_count += 1 }
+                  text("Clicked: #{click_count} times")
+                end
+              end
+            end
+
+            tree_node("About", text_color: Color.new(150, 150, 150, 255)) do
+              vstack(padding: 10.0, spacing: 5.0) do
+                text("CrymbleUI v#{`shards version`.chomp}", font_scale: -1,
+                     color: Color.new(150, 150, 150, 255))
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial25App.new)
 ```
 
 </details>

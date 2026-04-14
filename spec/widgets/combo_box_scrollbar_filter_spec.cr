@@ -238,7 +238,10 @@ describe "ComboBox scrollbar filter behavior" do
 
     # THE BUG: scrollbar pixels should be CLEARED (transparent)
     # If bug exists, they will still be gray (220)
-    post_filter_pixel = backend.get_pixel(scrollbar_x, 50)
+    # Re-read backend after render (layout may have created a new backend due to resize)
+    post_backend = scrollbar_layer.backend.as(CrymbleUI::Testing::TestRenderBackend)
+    post_scrollbar_x = (scrollbar_layer.bounds.width - 8).to_i
+    post_filter_pixel = post_backend.get_pixel(post_scrollbar_x, 50)
     post_filter_pixel.should_not be_nil, "Expected pixel to exist"
     post_filter_pixel.not_nil!.a.should eq 0_u8  # Should be transparent (cleared)
   end

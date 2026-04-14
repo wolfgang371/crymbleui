@@ -61,6 +61,9 @@ enum LibCSFML::KeyCode
 end
 
 module SF
+  VERSION      = "3.0.0"
+  SFML_VERSION = "3.0.0"
+
   # ============================================================
   # Helper functions (CrSFML compatibility)
   # ============================================================
@@ -525,6 +528,30 @@ module SF
 
     def smooth? : Bool
       LibCSFML.sfTexture_isSmooth(@handle)
+    end
+
+    # Create texture from image file (PNG, JPG, BMP, etc.)
+    def self.from_file(filename : String, area : IntRect? = nil) : Texture
+      if area
+        area_csfml = area.to_csfml
+        handle = LibCSFML.sfTexture_createFromFile(filename, pointerof(area_csfml))
+      else
+        handle = LibCSFML.sfTexture_createFromFile(filename, nil)
+      end
+      raise "Failed to load texture from file: #{filename}" if handle.null?
+      new(handle, owns: true)
+    end
+
+    # Create texture from memory data (PNG, JPG, etc.)
+    def self.from_memory(data : Slice(UInt8), area : IntRect? = nil) : Texture
+      if area
+        area_csfml = area.to_csfml
+        handle = LibCSFML.sfTexture_createFromMemory(data.to_unsafe.as(Void*), data.size, pointerof(area_csfml))
+      else
+        handle = LibCSFML.sfTexture_createFromMemory(data.to_unsafe.as(Void*), data.size, nil)
+      end
+      raise "Failed to create texture from memory" if handle.null?
+      new(handle, owns: true)
     end
 
     # Create texture from image (CrSFML compatibility)
@@ -1226,9 +1253,12 @@ module SF
     LibCSFML::BlendFactor::SrcAlpha,
     LibCSFML::BlendFactor::One,
     LibCSFML::BlendEquation::ReverseSubtract,
+    # Alpha: keep destination alpha unchanged (Zero * src + One * dst = dst)
+    # Without this, subtractive blending reduces alpha each composite,
+    # causing progressive darkening when the overlay layer is re-composited.
+    LibCSFML::BlendFactor::Zero,
     LibCSFML::BlendFactor::One,
-    LibCSFML::BlendFactor::One,
-    LibCSFML::BlendEquation::ReverseSubtract
+    LibCSFML::BlendEquation::Add
   )
 
   BlendMultiply = BlendMode.new(

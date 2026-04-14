@@ -46,6 +46,30 @@ module CrymbleUI
     end
   end
 
+  # Simple ghost widget: themed fill only (no border, no text)
+  # Use via create_ghost_preview for widgets that handle their own visual feedback
+  class SimpleGhostWidget < Widget
+    include PrimitiveBuilder
+
+    def cache_policy : CachePolicy
+      CachePolicy::Never
+    end
+
+    def measure(constraints : BoxConstraints) : Size
+      Size.new(constraints.max_width, constraints.max_height)
+    end
+
+    def perform_layout(constraints : BoxConstraints, position : Vec2)
+      @bounds = Rect.new(position, measure(constraints))
+    end
+
+    def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+      primitives do
+        fill_rect(Rect.new(0, 0, bounds.width, bounds.height), Theme.current.drag_ghost)
+      end
+    end
+  end
+
   # Coordinates drag-and-drop operations
   # Managed by App, similar to FocusManager
   class DragManager
@@ -183,8 +207,12 @@ module CrymbleUI
       @state.data = data
       @state.phase = DragPhase::Active
 
-      # Store source bounds for ghost sizing
-      @source_bounds = source.absolute_bounds
+      # Store source bounds for ghost sizing (use custom drag bounds if provided)
+      @source_bounds = if source.is_a?(Draggable)
+        source.as(Draggable).drag_ghost_bounds || source.absolute_bounds
+      else
+        source.absolute_bounds
+      end
 
       # Calculate ghost offset (cursor position relative to widget origin)
       if bounds = @source_bounds
@@ -209,29 +237,37 @@ module CrymbleUI
       ghost_x = @state.current_position.x - @ghost_offset.x
       ghost_y = @state.current_position.y - @ghost_offset.y
 
+      # Check if source provides a custom ghost preview
+      custom_preview = if source.is_a?(Draggable)
+        source.as(Draggable).create_ghost_preview
+      end
+
+      if custom_preview
+        ghost_w = bounds.width
+        ghost_h = bounds.height
+      else
+        # Default ghost has extra padding for text
+        ghost_w = bounds.width + 12.0
+        ghost_h = bounds.height + 12.0
+      end
+
       # Create overlay layer for ghost (transparent background)
       layer = Layer.new(
         "drag_ghost",
-        Rect.new(ghost_x, ghost_y, bounds.width, bounds.height),
+        Rect.new(ghost_x, ghost_y, ghost_w, ghost_h),
         z_index: GHOST_Z_INDEX,
         background_color: Color.new(0, 0, 0, 0)
       )
       layer.opacity = GHOST_OPACITY
 
-      # Create ghost widget to render in the layer
-      # IMPORTANT: Position at layer's world coordinates so absolute_bounds works correctly
-      # (GhostWidget has no parent, so absolute_bounds = bounds directly)
-      display_text = @state.data.try &.display_text
-      ghost_widget = GhostWidget.new(bounds.width, bounds.height, display_text)
+      # Use custom preview or default GhostWidget
+      ghost_widget = custom_preview || GhostWidget.new(ghost_w, ghost_h, @state.data.try(&.display_text))
       ghost_widget.perform_layout(
-        BoxConstraints.tight(Size.new(bounds.width, bounds.height)),
+        BoxConstraints.tight(Size.new(ghost_w, ghost_h)),
         Vec2.new(ghost_x, ghost_y)
       )
 
-      # Add ghost widget to layer
       layer.widgets << ghost_widget
-
-      # Mark as needing render (backend will be assigned by renderer)
       layer.mark_needs_full_render
 
       @ghost_layer = layer
@@ -330,7 +366,8 @@ module CrymbleUI
           dt = new_target.as(DropTarget)
           dt.drag_hover = true
           dt.on_drag_enter(data)
-          create_highlight_layer(new_target)
+          # Skip highlight layer if target handles its own highlighting (opacity=0)
+          create_highlight_layer(new_target) if dt.highlight_opacity > 0.0
         end
 
         @state.current_target = new_target
@@ -341,8 +378,11 @@ module CrymbleUI
     end
 
     private def find_drop_target(position : Vec2, widget : Widget, data : DragData) : Widget?
-      # Skip the source widget itself
-      return nil if widget == @state.source_widget
+      # Skip the source widget — unless it's also a DropTarget (supports self-drop,
+      # e.g., VirtualMatrix cell drag within same grid)
+      if widget == @state.source_widget && !widget.is_a?(DropTarget)
+        return nil
+      end
 
       # Skip closed/hidden widgets
       return nil if widget.responds_to?(:closed?) && widget.closed?

@@ -2,6 +2,7 @@ require "../spec_helper"
 require "../../src/widgets/virtual_matrix"
 require "../../src/testing/test_renderer"
 require "../../src/rendering/layer_renderer"
+require "../../src/testing/configurable_matrix_adapter"
 
 # Adapter with sticky headers for blit-plan performance tests
 class StickyBlitTestAdapter
@@ -287,6 +288,64 @@ describe "VirtualMatrix performance" do
 
       non_transparent_count.should be > 0,
         "Sticky row layer should have visible pixels at header position after scroll"
+    end
+  end
+
+  # Regression tests: compound cells + rulers ON = the real-world demo setup.
+  # The existing blit-plan tests use non-compound cells and/or show_rulers=false,
+  # which masks the performance regression that occurs with compound headers.
+  describe "compound cells + rulers hscroll performance" do
+    it "hscroll with compound headers and rulers has bounded render cost" do
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 400)
+      app = TestApp.new
+
+      # ConfigurableMatrixAdapter with 2-level hierarchical headers — matches demo setup
+      adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
+      matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "perf_compound_rulers")
+      # show_rulers defaults to true — DO NOT set to false (that's the point of this test)
+
+      app.root_widget = matrix
+      app.build_tree
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 400.0))
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+      renderer.settle_rendering(app)
+
+      # Count sticky cells for reference
+      sticky_rows = matrix.sticky_row_count
+      sticky_cols = matrix.sticky_col_count
+      sticky_cell_count = matrix.active_cells.count { |key, _|
+        key[0] < sticky_rows || key[1] < sticky_cols
+      }
+      sticky_cell_count.should be > 0, "Expected sticky cells to exist for compound header test"
+
+      renderer.reset_counters
+      CrymbleUI::LayerRenderer.reset_frame_counters
+
+      # 5 horizontal scroll steps (shift+wheel = hscroll)
+      center = CrymbleUI::Vec2.new(400.0, 200.0)
+      5.times do
+        matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), center, shift: true)
+        renderer.render_frame(app)
+      end
+
+      # Key assertion: blit-plan should be used for sticky layers.
+      # Bug: blit-plan was disabled when show_rulers=true (default), forcing full
+      # re-render of ALL sticky cells every frame via mark_needs_layout.
+      # Fix: blit-plan now works with rulers via blit_plan_render_widgets.
+      CrymbleUI::LayerRenderer.frame_blit_plan_count.should be >= 1,
+        "Expected blit-plan to fire for sticky layers with rulers+compound cells, " \
+        "got #{CrymbleUI::LayerRenderer.frame_blit_plan_count}. " \
+        "This suggests sticky layers are still using full re-render path."
+
+      # Also verify: primitive count is bounded per frame.
+      # With all-compound sticky cells + rulers, each frame renders at most
+      # (compound_count + ruler_count) × ~2 primitives. Over 5 scroll steps,
+      # this should be much less than a full re-render (which renders ALL layer widgets).
+      ruler_count = 4  # col_ruler, row_ruler, corner_ruler, corner_row_strip
+      max_per_frame = (sticky_cell_count + ruler_count) * 3  # ~3 primitives per widget
+      renderer.primitive_count.should be <= max_per_frame * 5,
+        "Too many primitives during hscroll: #{renderer.primitive_count} " \
+        "(expected <= #{max_per_frame * 5} for #{sticky_cell_count} compound cells + #{ruler_count} rulers × 5 frames)"
     end
   end
 

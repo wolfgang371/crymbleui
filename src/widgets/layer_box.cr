@@ -72,6 +72,11 @@ module CrymbleUI
 
         # layer getter provided by LayerOwner mixin
 
+        # Pull-based layer bounds: LayerBox positions itself via @bounds
+        def compute_bounds_for_layer(layer : Layer) : Rect
+            @bounds
+        end
+
         def measure(constraints : BoxConstraints) : Size
             # Use explicit dimensions if set, otherwise use constraints
             w = @width || constraints.max_width
@@ -85,9 +90,8 @@ module CrymbleUI
             actual_height = @height || constraints.max_height
             @bounds = Rect.new(@x, @y, actual_width, actual_height)
 
-            # Update layer bounds
+            # Update layer
             if layer = @internal_layer
-                layer.bounds = @bounds
                 layer.z_index = @z_index
 
                 # Populate layer with children
@@ -155,11 +159,8 @@ module CrymbleUI
             @width = actual_width
             @height = actual_height
 
-            # Sync bounds and layer
+            # Sync bounds
             @bounds = Rect.new(@x, @y, actual_width, actual_height)
-            if layer = @internal_layer
-                layer.bounds = @bounds
-            end
             mark_needs_layout
         end
 

@@ -113,9 +113,9 @@ module CrymbleUI
 
     # Handle key event - dispatch to focused widget
     # Returns true if event was handled
-    def handle_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool) : Bool
+    def handle_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
       if widget = @focused_widget
-        widget.on_key_down(key, control, shift)
+        widget.on_key_down(key, control, shift, alt)
       else
         false
       end

@@ -127,6 +127,14 @@ module CrymbleUI
     # On-event callback (richer interaction: Change, Submit, Cancel)
     @on_event : Proc(String, TextInputEvent, Nil)?
 
+    # Horizontal arrow intercept: called before Left/Right is processed.
+    # Bool param: true=Right, false=Left. Return true to consume (TextInput won't process).
+    property on_horizontal_arrow : Proc(Bool, Bool)?
+
+    # Vertical arrow intercept: called before Up/Down is processed.
+    # Bool param: true=Down, false=Up. Return true to consume (TextInput won't process).
+    property on_vertical_arrow : Proc(Bool, Bool)?
+
     # Setter for on_event (allows parent widgets like ComboBox to set it)
     def on_event=(callback : Proc(String, TextInputEvent, Nil)?)
       @on_event = callback
@@ -278,22 +286,13 @@ module CrymbleUI
       # Fallback if still infinite
       width = 200.0 if !width.finite?
 
-      Size.new(width, height)
+      constraints.constrain(Size.new(width, height))
     end
 
     # Layout the text input
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       size = measure(constraints)
-      new_bounds = Rect.new(position, size)
-
-      old_bounds = @bounds
-      size_changed = old_bounds.nil? || (old_bounds.width != new_bounds.width || old_bounds.height != new_bounds.height)
-
-      @bounds = new_bounds
-
-      if size_changed
-        mark_needs_render
-      end
+      @bounds = Rect.new(position, size)
     end
 
     # Generate primitives for rendering
@@ -478,7 +477,7 @@ module CrymbleUI
     end
 
     # Handle key down events
-    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool) : Bool
+    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
       # === CLIPBOARD OPERATIONS ===
       # Ctrl+C or Ctrl+Insert = Copy
       if (control && key == SF::Keyboard::Key::C) || (control && key == SF::Keyboard::Key::Insert)
@@ -506,16 +505,20 @@ module CrymbleUI
 
       case key
       when SF::Keyboard::Key::Enter
-        if @edit_mode == TextInputMode::QuickEntry
-          # QuickEntry: Enter switches to FullEdit mode for editing
+        if @edit_mode == TextInputMode::QuickEntry && @value == @value_on_focus
+          # QuickEntry with no change: Enter switches to FullEdit mode for editing
           enter_edit_mode
+          true
+        elsif @edit_mode == TextInputMode::QuickEntry
+          # QuickEntry with changed content: let parent handle (commit + stay in place)
+          false
         else
-          # FullEdit: Enter fires Submit
-          # Only switch back to QuickEntry if we came from QuickEntry (not if FullEdit is default)
+          # FullEdit: Enter fires Submit and releases proxy focus
           exit_edit_mode if @was_quick_entry
           notify_submit
+          deactivate_proxy_focus
+          false # let parent handle (commit)
         end
-        true
       when SF::Keyboard::Key::Backspace
         if has_selection?
           delete_selection
@@ -544,6 +547,10 @@ module CrymbleUI
         @pending_replace = false # Any editing clears pending replace
         true
       when SF::Keyboard::Key::Left
+        # Let parent intercept (e.g., ComboBoxPopup closes on Left/Right)
+        if @on_horizontal_arrow.try(&.call(false))
+          return false
+        end
         # In QuickEntry mode, let FocusManager handle arrow navigation
         return false if @edit_mode == TextInputMode::QuickEntry && !shift
 
@@ -570,6 +577,10 @@ module CrymbleUI
         end
         true
       when SF::Keyboard::Key::Right
+        # Let parent intercept (e.g., ComboBoxPopup closes on Left/Right)
+        if @on_horizontal_arrow.try(&.call(true))
+          return false
+        end
         # In QuickEntry mode, let FocusManager handle arrow navigation
         return false if @edit_mode == TextInputMode::QuickEntry && !shift
 
@@ -596,7 +607,11 @@ module CrymbleUI
         end
         true
       when SF::Keyboard::Key::Up
-        # Always fire ArrowUp event for parent widgets (e.g., ComboBoxPopup)
+        # Let parent intercept (e.g., type-to-filter ComboBox closes on Up/Down)
+        if @on_vertical_arrow.try(&.call(false))
+          return false
+        end
+        # Always fire ArrowUp event for parent widgets (e.g., ComboBoxPopup item navigation)
         notify_arrow_up
 
         # In QuickEntry mode, let FocusManager handle navigation
@@ -609,7 +624,11 @@ module CrymbleUI
         mark_needs_render
         true
       when SF::Keyboard::Key::Down
-        # Always fire ArrowDown event for parent widgets (e.g., ComboBoxPopup)
+        # Let parent intercept (e.g., type-to-filter ComboBox closes on Up/Down)
+        if @on_vertical_arrow.try(&.call(true))
+          return false
+        end
+        # Always fire ArrowDown event for parent widgets (e.g., ComboBoxPopup item navigation)
         notify_arrow_down
 
         # In QuickEntry mode, let FocusManager handle navigation

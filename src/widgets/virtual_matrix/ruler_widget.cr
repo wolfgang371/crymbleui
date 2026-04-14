@@ -98,8 +98,12 @@ module CrymbleUI
         sticky_cols = @matrix.sticky_col_count
         acc_x = @matrix.ruler_col_width_pixels + @matrix.sticky_col_width_pixels
 
+        # Clamp ruler background to actual data extent (don't fill beyond last column)
+        total_data_w = acc_x + (sticky_cols...col_sizes.size).sum { |i| col_sizes[i] } - scroll_x
+        fill_w = {total_data_w, bounds.width}.min
+
         primitives do
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), VirtualMatrix.ruler_bg_color)
+          fill_rect(Rect.new(0.0, 0.0, fill_w, bounds.height), VirtualMatrix.ruler_bg_color)
           draw_line(Vec2.new(acc_x - scroll_x, 0.0), Vec2.new(acc_x - scroll_x, bounds.height), VirtualMatrix.ruler_line_color)
           draw_labels(bounds, col_sizes, sticky_cols...col_sizes.size, :col, acc_x, scroll_x)
         end
@@ -122,8 +126,12 @@ module CrymbleUI
         sticky_rows = @matrix.sticky_row_count
         acc_y = @matrix.ruler_row_height_pixels + @matrix.sticky_row_height_pixels
 
+        # Clamp ruler background to actual data extent (don't fill beyond last row)
+        total_data_h = acc_y + (sticky_rows...row_sizes.size).sum { |i| row_sizes[i] } - scroll_y
+        fill_h = {total_data_h, bounds.height}.min
+
         primitives do
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), VirtualMatrix.ruler_bg_color)
+          fill_rect(Rect.new(0.0, 0.0, bounds.width, fill_h), VirtualMatrix.ruler_bg_color)
           draw_line(Vec2.new(0.0, acc_y - scroll_y), Vec2.new(bounds.width, acc_y - scroll_y), VirtualMatrix.ruler_line_color)
           draw_labels(bounds, row_sizes, sticky_rows...row_sizes.size, :row, acc_y, scroll_y)
         end

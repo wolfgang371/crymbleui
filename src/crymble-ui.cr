@@ -17,7 +17,9 @@ require "./widgets/window"
 require "./widgets/window_panel"
 require "./widgets/scroll_view"
 require "./widgets/virtual_matrix"
+require "./widgets/dir_browser"
 require "./widgets/virtual_grid_base"
+require "./widgets/tree_node"
 
 # Layout containers
 require "./layout/vstack"
@@ -35,7 +37,14 @@ require "./testing/widget_tester"
 
 # Main module-level convenience method
 module CrymbleUI
-    VERSION = {{ `shards version`.chomp.stringify }}
+    VERSION = {{ `shards version "#{__DIR__}/.."`.chomp.stringify }}
+
+    @@renderer : SFMLRenderer? = nil
+
+    # Access the renderer (for testing/debugging)
+    def self.renderer : SFMLRenderer?
+        @@renderer
+    end
 
     # Run an application with automatic renderer creation
     # Extracts window configuration from the app's build() method
@@ -54,13 +63,13 @@ module CrymbleUI
         window_widget = root.as(Window)
 
         # Create renderer with window settings
-        renderer = SFMLRenderer.new(
+        @@renderer = SFMLRenderer.new(
             width: window_widget.width,
             height: window_widget.height,
             title: window_widget.title
         )
 
         # Run the application
-        renderer.run(app)
+        @@renderer.not_nil!.run(app)
     end
 end

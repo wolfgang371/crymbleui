@@ -1035,7 +1035,6 @@ describe "ScrollView viewport_cache integration" do
                after_pixel.b == initial.b
           all_clean = false
           # Debug output for failure
-          puts "ARTIFACT at (#{pt[:x]}, #{pt[:y]}): initial=#{initial.r},#{initial.g},#{initial.b} after=#{after_pixel.r},#{after_pixel.g},#{after_pixel.b}"
         end
       end
 
@@ -1186,7 +1185,6 @@ describe "ScrollView viewport_cache integration" do
 
       # Report ALL gaps found during scroll
       if gaps_found.size > 0
-        puts "GAPS FOUND DURING SCROLL:"
         gaps_found.first(10).each { |msg| puts "  #{msg}" }
         fail "MISSING ROWS: #{gaps_found.size} gap(s) detected during scroll. First: #{gaps_found.first}"
       end

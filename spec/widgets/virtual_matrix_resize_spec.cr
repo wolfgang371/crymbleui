@@ -80,7 +80,7 @@ private def make_resize_dsl
 end
 
 # Interactive column/row resize via ruler border drag
-describe "VirtualMatrix interactive resize" do
+describe "VirtualMatrix interactive resize", tags: "slow" do
   describe "cursor changes on column border hover" do
     it "shows SizeHorizontal cursor near column 0 right border" do
       _renderer, app, _matrix = make_resize_matrix
@@ -161,7 +161,7 @@ describe "VirtualMatrix interactive resize" do
       app.handle_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
     end
 
-    it "persists resize after explicit rebuild" do
+    it "persists resize after explicit rebuild", tags: "slow" do
       renderer, app, matrix = make_resize_dsl
 
       # Resize col 0
@@ -263,7 +263,7 @@ describe "VirtualMatrix interactive resize" do
       app.handle_mouse_up(CrymbleUI::Vec2.new(20.0, ROW_BORDER_0 + 40.0))
     end
 
-    it "persists resize after explicit rebuild" do
+    it "persists resize after explicit rebuild", tags: "slow" do
       renderer, app, matrix = make_resize_dsl
 
       # Resize row 0
@@ -345,7 +345,7 @@ describe "VirtualMatrix interactive resize" do
   end
 
   describe "multi-step drag" do
-    it "tracks incremental mouse moves via cell position" do
+    it "tracks incremental mouse moves via cell position", tags: "slow" do
       renderer, app, matrix = make_resize_dsl
 
       border_x = COL_BORDER_0
@@ -437,7 +437,7 @@ describe "VirtualMatrix interactive resize" do
       app.handle_mouse_up(CrymbleUI::Vec2.new(20.0, ROW_BORDER_0 + 40.0))
     end
 
-    it "does not trigger layout during drag but updates all cell bounds" do
+    it "does not trigger layout during drag but updates all cell bounds", tags: "slow" do
       renderer, app, matrix = make_resize_dsl
       renderer.reset_counters
 

@@ -387,6 +387,13 @@ module CrymbleUI
         end
     end
 
+    # Text alignment within widgets
+    enum TextAlign
+        Left
+        Center
+        Right
+    end
+
     # Cursor types (renderer-agnostic)
     enum CursorType
         Arrow

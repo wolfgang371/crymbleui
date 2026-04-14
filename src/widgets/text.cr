@@ -46,23 +46,7 @@ module CrymbleUI
         # Layout the text at the given position
         def perform_layout(constraints : BoxConstraints, position : Vec2)
             size = measure(constraints)
-            new_bounds = Rect.new(position, size)
-
-            # Check if size changed (requires re-rendering)
-            # Position-only changes don't require re-render (widget-local coords)
-            old_bounds = @bounds
-            size_changed = old_bounds.nil? || (old_bounds.width != new_bounds.width || old_bounds.height != new_bounds.height)
-
-            {% if flag?(:DEBUG_TEXT) %}
-                pos_changed = old_bounds && (old_bounds.x != new_bounds.x || old_bounds.y != new_bounds.y)
-                puts "[TEXT LAYOUT] '#{@text}' #{path_id} pos=(#{new_bounds.x.round(1)},#{new_bounds.y.round(1)}) size=(#{new_bounds.width.round(1)}x#{new_bounds.height.round(1)}) size_changed=#{size_changed} pos_changed=#{pos_changed}"
-            {% end %}
-
-            @bounds = new_bounds
-
-            if size_changed
-                mark_needs_render
-            end
+            @bounds = Rect.new(position, size)
         end
 
         # Generate primitives for rendering

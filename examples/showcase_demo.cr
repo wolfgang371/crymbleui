@@ -307,23 +307,37 @@ class ShowcaseDemo < CrymbleUI::App
 
       # === Panel: Extras ===
       window_panel(title: "Extras", x: 610.0, y: 10.0, width: 330.0, height: 280.0) do
-        vstack(spacing: 15.0, padding: 10.0) do
+        vstack(spacing: 12.0, padding: 10.0) do
           text("Popup & Custom Widgets", font_scale: 1, color: CrymbleUI::Color.new(100, 180, 255, 255))
 
-          button(show_popup ? "Hide Popup" : "Show Popup") do
-            self.show_popup = !show_popup
+          hstack(spacing: 10.0) do
+            button(show_popup ? "Hide Popup" : "Show Popup") do
+              self.show_popup = !show_popup
+            end
+            b = button("Disabled") { }
+            b.enabled = false
           end
 
-          text("DSL-based widget:", font_scale: -1)
-          widget LabeledValue.new("Status:", check_enabled ? "Active" : "Inactive")
+          text("Image widget:", font_scale: -1)
+          hstack(spacing: 10.0) do
+            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0)
+            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0,
+                  tint: CrymbleUI::Color.new(255, 100, 100, 255))
+            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0,
+                  tint: CrymbleUI::Color.new(100, 100, 255, 255))
+          end
 
-          text("Primitive widgets:", font_scale: -1)
-          hstack(spacing: 8.0) do
-            widget StatusIndicator.new(active: true, size: 16.0)
-            text("Online", font_scale: -1)
-            spacer
-            widget StatusIndicator.new(active: false, size: 16.0)
-            text("Offline", font_scale: -1)
+          tree_node("Custom Widgets", expanded: true) do
+            vstack(spacing: 5.0, padding: 5.0) do
+              widget LabeledValue.new("Status:", check_enabled ? "Active" : "Inactive")
+              hstack(spacing: 8.0) do
+                widget StatusIndicator.new(active: true, size: 16.0)
+                text("Online", font_scale: -1)
+                spacer
+                widget StatusIndicator.new(active: false, size: 16.0)
+                text("Offline", font_scale: -1)
+              end
+            end
           end
         end
       end

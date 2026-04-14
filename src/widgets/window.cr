@@ -22,6 +22,9 @@ module CrymbleUI
         # and are auto-migrated during reconciliation
         @overlays : Array(Widget) = [] of Widget
 
+        # Track overlay changes for layer recollection (popup added/removed)
+        getter overlay_version : Int32 = 0
+
         def overlays : Array(Widget)
             @overlays
         end
@@ -36,14 +39,16 @@ module CrymbleUI
         def add_overlay(widget : Widget)
             widget.parent = self
             @overlays << widget
-            mark_needs_layout
+            @overlay_version += 1
+            mark_needs_render  # NOT mark_needs_layout (avoids DSL rebuild)
         end
 
         # Remove overlay
         def remove_overlay(widget : Widget)
             @overlays.delete(widget)
             widget.parent = nil
-            mark_needs_layout
+            @overlay_version += 1
+            mark_needs_render
         end
 
         # Notify overlays of click for click-outside-to-close behavior
@@ -66,12 +71,34 @@ module CrymbleUI
             # Skip if same object (happens when TestApp returns same widget)
             return if old_window.same?(self)
 
-            # Migrate overlays from old Window to new Window
+            # Migrate all overlays from old Window to new Window
+            # Orphaned overlays (from closed panels) are cleaned up AFTER
+            # full reconciliation in App.cleanup_orphaned_overlays
             old_window.overlays.each do |overlay|
                 overlay.parent = self
                 @overlays << overlay
             end
             old_window.overlays.clear
+        end
+
+        # Remove orphaned ComboBoxPopup overlays (called after full reconciliation)
+        def cleanup_orphaned_overlays
+            @overlays.reject! do |overlay|
+                if overlay.is_a?(ComboBoxPopup)
+                    # Check if any ComboBox in the tree owns this popup
+                    !combo_owns_popup?(self, overlay)
+                else
+                    false
+                end
+            end
+        end
+
+        # Check if any ComboBox in the tree references this popup
+        private def combo_owns_popup?(widget : Widget, popup : ComboBoxPopup) : Bool
+            if widget.is_a?(ComboBox) && widget.popup_open?
+                return true if widget.current_popup.same?(popup)
+            end
+            widget.children.any? { |child| combo_owns_popup?(child, popup) }
         end
 
         # Override to also check overlays for popups
@@ -104,10 +131,8 @@ module CrymbleUI
             height = constraints.max_height.finite? ? constraints.max_height : @height.to_f64
             @bounds = Rect.new(position.x, position.y, width, height)
 
-            # Update root layer bounds to match window
+            # Populate root layer with content widgets (not panels/menubar)
             if root = @root_layer
-                root.bounds = @bounds
-                # Populate root layer with content widgets (not panels/menubar)
                 root.widgets.clear
             end
 
@@ -282,6 +307,11 @@ module CrymbleUI
         # This allows child widgets to find and mark the root layer
         def layer : Layer?
             @root_layer
+        end
+
+        # Pull-based layer bounds: root layer = full window bounds
+        def compute_bounds_for_layer(layer : Layer) : Rect
+            @bounds
         end
     end
 end

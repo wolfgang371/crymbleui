@@ -86,7 +86,18 @@ module CrymbleUI
             @internal_layer = Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: @background_color, owner_widget: self)
         end
 
-        # layer getter and can_skip_layout? provided by LayerOwner mixin
+        # layer getter provided by LayerOwner mixin
+
+        # Pull-based layer bounds: expand absolute_bounds by border margin
+        def compute_bounds_for_layer(layer : Layer) : Rect
+            abs = absolute_bounds
+            Rect.new(
+                abs.x - BORDER_MARGIN,
+                abs.y - BORDER_MARGIN,
+                abs.width + BORDER_MARGIN * 2,
+                abs.height + BORDER_MARGIN * 2
+            )
+        end
 
         # Override label for path_id generation
         def label : String?
@@ -141,20 +152,8 @@ module CrymbleUI
 
             @bounds = Rect.new(actual_position, size)
 
-            # Update internal layer bounds - expand to include border stroke
-            # Border strokes are drawn centered on edges, so we need margin on all sides
+            # Populate layer.widgets (popup first for background, then children)
             if layer = @internal_layer
-                # Expand layer by BORDER_MARGIN on all sides for border
-                # Use absolute_bounds for layer positioning (layers need absolute coordinates)
-                abs = absolute_bounds
-                layer.bounds = Rect.new(
-                    abs.x - BORDER_MARGIN,
-                    abs.y - BORDER_MARGIN,
-                    abs.width + BORDER_MARGIN * 2,
-                    abs.height + BORDER_MARGIN * 2
-                )
-
-                # Populate layer.widgets (popup first for background, then children)
                 layer.widgets.clear
                 layer.widgets << self  # Popup renders background first
             end

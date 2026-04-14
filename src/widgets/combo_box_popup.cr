@@ -28,6 +28,11 @@ module CrymbleUI
     # Layout constants
     ITEM_SPACING = 0.0
     FLASH_INTERVAL_MS = 300
+
+    # Override Popup's compute_bounds_for_layer: no border margin expansion
+    def compute_bounds_for_layer(layer : Layer) : Rect
+      absolute_bounds
+    end
     TEXT_INPUT_PADDING = 4.0
     TEXT_INPUT_BORDER = 1.0
 
@@ -48,8 +53,8 @@ module CrymbleUI
     # Maximum height before scrolling kicks in
     @max_height : Float64?
 
-    # Explicit width
-    @explicit_width : Float64?
+    # Explicit width (settable so ComboBox.expand can lock it before filter triggers re-layout)
+    property explicit_width : Float64?
 
     # Internal widgets
     @text_input : TextInput
@@ -276,8 +281,11 @@ module CrymbleUI
 
     # Select the currently highlighted item
     def select_highlighted
-      return if @filtered_items.empty?
-      return if @highlighted_index < 0 || @highlighted_index >= @filtered_items.size
+      if @filtered_items.empty? || @highlighted_index < 0 || @highlighted_index >= @filtered_items.size
+        # No valid selection — cancel (close without selecting)
+        @on_cancel.try(&.call)
+        return
+      end
 
       value = @filtered_items[@highlighted_index]
       original_index = @all_items.index(value) || 0
@@ -371,12 +379,8 @@ module CrymbleUI
       size = measure(constraints)
       @bounds = Rect.new(position, size)
 
-      # Update internal layer bounds
+      # Populate layer.widgets
       if layer = @internal_layer
-        # BUG FIX: Use absolute_bounds for layer positioning (layers need absolute coordinates)
-        # Previously used @bounds.dup which is relative to parent
-        abs = absolute_bounds
-        layer.bounds = Rect.new(abs.x, abs.y, abs.width, abs.height)
         layer.widgets.clear
         layer.widgets << self
       end

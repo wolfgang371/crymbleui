@@ -11,6 +11,9 @@ module CrymbleUI
     # Root widget of the application
     getter root : Widget?
 
+    # Callback for exceptions during event handling (set by app for statusbar warnings)
+    property on_event_exception : Proc(String, Nil)? = nil
+
     # Instrumentation: Track rebuild calls (for testing)
     @@rebuild_count : Int32 = 0
 
@@ -27,6 +30,21 @@ module CrymbleUI
     end
 
     # Hover tracking (which widget is currently under the mouse)
+    # Rebuild flag: explicitly set when DSL tree needs to be rebuilt.
+    # Separate from mark_needs_layout which only affects geometry.
+    @needs_rebuild : Bool = false
+
+    # Request a DSL rebuild on the next frame.
+    # Call this when app state changes require build() to produce a new widget tree.
+    def request_rebuild
+      @needs_rebuild = true
+      @root.try &.mark_needs_layout  # layout needed after rebuild
+    end
+
+    def needs_rebuild? : Bool
+      @needs_rebuild
+    end
+
     @hovered_widget : Widget? = nil
     @last_mouse_position : Vec2? = nil
 
@@ -52,16 +70,29 @@ module CrymbleUI
     # Callback invoked when close is requested (X button, Alt+F4, etc.)
     @close_callback : Proc(Nil)? = nil
 
-    # Set callback to be invoked when window close is requested
-    # Use this to handle unsaved data, show dialogs, etc.
-    # Call quit() when ready to actually close the window
+    # Set close callback - context-aware:
+    # Inside a window_panel block: sets panel's on_closed callback
+    # Otherwise: sets App's window close callback
     #
-    # Example:
+    # Example (App-level):
     #   on_closed do
     #     save_data()
     #     self.quit  # Actually close the window
     #   end
+    #
+    # Example (panel-level):
+    #   window_panel("My Panel", ...) do
+    #     on_closed { handle_panel_close }
+    #   end
     def on_closed(&block : -> Nil)
+      # Check if we're inside a window_panel DSL block
+      if (stack = @container_stack) && !stack.empty?
+        container = stack.last
+        if container.is_a?(WindowPanel)
+          container.on_closed(&block)
+          return
+        end
+      end
       @close_callback = block
     end
 
@@ -92,9 +123,22 @@ module CrymbleUI
 
     # Callback to quit the application (set by renderer)
     @quit_callback : Proc(Nil)? = nil
+    @needs_composite_only : Bool = false
 
     def initialize
       @root = nil
+    end
+
+    # Request compositor-only frame (no layer render needed).
+    # Use for visibility toggles (opacity changes) that don't change content.
+    def request_composite
+      @needs_composite_only = true
+    end
+
+    def needs_composite_only? : Bool
+      res = @needs_composite_only
+      @needs_composite_only = false
+      res
     end
 
     # Request application quit (closes the window)
@@ -106,6 +150,19 @@ module CrymbleUI
     # Set quit callback (called by renderer)
     def quit_callback=(callback : Proc(Nil))
       @quit_callback = callback
+    end
+
+    # Override in subclasses to set a custom window background color.
+    # Returns nil to use Theme.current.app_background (the default).
+    def app_background_color : Color?
+      nil
+    end
+
+    # Overlay primitives drawn directly to the window after all layers
+    # Override in subclasses for splash screens, overlays, etc.
+    # Receives window dimensions; primitives use absolute screen coordinates
+    def overlay_primitives(window_width : Float64, window_height : Float64) : Array(DrawPrimitive)?
+      nil
     end
 
     # State property macro - automatically triggers rebuild when changed
@@ -136,12 +193,8 @@ module CrymbleUI
 
                 def {{declaration.var}}=(value : {{declaration.type}})
                     @{{declaration.var}} = value
-                    # Mark root as needing layout for batching (event loop will rebuild once)
-                    if root = @root
-                        root.mark_needs_layout
-                    else
-                        rebuild  # Fallback if root not set yet
-                    end
+                    # Request rebuild — app state changed, DSL tree needs updating
+                    request_rebuild
                 end
             {% end %}
         end
@@ -238,6 +291,16 @@ module CrymbleUI
 
       old_root = @root
 
+      # Collect old panel IDs before rebuild (to detect new panels after reconciliation)
+      old_panel_ids = Set(String).new
+      if old_root
+        old_root.children.each do |child|
+          if child.is_a?(WindowPanel) && (id = child.id)
+            old_panel_ids << id
+          end
+        end
+      end
+
       # Save mouse_down_widget's path ID before rebuild (for re-finding after reconciliation)
       # this is crucial for e.g. scrollbar scrolling!
       mouse_down_widget_path_id = @mouse_down_widget.try(&.path_id)
@@ -248,6 +311,18 @@ module CrymbleUI
       # Reconcile old and new trees
       if old_root
         reconcile(old_root, new_root)
+      end
+
+      # Bring new (unreconciled) panels to front so they appear on top
+      unless old_panel_ids.empty?
+        new_root.children.each do |child|
+          if child.is_a?(WindowPanel)
+            id = child.id
+            if id.nil? || !old_panel_ids.includes?(id)
+              child.bring_to_front
+            end
+          end
+        end
       end
 
       @root = new_root
@@ -262,11 +337,63 @@ module CrymbleUI
         @mouse_down_widget = new_root.find_by_path(mouse_down_widget_path_id)
       end
 
+      # Update drag state widget references to point to new tree nodes
+      # Without this, mid-drag rebuilds leave source_widget/current_target pointing at dead nodes
+      @drag_manager.state.update_widget_references(new_root)
+
       # Clean up orphaned layers from the registry
       # Old layers from the old widget tree are no longer reachable - remove them
       # This prevents @@all_layers from growing unboundedly with each rebuild
       Layer.cleanup_orphaned_layers(new_root)
+
+      # Clean up orphaned widgets from active layers.
+      # Reconciled layers may retain widgets from the old tree that weren't
+      # @[Reconcile]d — new widgets get appended, old ones accumulate.
+      Layer.cleanup_orphaned_widgets(new_root)
+
+      # Validate reconciliation integrity (debug mode only).
+      # Catches orphaned references that would cause rendering bugs.
+      {% if flag?(:DEBUG_INVARIANTS) %}
+        validate_reconciliation(new_root)
+      {% end %}
+
+      # Force all layers to full re-render with buffer clear after rebuild.
+      # Widget tree structure changed — layers may have stale pixels from old widgets
+      # at positions no longer covered by new widgets (ghost artifacts).
+      # Skip layers that opt out (e.g., cursor overlay — CachePolicy::Never regenerates fresh).
+      Layer.active_layers(new_root).each do |layer|
+        if layer.skip_rebuild_clear
+          layer.mark_needs_render(layer.widgets.first) if layer.widgets.first?
+        else
+          layer.mark_needs_clear_and_render
+        end
+      end
+
+      # Clean up orphaned overlays (e.g., ComboBoxPopup from closed panels)
+      # Must happen AFTER reconciliation so ComboBoxes have their popup references
+      if new_root.is_a?(Window)
+        new_root.cleanup_orphaned_overlays
+      end
+
+      @needs_rebuild = false
     end
+
+    {% if flag?(:DEBUG_INVARIANTS) %}
+      private def validate_reconciliation(root : Widget)
+        Layer.active_layers(root).each do |layer|
+          # Check 1: layer owner reachable from root
+          unless layer.in_tree?(root)
+            STDERR.puts "[INVARIANT] Layer '#{layer.id}' owner_widget not in tree after rebuild!"
+          end
+          # Check 2: all layer.widgets reachable from root
+          layer.widgets.each do |w|
+            unless w.widget_in_tree?(root)
+              STDERR.puts "[INVARIANT] Widget #{w.class.name.split("::").last}##{w.id} in layer '#{layer.id}' not in tree after rebuild!"
+            end
+          end
+        end
+      end
+    {% end %}
 
     # Re-detect hover after layout changes
     # Call this after rebuild+layout to restore hover state
@@ -386,26 +513,22 @@ module CrymbleUI
       {% end %}
 
       # Check if hover changed
-      if current_hover != @hovered_widget
-        # Call exit on old hovered widget
+      hover_changed = (current_hover != @hovered_widget)
+      if hover_changed
         @hovered_widget.try &.on_mouse_exit
-
-        # Update and call enter on new hovered widget
         @hovered_widget = current_hover
         current_hover.try &.on_mouse_enter
-
-        # Call user's hover change callback (e.g., to update statusbar)
-        @hover_change_callback.try &.call
-
-        # Trigger redraw if hover changed (for button highlighting and user callback effects)
-        return true
       end
 
-      false
+      # Always fire hover callback (position-dependent widgets like VirtualMatrix
+      # need updates on every move, not just widget changes)
+      @hover_change_callback.try &.call
+
+      hover_changed
     end
 
     # Handle mouse down events
-    def handle_mouse_down(point : Vec2)
+    def handle_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
       return unless root = @root
 
       # Notify window of click for popup click-outside-to-close
@@ -429,9 +552,15 @@ module CrymbleUI
           @drag_manager.begin_drag_tracking(draggable, point)
         end
 
-        widget.on_mouse_down(point)
-        # Rebuild only if structural change needed (not for render-only changes like bring_to_front)
-        if root.needs_layout?
+        widget.on_mouse_down(point, button)
+
+        # Cancel drag tracking if widget claimed the click for its own purpose
+        # (e.g., VirtualMatrix resize — drag tracking would intercept mouse_move)
+        if @drag_manager.state.pending? && widget.suppresses_drag?
+          @drag_manager.cancel_drag
+        end
+        # Rebuild only if explicitly requested (not for layout-only changes)
+        if needs_rebuild?
           # Save path_id before rebuild (widget will be replaced with new instance)
           widget_path = widget.path_id
           rebuild
@@ -513,18 +642,15 @@ module CrymbleUI
       if @mouse_down
         if widget = @mouse_down_widget
           widget.on_mouse_move(point)
-          # Rebuild only if structural change needed (not for render-only changes)
-          # Scroll/drag is typically render-only (viewport offset change)
-          if root = @root
-            if root.needs_layout?
-              # Save path_id before rebuild (widget will be replaced with new instance)
-              widget_path = widget.path_id
-              rebuild
-              # Update @mouse_down_widget to point to NEW widget instance
-              # (old instance's parent chain is broken after rebuild)
-              if new_widget = find_by_path(widget_path)
-                @mouse_down_widget = new_widget
-              end
+          # Rebuild only if explicitly requested (not for layout-only changes)
+          if needs_rebuild?
+            # Save path_id before rebuild (widget will be replaced with new instance)
+            widget_path = widget.path_id
+            rebuild
+            # Update @mouse_down_widget to point to NEW widget instance
+            # (old instance's parent chain is broken after rebuild)
+            if new_widget = find_by_path(widget_path)
+              @mouse_down_widget = new_widget
             end
           end
           # Return true to trigger redraw during drag
@@ -537,7 +663,7 @@ module CrymbleUI
     end
 
     # Handle mouse up events
-    def handle_mouse_up(point : Vec2)
+    def handle_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       return unless root = @root
 
       # Complete drag-and-drop if active
@@ -556,22 +682,19 @@ module CrymbleUI
 
       # Call on_mouse_up on the widget that was pressed
       if widget = @mouse_down_widget
-        widget.on_mouse_up(point)
+        widget.on_mouse_up(point, button)
 
-        # If mouse released over the same widget, trigger click
-        if hit = root.hit_test(point)
-          if hit == widget
-            widget.trigger_click
+        # If mouse released over the same widget, trigger click (left-click only)
+        if button == MouseButton::Left
+          if hit = root.hit_test(point)
+            if hit == widget
+              widget.trigger_click
+            end
           end
         end
 
-        # Rebuild if widget needs layout
-        if root.needs_layout?
-          {% if flag?(:DEBUG_RENDER) %}
-            # DEBUG: Find which widgets need layout
-            puts "\n[REBUILD CHECK @ mouse_up] Root needs_layout? = true"
-            find_widgets_needing_layout(root)
-          {% end %}
+        # Rebuild if explicitly requested
+        if needs_rebuild?
           rebuild
         end
       end
@@ -594,9 +717,8 @@ module CrymbleUI
         while current
           if current.responds_to?(:on_mouse_wheel)
             current.on_mouse_wheel(delta, point, shift: shift)
-            # Rebuild only if structural change needed (not for render-only changes)
-            # Mouse wheel is typically a render-only operation (viewport scroll)
-            rebuild if root.needs_layout?
+            # Rebuild only if explicitly requested
+            rebuild if needs_rebuild?
             return
           end
           current = current.parent

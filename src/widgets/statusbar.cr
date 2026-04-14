@@ -165,12 +165,8 @@ module CrymbleUI
                 @internal_layer = Layer.new("statusbar_#{id}", Rect.zero, z_index: STATUSBAR_Z_INDEX, owner_widget: self)
             end
 
-            # Update internal layer bounds if we have our own layer
+            # Populate layer.widgets
             if layer = @internal_layer
-                abs_bounds = absolute_bounds
-                layer.bounds = abs_bounds
-
-                # Populate layer.widgets
                 layer.widgets.clear
                 layer.widgets << self
             end

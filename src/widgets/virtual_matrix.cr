@@ -37,9 +37,50 @@ module CrymbleUI
   #   5. Call mark_needs_render (NOT mark_needs_layout)
   # See on_mouse_wheel for the correct pattern.
   #
+  # Drag data for cell drag-and-drop within VirtualMatrix
+  class CellDragData < DragData
+    getter row : Int32
+    getter col : Int32
+    getter display : String
+
+    def initialize(@row : Int32, @col : Int32, @display : String)
+    end
+
+    def data_type : String
+      "matrix_cell"
+    end
+
+    def display_text : String?
+      @display
+    end
+  end
+
   class VirtualMatrix < Widget
     include LayerOwner
     include PrimitiveBuilder
+    include Draggable
+    include DropTarget
+
+    # Cell drag state
+    property drag_source_cell : Tuple(Int32, Int32)? = nil
+    property drag_source_was_preexisting : Bool = false
+
+    # Callback after cell drop completes (for app-level updates like shape.update + rebuild)
+    property on_cell_drop_handler : Proc(Nil)? = nil
+
+    # Cell keyboard actions dispatched via on_key_action callback
+    enum CellAction
+      Cut
+      Paste
+      Insert
+      Delete
+      CancelCut
+    end
+
+    # Keyboard action callback: action + cursor {row, col}
+    property on_key_action : Proc(CellAction, Tuple(Int32, Int32), Nil)? = nil
+
+    @drag_target_cell : Tuple(Int32, Int32)? = nil
 
     # Grid dimensions
     getter rows : Int32
@@ -108,7 +149,9 @@ module CrymbleUI
     # Layers (reconciled to preserve layer state across DSL rebuilds)
     @[Reconcile]
     @content_layer : Layer?
+    @[Reconcile]
     @cursor_overlay_layer : Layer?
+    @[Reconcile]
     @cursor_overlay_widget : CursorOverlayWidget?
 
     # Ruler widgets (rendered on sticky layers for column/row labels + resize handles)
@@ -123,9 +166,6 @@ module CrymbleUI
     # ScrollView for scrollbar chrome (overlays content area)
     @content_scroll_view : ScrollView?
 
-    # Resize state for ancestor notification handlers
-    @resize_start_content_bounds : Rect?
-
     # Reconciliation properties
     layout_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
 
@@ -135,6 +175,13 @@ module CrymbleUI
     # the push branch to fire and seed it with our reconciled scroll_offset.
     @last_synced_scroll_offset : Vec2 = Vec2.zero
     reconcile_property cursor_rc : Tuple(Int32, Int32) = {0, 0}
+
+    # Public API: move cursor to a specific cell (e.g., after an external edit moved a row)
+    def set_cursor(row : Int32, col : Int32)
+      @cursor_rc = {row, col}
+      mark_needs_render
+    end
+
     reconcile_property drag_index_rc : Tuple(Int32, Int32)? = nil
     reconcile_property is_dragging : Bool = false
 
@@ -155,6 +202,11 @@ module CrymbleUI
     @cursor_flash_timer_id : Int32? = nil
     @cursor_flash_on : Bool = true
 
+    # Double-click detection
+    DOUBLE_CLICK_THRESHOLD_MS = 300
+    @last_click_time : Time::Instant = Time.instant - 1.hour
+    @last_click_cell : Tuple(Int32, Int32) = {-1, -1}
+
     # Cell management (sparse - only visible cells exist)
     # NOT reconciled - cells are recreated fresh on rebuild to avoid bounds corruption
     @active_cells : Hash(Tuple(Int32, Int32), Widget) = {} of Tuple(Int32, Int32) => Widget
@@ -173,16 +225,12 @@ module CrymbleUI
 
     # Visibility cache key to avoid redundant update_visible_cells work
     # Simplified: just visible indices (no scroll_offset rounding)
-    @last_visible_key : Tuple(Array(Int32), Array(Int32))? = nil
+    @last_visible_key : Tuple(Array(Int32), Array(Int32), Int32?, Int32?)? = nil
     @force_cell_update : Bool = false
     @layer_widgets_need_sync : Bool = true
 
-    # Deferred scroll: update_visible_cells is expensive and should only run once per frame,
-    # not on every mouse event. sync_from_scroll_view sets this flag; the actual work
-    # happens in flush_pending_scroll_update, called from render_all_layers via Layer.
-    @pending_scroll_update : Bool = false
-    @pending_scroll_viewport_w : Float64 = 0.0
-    @pending_scroll_viewport_h : Float64 = 0.0
+    # (Deferred scroll removed — sync_from_scroll_view now calls update_visible_cells
+    # directly, same as on_mouse_wheel. The early-exit optimization makes this cheap.)
 
     # Instrumentation: count update_visible_cells calls (for performance testing)
     @@update_visible_cells_call_count : Int32 = 0
@@ -287,6 +335,11 @@ module CrymbleUI
       true
     end
 
+    # Suppress drag tracking when resize is active (resize takes priority over cell drag)
+    def suppresses_drag? : Bool
+      resize_axis != ResizeAxis::None
+    end
+
     # VirtualMatrix is a focus scope — FocusCycler won't Tab into cell widgets
     def is_focus_scope? : Bool
       true
@@ -294,7 +347,11 @@ module CrymbleUI
 
     # Proxy focus: the cell widget that currently has delegated focus
     # VirtualMatrix stays focused (owns grid nav), but forwards events to this widget
+    @[Reconcile]
     @proxy_focused_widget : Widget? = nil
+    # Row/col of the proxy-focused cell (for commit_proxy_edit)
+    @[Reconcile]
+    @proxy_focused_rc : Tuple(Int32, Int32)? = nil
 
     # === THEME CONFIGURATION ===
 
@@ -562,6 +619,10 @@ module CrymbleUI
         },
         on_all: ->{
           @pending_invalidate_all = true
+          # Clear proxy focus immediately — cell widgets will be destroyed during
+          # flush_invalidate_all. Without this, @proxy_focused_widget points to a
+          # dead widget between invalidation and next render.
+          clear_proxy_focus
           mark_needs_layout
           nil
         }
@@ -584,6 +645,35 @@ module CrymbleUI
 
     def layer : Layer?
       @content_layer
+    end
+
+    # Pull-based layer bounds: content and cursor overlay use effective content size
+    def compute_bounds_for_layer(layer : Layer) : Rect
+      abs = absolute_bounds
+      w, h = effective_content_size(bounds.width, bounds.height)
+      natural = Rect.new(abs.x, abs.y, w, h)
+
+      # All layers clamp to shrink-only during resize (prevents ghost pixels / visual mismatch)
+      result = if layer == @cursor_overlay_layer
+        if delta = @resize_clip_delta
+          dw, dh, dx, dy = delta
+          # Capture baseline on first resize_move — stable for entire drag
+          orig = layer.resize_baseline || begin
+            layer.resize_baseline = natural
+            natural
+          end
+          clamped_dw = {dw, 0.0}.min
+          clamped_dh = {dh, 0.0}.min
+          Rect.new(orig.x + dx, orig.y + dy, orig.width + clamped_dw, orig.height + clamped_dh)
+        else
+          layer.resize_baseline = nil
+          natural
+        end
+      else
+        apply_resize_clip(natural, layer)
+      end
+
+      result
     end
 
     def content_layer : Layer?
@@ -629,6 +719,13 @@ module CrymbleUI
       sync_scroll_offsets
       @content_layer.not_nil!.scroll_offset = @scroll_offset
 
+      # Invalidate sticky layers so rulers re-render at current viewport bounds
+      if sv = @content_scroll_view
+        [sv.sticky_row_layer, sv.sticky_col_layer, sv.sticky_corner_layer].each do |layer|
+          layer.try &.mark_needs_clear_and_render
+        end
+      end
+
       if @show_rulers
         create_ruler_widgets(@content_scroll_view.not_nil!)
       end
@@ -653,8 +750,10 @@ module CrymbleUI
       # Destroy all active cells (sizes changed, need recreation at new dimensions)
       @active_cells.each do |_key, widget|
         if @proxy_focused_widget == widget
+          commit_proxy_edit
           widget.deactivate_proxy_focus
           @proxy_focused_widget = nil
+          @proxy_focused_rc = nil
         end
         widget.render_layer = nil
         widget.parent = nil
@@ -693,8 +792,8 @@ module CrymbleUI
           end
         end
       {% end %}
-      @content_layer.not_nil!.bounds = content_bounds
       @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
+      @content_layer.not_nil!.background_color = @content_background_color
       @content_layer.not_nil!.viewport_cache = true
       @content_layer.not_nil!.cache_extent = CACHE_EXTENT
       @content_layer.not_nil!.scroll_offset = @scroll_offset
@@ -710,9 +809,9 @@ module CrymbleUI
         background_color: Color.new(0, 0, 0, 0),
         owner_widget: self
       )
-      @cursor_overlay_layer.not_nil!.bounds = overlay_bounds
       @cursor_overlay_layer.not_nil!.z_index = base_z + CURSOR_OVERLAY_Z
       @cursor_overlay_layer.not_nil!.blend_mode = @cursor_highlight_delta >= 0 ? BlendMode::Additive : BlendMode::Subtractive
+      @cursor_overlay_layer.not_nil!.skip_rebuild_clear = true
 
       # Create/register cursor overlay widget at layer-local origin (0,0)
       overlay_layer = @cursor_overlay_layer.not_nil!
@@ -877,31 +976,56 @@ module CrymbleUI
       end
     end
 
-    # Sync scroll offset from ScrollView when user scrolls via scrollbar
+    # Mark sticky layers dirty so ruler widgets re-render with new scroll offset.
+    # Ruler widgets read scroll_offset in to_primitives (CachePolicy::Never),
+    # but their parent is VirtualMatrix (not the sticky layer), so mark_needs_render
+    # on the widget propagates to the wrong layer. Mark the layers directly.
+    private def mark_ruler_widgets_dirty
+      return unless @show_rulers
+      sv = @content_scroll_view
+      return unless sv
+      if (crw = @col_ruler_widget) && (rl = sv.sticky_row_layer)
+        rl.mark_needs_render(crw)
+      end
+      if (rrw = @row_ruler_widget) && (cl = sv.sticky_col_layer)
+        cl.mark_needs_render(rrw)
+      end
+      if corner_layer = sv.sticky_corner_layer
+        if crw = @corner_ruler_widget
+          corner_layer.mark_needs_render(crw)
+        end
+        if strip = @corner_row_strip_widget
+          corner_layer.mark_needs_render(strip)
+        end
+      end
+    end
+
+    # Sync scroll offset from ScrollView when user scrolls via scrollbar.
     # Called via ScrollView.on_scroll_changed callback (doesn't trigger layout).
-    # DEFERRED: update_visible_cells is expensive (10-60ms for 1000×1000 grid).
-    # Multiple scroll events per frame would compound this cost. Instead, we just
-    # update scroll_offset (for correct compositing) and defer cell management
-    # to flush_pending_scroll_update, called once before rendering.
+    # Uses the same direct update_visible_cells call as on_mouse_wheel —
+    # the early-exit optimization (O(log n) when visible indices unchanged)
+    # makes redundant calls per frame cheap.
     private def sync_from_scroll_view(new_offset : Vec2)
       return if @scroll_offset == new_offset
 
       @scroll_offset = new_offset
       @last_synced_scroll_offset = new_offset
 
-      # Sync layer scroll offset (compositor uses this immediately)
+      # Sync layer scroll offset (compositor uses this for viewport shifting)
       if layer = @content_layer
         layer.scroll_offset = new_offset
-        # Defer cell update to once-per-frame
-        if layer.bounds.width > 0 && layer.bounds.height > 0
-          @pending_scroll_update = true
-          @pending_scroll_viewport_w = layer.bounds.width
-          @pending_scroll_viewport_h = layer.bounds.height
-        end
+      end
+
+      # Update visible cells directly (same as on_mouse_wheel path)
+      vp_w = @content_layer.try(&.bounds.width) || bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || bounds.height
+      if vp_w > 0 && vp_h > 0
+        update_visible_cells(vp_w, vp_h)
       end
 
       mark_needs_render
       mark_cursor_overlay_dirty
+      mark_ruler_widgets_dirty
     end
 
     # === DEFERRED SCROLL FLUSH ===
@@ -910,6 +1034,16 @@ module CrymbleUI
     # Flushes deferred scroll/invalidation updates so cells are created/destroyed once per frame,
     # not on every mouse event during scrollbar thumb drag.
     def pre_render_flush
+      # Change animation: call start_frame + scan visible cells for value changes
+      if adapter = @adapter
+        adapter.start_frame
+        @visible_rows.each do |r|
+          @visible_cols.each do |c|
+            adapter.cell_read(r, c)
+          end
+        end
+      end
+
       # Process push-based adapter invalidations first
       if @pending_invalidate_all
         @pending_invalidate_all = false
@@ -917,16 +1051,16 @@ module CrymbleUI
         flush_invalidate_all
         # Recreate cells immediately (layout may not run if only mark_needs_render)
         trigger_update_visible_cells
+        # Refresh proxy focus: old cell widgets were destroyed, new ones created.
+        # Without this, @proxy_focused_widget points to a dead widget.
+        update_proxy_focus if focused?
       elsif !@pending_cell_invalidations.empty?
         flush_cell_invalidations
         # Recreate destroyed cells
         trigger_update_visible_cells
+        update_proxy_focus if focused?
       end
 
-      if @pending_scroll_update
-        @pending_scroll_update = false
-        update_visible_cells(@pending_scroll_viewport_w, @pending_scroll_viewport_h)
-      end
     end
 
     # Full invalidation: re-read dimensions, destroy all active cells
@@ -944,8 +1078,10 @@ module CrymbleUI
       # Destroy all active cells
       @active_cells.each do |_key, widget|
         if @proxy_focused_widget == widget
+          commit_proxy_edit
           widget.deactivate_proxy_focus
           @proxy_focused_widget = nil
+          @proxy_focused_rc = nil
         end
         widget.render_layer = nil
         widget.parent = nil
@@ -953,8 +1089,9 @@ module CrymbleUI
       end
       @active_cells.clear
 
-      # Clear all layer backends to erase stale pixels from old configuration.
+      # Clear content layer to erase stale pixels from old configuration.
       # Without this, old cell content persists where new cells don't cover the same positions.
+      # NOTE: cursor overlay NOT cleared — it has CachePolicy::Never and regenerates fresh.
       @content_layer.try(&.mark_needs_clear_and_render)
       @content_layer.try { |l| l.buffer_origin = Vec2.zero }
       if sv = @content_scroll_view
@@ -976,8 +1113,10 @@ module CrymbleUI
       cells.each do |key|
         if widget = @active_cells.delete(key)
           if @proxy_focused_widget == widget
+            commit_proxy_edit
             widget.deactivate_proxy_focus
             @proxy_focused_widget = nil
+            @proxy_focused_rc = nil
           end
           widget.render_layer = nil
           widget.parent = nil
@@ -1088,8 +1227,14 @@ module CrymbleUI
       @viewport_row_shifting_index = row_shifting_index
 
       # Early-exit check: use exact visible indices for correctness
-      # Placed BEFORE creation/destruction sticky calls to avoid O(n) work per scroll frame
-      visible_key = {visible_rows, visible_cols}
+      # Placed BEFORE creation/destruction sticky calls to avoid O(n) work per scroll frame.
+      # Include physical viewport boundary: last physical column/row whose left edge is
+      # within the viewport. This detects when a new physical column enters from the right
+      # edge even though the sticky cache key (scroll-order based) hasn't changed.
+      # Without this, compound header cells at the right edge aren't created for ~3 scroll steps.
+      last_phys_col = col_physical_cum.bsearch_index { |p| p > max_x }
+      last_phys_row = row_physical_cum.bsearch_index { |p| p > max_y }
+      visible_key = {visible_rows, visible_cols, last_phys_col, last_phys_row}
       exact_indices_changed = @last_visible_key != visible_key || @force_cell_update
 
       {% if flag?(:DEBUG_BLIT) %}
@@ -1254,8 +1399,10 @@ module CrymbleUI
           if widget = @active_cells.delete(key)
             # Clear proxy focus if the destroyed cell had it
             if @proxy_focused_widget == widget
+              commit_proxy_edit
               widget.deactivate_proxy_focus
               @proxy_focused_widget = nil
+              @proxy_focused_rc = nil
             end
             widget.render_layer = nil
             widget.parent = nil
@@ -1288,7 +1435,6 @@ module CrymbleUI
 
           cells_created = true
           new_cells_count += 1
-          cell.needs_fresh_background = true  # Ensures clean background capture (no ghosting from destroyed cells)
           cell.parent = self
           @children << cell
           @active_cells[key] = cell
@@ -1359,8 +1505,9 @@ module CrymbleUI
             cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
             widget.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
 
-            # Only invalidate cells whose SIZE changed (spans the resized dimension).
-            # Moved-only cells keep valid widget_backend → fast-path blit at new position.
+            # Cells that changed size need primitive regeneration.
+            # ALL affected cells (moved or resized) need fresh background to prevent
+            # black holes from stale pixels at old positions in the content layer buffer.
             size_changed = case resize_axis
                            when ResizeAxis::Col
                              bounding[0][1] <= resize_index && resize_index <= bounding[1][1]
@@ -1368,10 +1515,7 @@ module CrymbleUI
                              bounding[0][0] <= resize_index && resize_index <= bounding[1][0]
                            else false
                            end
-            if size_changed
-              widget.invalidate_primitive_cache
-              widget.needs_fresh_background = true
-            end
+            widget.invalidate_primitive_cache if size_changed
           end
           # Clear buffer (erases ghost pixels at old positions) and trigger full render.
           # Most cells hit the fast path (blit cached widget_backend) — only size-changed
@@ -1751,49 +1895,8 @@ module CrymbleUI
       0
     end
 
-    def on_ancestor_position_changed(delta : Vec2)
-      # Update content layer position
-      if l = @content_layer
-        l.bounds = Rect.new(
-          l.bounds.x + delta.x,
-          l.bounds.y + delta.y,
-          l.bounds.width,
-          l.bounds.height
-        )
-      end
-
-      # Propagate to ScrollView child (for scrollbar layer position)
-      @content_scroll_view.try(&.on_ancestor_position_changed(delta))
-    end
-
-    def on_ancestor_resize_start
-      # Capture original bounds for delta calculation
-      @resize_start_content_bounds = @content_layer.try(&.bounds.dup)
-
-      # Propagate to ScrollView child
-      @content_scroll_view.try(&.on_ancestor_resize_start)
-    end
-
-    def on_ancestor_resize_move(dw : Float64, dh : Float64)
-      # Update content layer
-      if orig = @resize_start_content_bounds
-        clamped_dw = dw < 0 ? dw : 0.0
-        clamped_dh = dh < 0 ? dh : 0.0
-        @content_layer.try do |l|
-          l.bounds = Rect.new(orig.x, orig.y, orig.width + clamped_dw, orig.height + clamped_dh)
-        end
-      end
-
-      # Propagate to ScrollView child
-      @content_scroll_view.try(&.on_ancestor_resize_move(dw, dh))
-    end
-
-    def on_ancestor_resize_end
-      @resize_start_content_bounds = nil
-
-      # Propagate to ScrollView child
-      @content_scroll_view.try(&.on_ancestor_resize_end)
-    end
+    # on_ancestor_resize_move/end handled by LayerOwner mixin (@resize_clip_delta)
+    # on_ancestor_position_changed no longer needed (pull-based bounds)
 
     def on_ancestor_z_index_changed(base_z : Int32)
       @content_layer.try { |l| l.z_index = base_z + CONTENT_LAYER_Z }
@@ -1831,6 +1934,12 @@ module CrymbleUI
         # (in_tree? walks from owner_widget up to root — stale owner = not found),
         # so zoom invalidation skips it → stale backend → corruption.
         @content_layer.try { |l| l.owner_widget = self }
+        @cursor_overlay_layer.try { |l| l.owner_widget = self }
+        # Update overlay widget's matrix reference to this (new) widget instance
+        @cursor_overlay_widget.try do |cow|
+          cow.matrix = self
+          cow.parent = self
+        end
 
         # Fix: Preserve zoom tracking so perform_layout doesn't see false 1.0→1.0
         # transition (new instance defaults @last_zoom_factor = 1.0)
@@ -1864,10 +1973,21 @@ module CrymbleUI
           @scroll_offset.y.clamp(0.0, max_content_scroll_y)
         )
 
+        # Transfer pending invalidation (e.g. from cross-shape data change that
+        # fired on the old widget before reconciliation rebound the adapter callbacks).
+        # Without this, flush_invalidate_all never runs → layers keep stale pixels.
+        @pending_invalidate_all = true if old.@pending_invalidate_all
+        @pending_cell_invalidations.concat(old.@pending_cell_invalidations)
+
         # Rebind adapter callbacks to this (new) widget instance
         if adapter = @adapter
           bind_adapter_invalidation(adapter)
         end
+
+        # Transfer cursor flash: cancel old timer, restart on new instance if focused.
+        # Without this, invalidate_all! → rebuild orphans the timer on the dead instance.
+        old.stop_cursor_flash_for_transfer
+        start_cursor_flash if focused?
       end
     end
 

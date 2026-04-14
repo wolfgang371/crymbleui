@@ -1,6 +1,7 @@
 require "../core/widget"
 require "../core/types"
 require "../core/layer"
+require "../core/layer_owner"
 require "../dsl/primitive_builder"
 
 module CrymbleUI
@@ -18,6 +19,7 @@ module CrymbleUI
 
   class ScrollView < Widget
     include PrimitiveBuilder
+    include LayerOwner
 
     property direction : ScrollDirection
 
@@ -30,6 +32,7 @@ module CrymbleUI
     reconcile_property interaction_mode : ScrollbarInteractionMode = ScrollbarInteractionMode::Idle
     reconcile_property drag_start_offset : Vec2 = Vec2.zero  # Scroll offset when drag started
     reconcile_property drag_start_point : Vec2 = Vec2.zero   # Mouse position when drag started (absolute coords)
+    @[Reconcile]
     @dragging_axis : Symbol? = nil         # Which axis is being dragged (:vertical or :horizontal)
 
     @internal_layer : Layer?
@@ -55,14 +58,6 @@ module CrymbleUI
     # Callback for scroll offset changes (used by VirtualMatrix to sync scroll state)
     # Called after scroll_offset changes via scrollbar interaction, NOT during layout
     @on_scroll_changed : Proc(Vec2, Nil)?
-
-    # Resize state - captured at ancestor resize start, used during resize move
-    # Avoids cumulative delta error by using original bounds + current delta
-    @resize_start_content_bounds : Rect?
-    @resize_start_scrollbar_bounds : Rect?
-    @resize_start_sticky_row_bounds : Rect?
-    @resize_start_sticky_col_bounds : Rect?
-    @resize_start_sticky_corner_bounds : Rect?
 
     def initialize(@direction = ScrollDirection::Vertical, id : String? = nil)
       super(id: id)
@@ -105,6 +100,63 @@ module CrymbleUI
       @internal_layer
     end
 
+    # Pull-based layer bounds: dispatch by layer identity
+    # Sticky layers need per-axis resize clipping (row=width only, col=height only, corner=none)
+    def compute_bounds_for_layer(layer : Layer) : Rect
+      abs = absolute_bounds
+      ew = effective_viewport_width
+      eh = effective_viewport_height
+
+      natural = case layer
+      when @internal_layer
+        Rect.new(abs.x, abs.y, Math.max(0.0, ew), Math.max(0.0, eh))
+      when @scrollbar_layer
+        Rect.new(abs.x, abs.y, Math.max(0.0, @viewport_size.width), Math.max(0.0, @viewport_size.height))
+      when @sticky_row_layer
+        Rect.new(abs.x + @sticky_col_width, abs.y, Math.max(0.0, ew - @sticky_col_width), @sticky_row_height)
+      when @sticky_col_layer
+        Rect.new(abs.x, abs.y + @sticky_row_height, @sticky_col_width, Math.max(0.0, eh - @sticky_row_height))
+      when @sticky_corner_layer
+        Rect.new(abs.x, abs.y, @sticky_col_width, @sticky_row_height)
+      else
+        abs
+      end
+
+      result = if delta = @resize_clip_delta
+        dw, dh, dx, dy = delta
+        orig = layer.resize_baseline || begin
+          layer.resize_baseline = natural
+          natural
+        end
+        # Clamp: only shrink, never expand (prevents ghost pixels during resize)
+        clamped_dw = {dw, 0.0}.min
+        clamped_dh = {dh, 0.0}.min
+        case layer
+        when @sticky_row_layer
+          # Row header: only width changes, height is fixed
+          Rect.new(orig.x + dx, orig.y + dy,
+            Math.max(0.0, orig.width + clamped_dw), orig.height)
+        when @sticky_col_layer
+          # Column header: only height changes, width is fixed
+          Rect.new(orig.x + dx, orig.y + dy,
+            orig.width, Math.max(0.0, orig.height + clamped_dh))
+        when @sticky_corner_layer
+          # Corner: fixed size, only position changes
+          Rect.new(orig.x + dx, orig.y + dy, orig.width, orig.height)
+        else
+          # Content and scrollbar: both dimensions change
+          Rect.new(orig.x + dx, orig.y + dy,
+            Math.max(0.0, orig.width + clamped_dw),
+            Math.max(0.0, orig.height + clamped_dh))
+        end
+      else
+        layer.resize_baseline = nil
+        natural
+      end
+
+
+      result
+    end
 
     # Content layer (viewport_cache for efficient scrolling)
     def content_layer : Layer?
@@ -155,147 +207,6 @@ module CrymbleUI
       @sticky_col_layer.try(&.mark_needs_layout)
       @sticky_corner_layer.try(&.mark_needs_layout)
       @scrollbar_layer.try(&.mark_needs_layout)
-    end
-
-    # Update layer positions during panel drag (called by WindowPanel during drag)
-    # This is O(1) - just translates layer bounds, no size change, no re-render needed
-    def update_layer_position_for_drag(delta : Vec2)
-      # Update content layer position
-      if layer = @internal_layer
-        layer.bounds = Rect.new(
-          layer.bounds.x + delta.x,
-          layer.bounds.y + delta.y,
-          layer.bounds.width,
-          layer.bounds.height
-        )
-        # NO mark_needs_render - content unchanged, just position
-      end
-
-      # Update sticky row layer position
-      if layer = @sticky_row_layer
-        layer.bounds = Rect.new(
-          layer.bounds.x + delta.x,
-          layer.bounds.y + delta.y,
-          layer.bounds.width,
-          layer.bounds.height
-        )
-      end
-
-      # Update sticky col layer position
-      if layer = @sticky_col_layer
-        layer.bounds = Rect.new(
-          layer.bounds.x + delta.x,
-          layer.bounds.y + delta.y,
-          layer.bounds.width,
-          layer.bounds.height
-        )
-      end
-
-      # Update sticky corner layer position
-      if layer = @sticky_corner_layer
-        layer.bounds = Rect.new(
-          layer.bounds.x + delta.x,
-          layer.bounds.y + delta.y,
-          layer.bounds.width,
-          layer.bounds.height
-        )
-      end
-
-      # Update scrollbar layer position
-      if sb_layer = @scrollbar_layer
-        sb_layer.bounds = Rect.new(
-          sb_layer.bounds.x + delta.x,
-          sb_layer.bounds.y + delta.y,
-          sb_layer.bounds.width,
-          sb_layer.bounds.height
-        )
-        # NO mark_needs_render - scrollbar unchanged, just position
-      end
-    end
-
-    # Update layer bounds during panel resize (called by WindowPanel during resize)
-    # Uses ORIGINAL bounds + delta (not current + delta) to avoid cumulative error
-    # Original bounds captured at resize start by WindowPanel
-    #
-    # IMPORTANT: Only SHRINK bounds (delta < 0), never EXPAND beyond original!
-    # Reason: cache_extent pre-renders content beyond viewport. Expanding bounds
-    # would show this pre-rendered content outside the panel border.
-    def update_layer_bounds_for_resize(orig_content : Rect, orig_scrollbar : Rect, dw : Float64, dh : Float64)
-      # Clamp deltas to not expand beyond original (only allow shrinking)
-      clamped_dw = dw < 0 ? dw : 0.0
-      clamped_dh = dh < 0 ? dh : 0.0
-
-      if layer = @internal_layer
-        layer.bounds = Rect.new(
-          orig_content.x,
-          orig_content.y,
-          orig_content.width + clamped_dw,
-          orig_content.height + clamped_dh
-        )
-      end
-
-      if sb_layer = @scrollbar_layer
-        sb_layer.bounds = Rect.new(
-          orig_scrollbar.x,
-          orig_scrollbar.y,
-          orig_scrollbar.width + clamped_dw,
-          orig_scrollbar.height + clamped_dh
-        )
-      end
-    end
-
-    # === LAYER OWNER NOTIFICATION HANDLERS ===
-    # Respond to ancestor (WindowPanel) position/size/z-index changes.
-    # This decouples WindowPanel from ScrollView-specific knowledge.
-
-    def on_ancestor_position_changed(delta : Vec2)
-      update_layer_position_for_drag(delta)
-    end
-
-    def on_ancestor_resize_start
-      # Capture original bounds for delta calculation
-      @resize_start_content_bounds = @internal_layer.try(&.bounds.dup)
-      @resize_start_scrollbar_bounds = @scrollbar_layer.try(&.bounds.dup)
-      @resize_start_sticky_row_bounds = @sticky_row_layer.try(&.bounds.dup)
-      @resize_start_sticky_col_bounds = @sticky_col_layer.try(&.bounds.dup)
-      @resize_start_sticky_corner_bounds = @sticky_corner_layer.try(&.bounds.dup)
-    end
-
-    def on_ancestor_resize_move(dw : Float64, dh : Float64)
-      orig_content = @resize_start_content_bounds
-      orig_scrollbar = @resize_start_scrollbar_bounds
-      return unless orig_content && orig_scrollbar
-
-      update_layer_bounds_for_resize(orig_content, orig_scrollbar, dw, dh)
-
-      # Update sticky layers (only shrink, not expand - same as main layers)
-      clamped_dw = dw < 0 ? dw : 0.0
-      clamped_dh = dh < 0 ? dh : 0.0
-
-      # Sticky row layer: horizontal resize only (width changes, height stays fixed)
-      if orig = @resize_start_sticky_row_bounds
-        if layer = @sticky_row_layer
-          layer.bounds = Rect.new(orig.x, orig.y, orig.width + clamped_dw, orig.height)
-        end
-      end
-
-      # Sticky col layer: vertical resize only (height changes, width stays fixed)
-      if orig = @resize_start_sticky_col_bounds
-        if layer = @sticky_col_layer
-          layer.bounds = Rect.new(orig.x, orig.y, orig.width, orig.height + clamped_dh)
-        end
-      end
-
-      # Sticky corner layer: no resize (fixed size)
-      # Corner position and size don't change during resize
-    end
-
-    def on_ancestor_resize_end
-      @resize_start_content_bounds = nil
-      @resize_start_scrollbar_bounds = nil
-      @resize_start_sticky_row_bounds = nil
-      @resize_start_sticky_col_bounds = nil
-      @resize_start_sticky_corner_bounds = nil
     end
 
     def on_ancestor_z_index_changed(base_z : Int32)
@@ -356,17 +267,19 @@ module CrymbleUI
         old_content_size = @content_size
         @content_size = content.measure(content_constraints)
 
-        # Mark scrollbar layer for FULL re-render if content size changed
-        # Must use mark_needs_layout (not mark_needs_render) to trigger buffer clear
-        # Otherwise old scrollbar pixels remain when scrollbar becomes unnecessary
-        # ALSO invalidate widget's primitive cache to force to_primitives regeneration
-        if old_content_size != @content_size
-          @state = WidgetState::NeedsRender if @state == WidgetState::Clean
-          invalidate_primitive_cache
-          if sbl = @scrollbar_layer
-            sbl.mark_needs_layout
-          end
-        end
+      end
+
+      # Always invalidate scrollbar when perform_layout runs.
+      # Scrollbar visibility depends on content_size vs viewport_size ratio,
+      # and either can change via direct property setters (e.g. VirtualMatrix
+      # sets viewport_size before calling layout). Unconditional invalidation
+      # is cheap (a few rectangles) and avoids stale scrollbar state.
+      # NOTE: Must be OUTSIDE the content_widget block — VirtualMatrix's internal
+      # ScrollView has no content_widget (it manages cells directly via layers).
+      @state = WidgetState::NeedsRender if @state == WidgetState::Clean
+      invalidate_primitive_cache
+      if sbl = @scrollbar_layer
+        sbl.mark_needs_layout
       end
 
       # Calculate effective viewport (content area excluding scrollbars)
@@ -399,7 +312,6 @@ module CrymbleUI
         owner_widget: self
       )
       layer = @internal_layer.not_nil!
-      layer.bounds = effective_bounds
       layer.z_index = base_z + 1  # Update z_index each layout (parent may have changed)
       layer.viewport_cache = true  # Enable viewport_cache buffer for efficient scrolling
       layer.cache_extent = 100.0  # Pre-render 100px margin around viewport for smooth scrolling
@@ -424,7 +336,6 @@ module CrymbleUI
         background_color: Color.new(0, 0, 0, 0),  # Transparent
         owner_widget: self
       )
-      @scrollbar_layer.not_nil!.bounds = scrollbar_bounds
       @scrollbar_layer.not_nil!.z_index = base_z + 5  # Update z_index each layout
       @scrollbar_layer.not_nil!.viewport_cache = false  # Scrollbars are fixed, not viewport_cache
       @scrollbar_layer.not_nil!.cache_extent = 0.0  # No extra buffer space for scrollbar layer
@@ -499,7 +410,6 @@ module CrymbleUI
           owner_widget: self
         )
         layer = @sticky_row_layer.not_nil!
-        layer.bounds = Rect.new(row_layer_x, row_layer_y, row_layer_width, row_layer_height)
         layer.z_index = base_z + 2
         layer.viewport_cache = false  # NOT cached - redraws on X-scroll
         # Sync X scroll offset only (Y is fixed at 0)
@@ -525,7 +435,6 @@ module CrymbleUI
           owner_widget: self
         )
         layer = @sticky_col_layer.not_nil!
-        layer.bounds = Rect.new(col_layer_x, col_layer_y, col_layer_width, col_layer_height)
         layer.z_index = base_z + 3
         layer.viewport_cache = false  # NOT cached - redraws on Y-scroll
         # Sync Y scroll offset only (X is fixed at 0)
@@ -550,7 +459,6 @@ module CrymbleUI
           owner_widget: self
         )
         layer = @sticky_corner_layer.not_nil!
-        layer.bounds = Rect.new(corner_layer_x, corner_layer_y, corner_layer_width, corner_layer_height)
         layer.z_index = base_z + 4
         layer.viewport_cache = false  # NOT cached - fixed position
         layer.scroll_offset = Vec2.zero  # No scrolling for corner
@@ -559,32 +467,9 @@ module CrymbleUI
       end
     end
 
-    # Update sticky layer bounds without full layout.
-    # Called by VirtualMatrix during resize drag to keep layers in sync
-    # when sticky_row_height / sticky_col_width change.
+    # No-op: sticky layer bounds are now pull-based via compute_bounds_for_layer.
+    # Kept for API compatibility with VirtualMatrix event_handlers.
     def update_sticky_layer_bounds
-      abs = absolute_bounds
-      ew = effective_viewport_width
-      eh = effective_viewport_height
-
-      if layer = @sticky_row_layer
-        layer.bounds = Rect.new(
-          abs.x + @sticky_col_width, abs.y,
-          ew - @sticky_col_width, @sticky_row_height
-        )
-      end
-      if layer = @sticky_col_layer
-        layer.bounds = Rect.new(
-          abs.x, abs.y + @sticky_row_height,
-          @sticky_col_width, eh - @sticky_row_height
-        )
-      end
-      if layer = @sticky_corner_layer
-        layer.bounds = Rect.new(
-          abs.x, abs.y,
-          @sticky_col_width, @sticky_row_height
-        )
-      end
     end
 
     # Constants for scrollbar rendering
@@ -934,31 +819,16 @@ module CrymbleUI
       self
     end
 
-    # Helper for hit testing with scroll offset adjustment
-    # Checks if adjusted point hits this widget or its children
+    # Helper for hit testing with scroll offset adjustment.
+    # Delegates to widget.hit_test to respect custom overrides (e.g. VirtualMatrix
+    # returns self to prevent cell widgets from receiving direct clicks).
     private def hit_test_with_offset(widget : Widget, adjusted_point : Vec2) : Widget?
-      # Calculate what the adjusted point would be in the widget's coordinate system
-      # Widget's abs_bounds is in layout coords, adjusted_point is also in layout coords
-      abs = widget.absolute_bounds
-      unless abs.contains_point(adjusted_point)
-        # DEBUG: Show why widget was skipped
-        # puts "    SKIP: #{widget.id || widget.class.name} abs=#{abs} doesn't contain #{adjusted_point}"
-        return nil
-      end
-
-      # Check children first (front to back)
-      widget.children.reverse_each do |child|
-        if hit = hit_test_with_offset(child, adjusted_point)
-          return hit
-        end
-      end
-
-      widget
+      widget.hit_test(adjusted_point)
     end
 
     # Mouse down handler for scrollbar interactions
-    def on_mouse_down(point : Vec2)
-      super  # Call parent for panel z-ordering
+    def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
+      super(point, button)  # Call parent for panel z-ordering
 
       # Convert absolute click coordinates to widget-local coordinates
       # Must use absolute_bounds (not @bounds) because @bounds.x/y are relative to parent
@@ -1060,7 +930,7 @@ module CrymbleUI
     end
 
     # Mouse up handler to stop dragging
-    def on_mouse_up(point : Vec2)
+    def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       was_dragging = @interaction_mode == ScrollbarInteractionMode::DraggingThumb
       @interaction_mode = ScrollbarInteractionMode::Idle
       @dragging_axis = nil
@@ -1070,6 +940,14 @@ module CrymbleUI
         @last_visibility_offset = Vec2.new(-1.0, -1.0)  # Force update
         update_visibility_on_scroll
       end
+    end
+
+    # Suppress ancestor drag tracking when scrollbar thumb is being dragged.
+    # Without this, DragManager (tracking a Draggable ancestor like VirtualMatrix)
+    # intercepts mouse_move events during its Pending phase, causing the first
+    # few pixels of thumb drag to not update the scroll view.
+    def suppresses_drag? : Bool
+      @interaction_mode == ScrollbarInteractionMode::DraggingThumb
     end
 
     # Hit testing helpers (all use widget-local coordinates)
@@ -1392,11 +1270,9 @@ module CrymbleUI
       # Find widgets that just left the viewport
       exiting = @visible_widgets - new_visible
       exiting.each do |widget|
-        # Mark widget as needing fresh background when it re-enters
-        # This prevents capturing stale content from layer (violates invariant h)
-        widget.needs_fresh_background = true
-
         # Wipe widget's texture to free memory
+        # Setting widget_backend to nil also clears last_rendered_layer_position,
+        # so the renderer auto-detects stale background on re-entry.
         widget.widget_backend = nil
         widget.background_backend = nil
         # Clear hover state on widgets scrolling out of view

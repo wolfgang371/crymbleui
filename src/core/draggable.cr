@@ -26,9 +26,16 @@ module CrymbleUI
       nil
     end
 
+
     # Optional: Override for custom drag threshold (pixels)
     def drag_threshold : Float64
       DragState::DRAG_THRESHOLD
+    end
+
+    # Override to provide custom ghost bounds (e.g., cell bounds instead of full widget)
+    # Default: nil (uses widget.absolute_bounds)
+    def drag_ghost_bounds : Rect?
+      nil
     end
 
     # Called when drag starts from this widget

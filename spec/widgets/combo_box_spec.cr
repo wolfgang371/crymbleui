@@ -126,6 +126,14 @@ describe CrymbleUI::ComboBox do
   # ============================================================================
 
   describe "Collapsed state (TEST MODE)" do
+    it "measure respects tight height constraints" do
+      combo = CrymbleUI::ComboBox.new(items: ["Apple", "Banana"], selected: 0)
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 20.0))
+      size = combo.measure(constraints)
+      size.height.should eq(20.0)
+      size.width.should eq(100.0)
+    end
+
     it "has no children when collapsed" do
       combo = CrymbleUI::ComboBox.new(items: ["Apple", "Banana"], selected: 0)
 
@@ -414,9 +422,11 @@ describe CrymbleUI::ComboBox do
       popup_bounds.width.should be > 0
       popup_bounds.height.should be > 0
 
-      # Popup should be positioned below ComboBox
+      # Popup should be positioned below OR above ComboBox (flips if near window bottom)
       combo_bounds = combo.absolute_bounds
-      popup_bounds.y.should be >= combo_bounds.y + combo_bounds.height - 1  # Allow 1px tolerance
+      below = popup_bounds.y >= combo_bounds.y + combo_bounds.height - 1
+      above = popup_bounds.y + popup_bounds.height <= combo_bounds.y + 1
+      (below || above).should be_true
     end
   end
 

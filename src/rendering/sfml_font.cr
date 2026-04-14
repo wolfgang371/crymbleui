@@ -28,11 +28,23 @@ module CrymbleUI
     end
 
     # Get SFML text offsets for position compensation
-    # SFML's local_bounds has left/top offsets that need to be subtracted for accurate positioning
+    # SFML's local_bounds has left/top offsets that need to be subtracted for accurate positioning.
+    # Top offset uses a cached reference glyph ("Ag") so all text aligns on the same baseline
+    # regardless of content — "..." and "Add field" get the same vertical offset.
     def get_text_offsets(text : String, size : Float64) : Tuple(Float64, Float64)
       sf_text = SF::Text.new(text, @font, size.round.to_u32)
       bounds = sf_text.local_bounds
-      {bounds.left.to_f64, bounds.top.to_f64}
+      {bounds.left.to_f64, reference_top(size)}
+    end
+
+    @reference_tops = Hash(UInt32, Float64).new
+
+    private def reference_top(size : Float64) : Float64
+      key = size.round.to_u32
+      @reference_tops[key] ||= begin
+        ref = SF::Text.new("Ag", @font, key)
+        ref.local_bounds.top.to_f64
+      end
     end
 
     # Allow direct access to underlying SF::Font if needed

@@ -37,7 +37,7 @@ class StickyGhostTestAdapter
 end
 
 describe "VirtualMatrix sticky header ghosting detection" do
-  it "newly created cells have needs_fresh_background set after scroll" do
+  it "newly created cells have nil last_rendered_layer_position (auto-detects stale background)" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
     app = TestApp.new
 
@@ -54,48 +54,37 @@ describe "VirtualMatrix sticky header ghosting detection" do
     # Get initial visible rows
     initial_visible = matrix.visible_cell_indices[:rows].dup
 
-    # Clear needs_fresh_background on all current cells (simulate they've been rendered)
-    matrix.active_cells.each do |key, widget|
-      widget.needs_fresh_background = false
-    end
-
     # Scroll down significantly to bring new cells into view
-    # This should create new cells that MUST have needs_fresh_background = true
     matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, 500.0)
     matrix.mark_needs_layout
     matrix.layout(constraints, CrymbleUI::Vec2.zero)
-    # NOTE: Check BEFORE render, because layer_renderer clears the flag after background capture
 
     # Get new visible rows after scroll
     new_visible = matrix.visible_cell_indices[:rows]
 
     # Find cells that are newly created (visible now but not before)
     newly_visible_rows = new_visible.reject { |r| initial_visible.includes?(r) }
-
-    # There should be some newly visible rows (we scrolled enough)
     newly_visible_rows.should_not be_empty, "Expected new rows after scrolling 500px"
 
-    # Check that NEW cells have needs_fresh_background set
-    # This is critical: new cells replacing destroyed cells MUST have this flag
-    # to prevent capturing ghost pixels from the layer buffer
+    # New cells have nil last_rendered_layer_position (never rendered).
+    # The renderer auto-detects this and fills with background color
+    # instead of capturing stale layer pixels (prevents ghosting).
     new_cell_count = 0
-    cells_with_fresh_bg = 0
+    cells_with_nil_pos = 0
 
     matrix.active_cells.each do |key, widget|
       row, col = key
       if newly_visible_rows.includes?(row)
         new_cell_count += 1
-        if widget.needs_fresh_background?
-          cells_with_fresh_bg += 1
+        if widget.last_rendered_layer_position.nil?
+          cells_with_nil_pos += 1
         end
       end
     end
 
-    # ASSERTION: New cells MUST have needs_fresh_background = true
-    # This prevents ghosting by ensuring clean background capture
     if new_cell_count > 0
-      cells_with_fresh_bg.should eq(new_cell_count),
-        "Expected all #{new_cell_count} new cells to have needs_fresh_background=true, but only #{cells_with_fresh_bg} did"
+      cells_with_nil_pos.should eq(new_cell_count),
+        "Expected all #{new_cell_count} new cells to have nil last_rendered_layer_position, but only #{cells_with_nil_pos} did"
     end
   end
 

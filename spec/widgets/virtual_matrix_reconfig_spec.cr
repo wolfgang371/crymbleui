@@ -49,7 +49,7 @@ end
 # When grid dimensions change (row/col count), stale pixels from the old layout
 # can "shine through" in the content area if the layer backend isn't cleared.
 # These tests verify that reconfiguration correctly clears the content layer.
-describe "VirtualMatrix grid reconfiguration" do
+describe "VirtualMatrix grid reconfiguration", tags: "slow" do
   # DSL rebuild path: copy_state_from preserves content_layer from old widget.
   # Without explicit clearing, old pixels persist in the reconciled buffer.
   it "clears content layer when grid dimensions change on DSL rebuild" do
@@ -119,7 +119,7 @@ describe "VirtualMatrix grid reconfiguration" do
   # render_layer must update buffer_origin for viewport_cache layers.
   # Without this, buffer_origin stays at Vec2.zero while scroll_offset is large,
   # causing the compositor to sample the wrong region → gray band artifact.
-  it "recenters buffer_origin after grid reconfiguration at non-zero scroll position" do
+  it "recenters buffer_origin after grid reconfiguration at non-zero scroll position", tags: "slow" do
     renderer = CrymbleUI::Testing::TestRenderer.new(800, 400)
     app = ReconfigDSLApp.new
     app.build_tree

@@ -6,7 +6,7 @@ describe CrymbleUI::VirtualMatrix do
     it "creates VirtualMatrix with LayerOwner" do
       matrix = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 5)
       matrix.responds_to?(:layer).should be_true
-      matrix.responds_to?(:on_ancestor_position_changed).should be_true
+      matrix.responds_to?(:compute_bounds_for_layer).should be_true
     end
 
     it "creates content layer with correct z-index" do
@@ -61,8 +61,8 @@ describe CrymbleUI::VirtualMatrix do
       matrix.content_layer.not_nil!.z_index.should be >= 100
     end
 
-    it "updates layer position on ancestor position changed" do
-      matrix = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 5, id: "pos_change")
+    it "layer bounds follow widget position via pull-based compute" do
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 5, id: "pull_bounds")
 
       app = TestApp.new
       app.root_widget = matrix
@@ -71,15 +71,14 @@ describe CrymbleUI::VirtualMatrix do
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
       matrix.layout(constraints, CrymbleUI::Vec2.new(50.0, 50.0))
 
-      # Record initial position
-      content_x = matrix.content_layer.not_nil!.bounds.x
+      # Content layer bounds should reflect widget's absolute position
+      matrix.content_layer.not_nil!.bounds.x.should eq(50.0)
+      matrix.content_layer.not_nil!.bounds.y.should eq(50.0)
 
-      # Simulate ancestor drag
-      delta = CrymbleUI::Vec2.new(10.0, 20.0)
-      matrix.on_ancestor_position_changed(delta)
-
-      # Content layer should have moved by delta
-      matrix.content_layer.not_nil!.bounds.x.should eq(content_x + 10.0)
+      # Re-layout at different position - bounds should auto-update
+      matrix.layout(constraints, CrymbleUI::Vec2.new(100.0, 75.0))
+      matrix.content_layer.not_nil!.bounds.x.should eq(100.0)
+      matrix.content_layer.not_nil!.bounds.y.should eq(75.0)
     end
 
     it "updates layer z-index on ancestor z-index changed" do
@@ -149,6 +148,10 @@ class LayerBoxForTest < CrymbleUI::Widget
     @test_layer.owner_widget = self
   end
 
+  def compute_bounds_for_layer(layer : CrymbleUI::Layer) : CrymbleUI::Rect
+    @bounds
+  end
+
   def layer : CrymbleUI::Layer?
     @internal_layer
   end
@@ -159,7 +162,6 @@ class LayerBoxForTest < CrymbleUI::Widget
 
   def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
     @bounds = CrymbleUI::Rect.new(position, measure(constraints))
-    @internal_layer.try { |l| l.bounds = @bounds }
 
     @children.each do |child|
       child_constraints = CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(@bounds.width, @bounds.height))

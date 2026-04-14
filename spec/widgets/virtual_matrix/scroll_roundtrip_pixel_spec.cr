@@ -122,7 +122,7 @@ private def count_mismatches(a : Array(Tuple(Int32, Int32, CrymbleUI::Color)),
   count
 end
 
-describe CrymbleUI::VirtualMatrix do
+describe CrymbleUI::VirtualMatrix, tags: "slow" do
   describe "Horizontal scroll round-trip pixel regression (Bug 2)" do
     it "content pixels match after hscroll right→left round-trip" do
       app = ColorBoxDSLApp.new

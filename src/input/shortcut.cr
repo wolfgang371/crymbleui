@@ -101,6 +101,15 @@ module CrymbleUI
                 SF::Keyboard::End
             when "insert"
                 SF::Keyboard::Insert
+            # Punctuation / math
+            when "+", "plus", "equal"
+                SF::Keyboard::Equal
+            when "-", "minus", "hyphen"
+                SF::Keyboard::Hyphen
+            when "numpad+", "numpadadd"
+                SF::Keyboard::Add
+            when "numpad-", "numpadsubtract"
+                SF::Keyboard::Subtract
             # Function keys
             when "f1"
                 SF::Keyboard::F1
@@ -208,6 +217,14 @@ module CrymbleUI
                 "End"
             when SF::Keyboard::Insert
                 "Ins"
+            when SF::Keyboard::Equal
+                "+"
+            when SF::Keyboard::Hyphen
+                "-"
+            when SF::Keyboard::Add
+                "Num+"
+            when SF::Keyboard::Subtract
+                "Num-"
             when SF::Keyboard::F1
                 "F1"
             when SF::Keyboard::F2

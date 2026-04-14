@@ -90,6 +90,7 @@ module CrymbleUI
 
     # Drag & Drop
     getter drag_highlight : Color
+    getter drag_ghost : Color
     getter dropzone_hover : Color
     getter dropzone_background : Color
 
@@ -151,13 +152,26 @@ module CrymbleUI
       @ruler_label : Color,
       @ruler_line : Color,
       @drag_highlight : Color,
+      @drag_ghost : Color,
       @dropzone_hover : Color,
       @dropzone_background : Color,
       @brightness_hover : Float64,
       @brightness_focus : Float64,
       @brightness_drag_opacity : Float64,
       @brightness_cursor_delta : Int32,
+      @all_colors : Hash(String, Color) = {} of String => Color,
     )
+    end
+
+    # Generic color access for app-specific theme extensions.
+    # Apps add custom tokens to the theme JSON (e.g., "vhtree.selected_bg")
+    # and access them via Theme.current["vhtree.selected_bg"].
+    def [](key : String) : Color
+      @all_colors[key]
+    end
+
+    def []?(key : String) : Color?
+      @all_colors[key]?
     end
 
     # Parse a ThemeData from a JSON string
@@ -165,6 +179,12 @@ module CrymbleUI
       data = JSON.parse(json_str)
       colors = data["colors"]
       constants = data["constants"]
+
+      # Parse ALL color keys into generic hash for app-specific extensions
+      all_colors = Hash(String, Color).new
+      colors.as_h.each do |key, value|
+        all_colors[key.to_s] = Color.from_hex(value.as_s)
+      end
 
       ThemeData.new(
         name: data["name"].as_s,
@@ -218,12 +238,14 @@ module CrymbleUI
         ruler_label: Color.from_hex(colors["ruler.label"].as_s),
         ruler_line: Color.from_hex(colors["ruler.line"].as_s),
         drag_highlight: Color.from_hex(colors["drag.highlight"].as_s),
+        drag_ghost: Color.from_hex(colors["drag.ghost"]?.try(&.as_s) || colors["drag.highlight"].as_s),
         dropzone_hover: Color.from_hex(colors["dropzone.hover"].as_s),
         dropzone_background: Color.from_hex(colors["dropzone.background"].as_s),
         brightness_hover: constants["brightness.hover"].as_f,
         brightness_focus: constants["brightness.focus"].as_f,
         brightness_drag_opacity: constants["brightness.drag_opacity"].as_f,
         brightness_cursor_delta: constants["brightness.cursor_delta"].as_i,
+        all_colors: all_colors,
       )
     end
   end

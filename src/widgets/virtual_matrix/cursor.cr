@@ -90,9 +90,31 @@ module CrymbleUI
 
     # === PROXY FOCUS ===
 
+    # Commit pending TextInput edits before deactivating proxy focus.
+    # If the proxy-focused widget is a TextInput whose value differs from
+    # value_on_focus, call adapter.cell_assign to persist the change.
+    private def commit_proxy_edit
+      return unless (widget = @proxy_focused_widget) && (rc = @proxy_focused_rc)
+      @proxy_focused_rc = nil # prevent re-entrancy: cell_assign → invalidate_all! → clear_proxy_focus → commit_proxy_edit
+      if widget.is_a?(TextInput)
+        orig = widget.value_on_focus
+        if orig && widget.value != orig
+          if new_rc = @adapter.try &.cell_assign(rc[0], rc[1], widget.value)
+            # Preserve any cursor delta already applied (e.g., arrow key moved before commit)
+            delta_row = @cursor_rc[0] - rc[0]
+            delta_col = @cursor_rc[1] - rc[1]
+            @cursor_rc = {new_rc[0] + delta_row, new_rc[1] + delta_col}
+          end
+        end
+      end
+    end
+
     # Update proxy focus to match the current cursor cell.
     # Called when cursor moves, when VirtualMatrix gains focus, or when cursor cell is created.
     private def update_proxy_focus
+      # Don't establish proxy on cells that are about to be destroyed
+      return if @pending_invalidate_all
+
       cell_widget = @active_cells[@cursor_rc]?
 
       # If cursor is on a non-handle cell within a merged region,
@@ -117,18 +139,22 @@ module CrymbleUI
       # No change needed
       return if @proxy_focused_widget == target
 
-      # Deactivate old
+      # Commit edit and deactivate old
+      commit_proxy_edit
       @proxy_focused_widget.try(&.deactivate_proxy_focus)
 
       # Activate new
       @proxy_focused_widget = target
+      @proxy_focused_rc = target ? @cursor_rc : nil
       target.try(&.activate_proxy_focus)
     end
 
     # Deactivate proxy focus entirely (on blur or cell destruction)
     private def clear_proxy_focus
+      commit_proxy_edit
       @proxy_focused_widget.try(&.deactivate_proxy_focus)
       @proxy_focused_widget = nil
+      @proxy_focused_rc = nil
     end
 
     # === END PROXY FOCUS ===
@@ -173,9 +199,11 @@ module CrymbleUI
     # clear + full render. This prevents ghost bands where old cursor bands
     # remain in the layer buffer after cursor moves. Lighter than mark_needs_layout:
     # avoids NeedsLayout semantics (sibling validation, disabled viewport culling).
-    private def mark_cursor_overlay_dirty
+    def mark_cursor_overlay_dirty
       if overlay = @cursor_overlay_layer
-        overlay.mark_needs_clear_and_render
+        if widget = overlay.widgets.first?
+          overlay.mark_needs_render(widget)
+        end
       end
     end
 
@@ -193,7 +221,7 @@ module CrymbleUI
       @cursor_overlay_widget.try { |cow| cow.flash_on = true }
       mark_cursor_overlay_dirty
 
-      # Schedule repeating toggle
+      # Schedule repeating toggle — direct_render overlay re-renders cheaply (~1ms)
       @cursor_flash_timer_id = Widget.scheduler.schedule(CURSOR_FLASH_MS.milliseconds, repeating: true) do
         @cursor_flash_on = !@cursor_flash_on
         @cursor_overlay_widget.try { |cow| cow.flash_on = @cursor_flash_on }
@@ -210,6 +238,15 @@ module CrymbleUI
       @cursor_flash_on = false
       @cursor_overlay_widget.try { |cow| cow.flash_on = false }
       mark_cursor_overlay_dirty
+    end
+
+    # Cancel cursor flash timer without visual side-effects.
+    # Used during reconciliation to prevent orphaned timers on old instances.
+    def stop_cursor_flash_for_transfer
+      if timer_id = @cursor_flash_timer_id
+        Widget.scheduler.cancel(timer_id)
+        @cursor_flash_timer_id = nil
+      end
     end
 
     # Auto-scroll to keep cursor visible.
@@ -322,6 +359,7 @@ module CrymbleUI
         end
         mark_needs_render
         mark_cursor_overlay_dirty
+        mark_ruler_widgets_dirty
         {% if flag?(:CURSOR_PERF) %}
           _snap_ms = (Time.monotonic - _snap_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  SNAP_TO_CURSOR(scroll): #{_snap_ms.round(2)}ms" }

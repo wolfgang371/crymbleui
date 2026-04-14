@@ -56,6 +56,12 @@ module CrymbleUI
         mark_needs_render
         mark_cursor_overlay_dirty
 
+        # Mark ruler widgets dirty so sticky layers re-render with new scroll offset.
+        # reposition_sticky_cells only marks layers when sticky data cells change,
+        # but rulers (CachePolicy::Never) read scroll_offset in to_primitives and
+        # need their layers re-rendered even with no sticky data cells.
+        mark_ruler_widgets_dirty
+
         return true
       end
 
@@ -64,7 +70,23 @@ module CrymbleUI
 
     # === MOUSE HANDLING ===
 
-    private def point_to_cell(point : Vec2) : Tuple(Int32, Int32)?
+    # Accumulate scroll offsets from ancestor ScrollViews.
+    # on_mouse_down receives screen-space coordinates, but absolute_bounds
+    # is in content-space (doesn't account for ancestor scrolling).
+    # Adding ancestor scroll offsets converts screen→content.
+    private def ancestor_scroll_offset : Vec2
+      offset = Vec2.zero
+      current = @parent
+      while current
+        if current.is_a?(ScrollView)
+          offset = Vec2.new(offset.x + current.scroll_offset.x, offset.y + current.scroll_offset.y)
+        end
+        current = current.parent
+      end
+      offset
+    end
+
+    def point_to_cell(point : Vec2) : Tuple(Int32, Int32)?
       content_x = absolute_bounds.x
       content_y = absolute_bounds.y
 
@@ -92,7 +114,8 @@ module CrymbleUI
       col_cum = @cached_col_physical_cum
       if col_cum
         col = col_cum.bsearch_index { |p| p > local_x.to_i32 }
-        col = col ? {col - 1, 0}.max : @cols - 1
+        return nil unless col  # Beyond all columns
+        col = {col - 1, 0}.max
       else
         col = 0
         acc_x = 0.0
@@ -100,13 +123,15 @@ module CrymbleUI
           acc_x += col_width_pixels(col)
           col += 1
         end
+        return nil if col >= @cols
       end
 
       # Find row — O(log N) binary search on cached physical cumulative array
       row_cum = @cached_row_physical_cum
       if row_cum
         row = row_cum.bsearch_index { |p| p > local_y.to_i32 }
-        row = row ? {row - 1, 0}.max : @rows - 1
+        return nil unless row  # Beyond all rows
+        row = {row - 1, 0}.max
       else
         row = 0
         acc_y = 0.0
@@ -114,9 +139,8 @@ module CrymbleUI
           acc_y += row_height_pixels(row)
           row += 1
         end
+        return nil if row >= @rows
       end
-
-      return nil if row >= @rows || col >= @cols
       {row, col}
     end
 
@@ -195,7 +219,9 @@ module CrymbleUI
     end
 
     def preferred_cursor(point : Vec2) : CursorType?
-      edge = detect_resize_edge(point)
+      ancestor_scroll = ancestor_scroll_offset
+      content_point = Vec2.new(point.x + ancestor_scroll.x, point.y + ancestor_scroll.y)
+      edge = detect_resize_edge(content_point)
       return nil unless edge
       case edge[0]
       when ResizeAxis::Col then CursorType::SizeHorizontal
@@ -204,9 +230,29 @@ module CrymbleUI
       end
     end
 
-    def on_mouse_down(point : Vec2) : Bool
+    def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left) : Bool
       bring_containing_panel_to_front
       request_focus
+      @drag_source_was_preexisting = !@drag_source_cell.nil?
+      # Right-click: move cursor to clicked cell, then bubble for context menu
+      if button == MouseButton::Right
+        content_point = Vec2.new(point.x + ancestor_scroll_offset.x, point.y + ancestor_scroll_offset.y)
+        if sv = @content_scroll_view
+          @scroll_offset = sv.scroll_offset
+        end
+        if cell = point_to_cell(content_point)
+          set_cursor_from_cell(cell)
+          update_cell_states
+          mark_needs_render
+        end
+        super(point, button)
+        return true
+      end
+
+      # Convert screen-space point to content-space by adding ancestor scroll offsets.
+      # App.handle_mouse_down passes screen-space coordinates, but absolute_bounds
+      # is in content-space (doesn't account for ancestor ScrollView scrolling).
+      content_point = Vec2.new(point.x + ancestor_scroll_offset.x, point.y + ancestor_scroll_offset.y)
 
       # Sync scroll offset from ScrollView (user may have scrolled via scrollbar)
       if sv = @content_scroll_view
@@ -214,11 +260,11 @@ module CrymbleUI
       end
 
       # Check resize edge first
-      if edge = detect_resize_edge(point)
+      if edge = detect_resize_edge(content_point)
         self.resize_axis = edge[0]
         self.resize_index = edge[1]
-        sx = point.x - absolute_bounds.x
-        sy = point.y - absolute_bounds.y
+        sx = content_point.x - absolute_bounds.x
+        sy = content_point.y - absolute_bounds.y
         if edge[0] == ResizeAxis::Col
           grid_x = sx - ruler_col_width_pixels
           self.resize_start_mouse = grid_x + (grid_x >= sticky_col_width_pixels ? @scroll_offset.x : 0.0)
@@ -231,11 +277,28 @@ module CrymbleUI
         return true
       end
 
-      if cell = point_to_cell(point)
+      if cell = point_to_cell(content_point)
         row, col = cell
-        set_cursor_from_cell({row, col})
-        update_cell_states
-        mark_needs_render
+        now = Time.instant
+
+        # Double-click on same cell: forward to proxy widget (opens ComboBox, etc.)
+        if {row, col} == @last_click_cell &&
+           (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
+          @last_click_time = Time.instant - 1.hour  # prevent triple-click
+          if proxy = @proxy_focused_widget
+            proxy.on_mouse_up(Vec2.zero)
+          end
+        else
+          set_cursor_from_cell({row, col})
+          update_cell_states
+          mark_needs_render
+          @last_click_time = now
+          @last_click_cell = {row, col}
+          # Set drag source for potential cell drag (DragManager detects threshold)
+          if adapter = @adapter
+            @drag_source_cell = adapter.cell_has_content?(row, col) ? {row, col} : nil
+          end
+        end
       end
       true
     end
@@ -243,8 +306,12 @@ module CrymbleUI
     def on_mouse_move(point : Vec2)
       return unless resize_axis != ResizeAxis::None
 
-      sx = point.x - absolute_bounds.x
-      sy = point.y - absolute_bounds.y
+      # Convert screen-space to content-space (same as on_mouse_down)
+      ancestor_scroll = ancestor_scroll_offset
+      content_x = point.x + ancestor_scroll.x
+      content_y = point.y + ancestor_scroll.y
+      sx = content_x - absolute_bounds.x
+      sy = content_y - absolute_bounds.y
 
       if resize_axis == ResizeAxis::Col
         grid_x = sx - ruler_col_width_pixels
@@ -260,22 +327,21 @@ module CrymbleUI
         set_row_height_for_drag(resize_index, new_height)
       end
 
-      # Invalidate ruler widgets (they read cached sizes which just changed)
-      @col_ruler_widget.try(&.mark_needs_render)
-      @row_ruler_widget.try(&.mark_needs_render)
-
       # Update corner widget bounds for sticky col/row resizes (no full layout needed)
       ruler_w = ruler_col_width_pixels
       ruler_h = ruler_row_height_pixels
       if crw = @corner_ruler_widget
         corner_w = ruler_w + sticky_col_width_pixels
         crw.layout(BoxConstraints.tight(Size.new(corner_w, ruler_h)), Vec2.zero)
-        crw.mark_needs_render
       end
       if strip = @corner_row_strip_widget
         strip.layout(BoxConstraints.tight(Size.new(ruler_w, sticky_row_height_pixels)), Vec2.new(0.0, ruler_h))
-        strip.mark_needs_render
       end
+
+      # Mark ruler widgets dirty on their correct sticky layers
+      # (ruler widgets live on sticky layers, not the content layer —
+      # plain mark_needs_render would propagate to the wrong layer in nested hierarchies)
+      mark_ruler_widgets_dirty
 
       # Sync sticky layer bounds to match new dimensions (avoids full layout)
       if sv = @content_scroll_view
@@ -292,22 +358,33 @@ module CrymbleUI
       mark_cursor_overlay_dirty
     end
 
-    def on_mouse_up(point : Vec2)
+    def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       if resize_axis != ResizeAxis::None
         # Update ScrollView content size directly (avoids mark_needs_layout → rebuild
         # in DSL apps, which would recreate the adapter and lose user-edited cell data)
         if sv = @content_scroll_view
           sv.content_size = Size.new(total_content_width, total_content_height)
         end
+        # Persist sizes to adapter (survives shape duplication)
+        if adapter = @adapter
+          adapter.custom_col_widths = @col_widths.dup
+          adapter.custom_row_heights = @row_heights.dup
+        end
         mark_needs_render
       end
       self.resize_axis = ResizeAxis::None
+      # Clear drag source if click didn't become a drag — but preserve cut highlights
+      if @drag_source_cell && !@drag_source_was_preexisting
+        @drag_source_cell = nil
+        mark_cursor_overlay_dirty
+      end
     end
 
     # === FOCUS ===
 
     def on_focus
       super
+      start_cursor_flash
       update_proxy_focus
     end
 
@@ -318,7 +395,7 @@ module CrymbleUI
 
     # === KEYBOARD HANDLING ===
 
-    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool) : Bool
+    def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
       {% if flag?(:CURSOR_PERF) %}
         _kd_start = Time.monotonic
       {% end %}
@@ -335,6 +412,42 @@ module CrymbleUI
         snap_to_cursor(for_edit: true)
       end
 
+      # Cell operations BEFORE proxy forwarding (Ctrl+X/V, Insert, Delete)
+      # Must be first — otherwise proxy (TextInput) intercepts Ctrl+V as clipboard paste
+      if handler = @on_key_action
+        rc = @cursor_rc
+        case key
+        when SF::Keyboard::Key::X
+          if control
+            handler.call(CellAction::Cut, rc)
+            return true
+          end
+        when SF::Keyboard::Key::V
+          if control
+            handler.call(CellAction::Paste, rc)
+            return true
+          end
+        when SF::Keyboard::Key::Insert
+          handler.call(CellAction::Insert, rc)
+          return true
+        when SF::Keyboard::Key::Delete
+          handler.call(CellAction::Delete, rc)
+          return true
+        end
+      end
+
+      # Escape: proxy gets first shot (TextInput: undo edit, ComboBox: close popup),
+      # then always dispatch cancel_cut (clears cut highlight + dismisses context menu).
+      # Panel-scoped Escape shortcuts (dialog close) are handled BEFORE focus dispatch
+      # in the SFML renderer, so this only runs for panels without an Escape shortcut.
+      if key == SF::Keyboard::Key::Escape
+        if proxy = @proxy_focused_widget
+          proxy.on_key_down(key, control, shift)
+        end
+        @on_key_action.try &.call(CellAction::CancelCut, @cursor_rc)
+        return true
+      end
+
       # Proxy focus forwarding: if a focusable cell widget has proxy focus,
       # forward events to it (except arrows in QuickEntry and Tab)
       if proxy = @proxy_focused_widget
@@ -342,22 +455,22 @@ module CrymbleUI
         when SF::Keyboard::Key::Up, SF::Keyboard::Key::Down,
              SF::Keyboard::Key::Left, SF::Keyboard::Key::Right
           if proxy.wants_arrow_keys?
-            # FullEdit mode: arrows go to TextInput for cursor movement
             return true if proxy.on_key_down(key, control, shift)
           end
-          # QuickEntry mode: fall through to grid navigation below
+          clear_proxy_focus
         when SF::Keyboard::Key::Tab
-          # Don't forward Tab — let VirtualMatrix handle it (or pass to FocusManager)
+          # Don't forward Tab — let VirtualMatrix handle it
         when SF::Keyboard::Key::Enter, SF::Keyboard::Key::Space
-          # Forward to proxy first (TextInput handles Enter for mode switching)
           if proxy.on_key_down(key, control, shift)
             return true
           end
-          # Fallback: trigger click for Button/Checkbox-like widgets
+          if key == SF::Keyboard::Key::Enter && proxy.is_a?(TextInput)
+            clear_proxy_focus
+            return true
+          end
           proxy.trigger_click
           return true
         else
-          # Forward everything else (Escape, Backspace, Delete, Home, End, etc.)
           return true if proxy.on_key_down(key, control, shift)
         end
       end
@@ -387,12 +500,14 @@ module CrymbleUI
         {% end %}
         true
       when SF::Keyboard::Key::Left
+        return false if alt  # Alt+Left: let shortcut manager handle (e.g., history navigation)
         move_cursor(:left, control, shift)
         snap_to_cursor
         update_cell_states
         mark_needs_render
         true
       when SF::Keyboard::Key::Right
+        return false if alt  # Alt+Right: let shortcut manager handle
         move_cursor(:right, control, shift)
         snap_to_cursor
         update_cell_states
@@ -427,6 +542,83 @@ module CrymbleUI
       end
 
       false
+    end
+
+    # === CELL DRAG-AND-DROP ===
+
+    # Draggable: ghost bounds = drag bounding box (spans full record region)
+    def drag_ghost_bounds : Rect?
+      if src = @drag_source_cell
+        if adapter = @adapter
+          bb = adapter.cell_get_drag_bounding_box(src[0], src[1])
+          min_r, min_c = bb[0]
+          max_r, max_c = bb[1]
+          abs = absolute_bounds
+          x = abs.x + ruler_col_width_pixels + (0...min_c).sum { |c| col_width_pixels(c) } - @scroll_offset.x
+          y = abs.y + ruler_row_height_pixels + (0...min_r).sum { |r| row_height_pixels(r) } - @scroll_offset.y
+          w = (min_c..max_c).sum { |c| col_width_pixels(c) }
+          h = (min_r..max_r).sum { |r| row_height_pixels(r) }
+          Rect.new(x, y, w, h)
+        end
+      end
+    end
+
+    # Draggable: return data for the cell clicked in on_mouse_down
+    def get_drag_data : DragData?
+      if src = @drag_source_cell
+        if adapter = @adapter
+          name = adapter.cell_get_name(src[0], src[1])
+          CellDragData.new(src[0], src[1], name)
+        end
+      end
+    end
+
+    # Simple ghost: just a themed semi-transparent fill (no border, no text)
+    def create_ghost_preview : Widget?
+      SimpleGhostWidget.new
+    end
+
+    def on_drag_start(data : DragData)
+      mark_cursor_overlay_dirty
+    end
+
+    def on_drag_end(data : DragData, dropped : Bool)
+      @drag_source_cell = nil
+      @drag_target_cell = nil
+      mark_cursor_overlay_dirty
+    end
+
+    # DropTarget: accept cell data from same matrix
+    def accepts_drop?(data : DragData) : Bool
+      data.is_a?(CellDragData)
+    end
+
+    # Disable DragManager's widget-level highlight (we highlight individual cells instead)
+    def highlight_opacity : Float64
+      0.0
+    end
+
+    def on_drop(data : DragData, position : Vec2)
+      return unless data.is_a?(CellDragData)
+      if target = point_to_cell(position)
+        if adapter = @adapter
+          new_cursor = adapter.cell_move(data.row, data.col, target[0], target[1])
+          set_cursor_from_cell(new_cursor)
+          update_cell_states
+          mark_needs_render
+          @on_cell_drop_handler.try &.call
+        end
+      end
+    end
+
+    def on_drag_over(data : DragData, position : Vec2)
+      @drag_target_cell = point_to_cell(position)
+      mark_cursor_overlay_dirty
+    end
+
+    def on_drag_leave(data : DragData)
+      @drag_target_cell = nil
+      mark_cursor_overlay_dirty
     end
   end
 end

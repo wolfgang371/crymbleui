@@ -96,15 +96,7 @@ describe "Panel chrome rendering on click" do
     # Gap pixel should NOT be titlebar color - should be panel background
     # Debug: Print 10x10 pixel grid if test fails
     if after_click_content_pixel == titlebar_active_color || after_click_content_pixel == titlebar_inactive_color
-      puts "\n=== DEBUG INFO ==="
-      puts "Panel3 size: #{panel3.width}x#{panel3.height}"
-      puts "Panel3 layer size: #{panel3_backend.width}x#{panel3_backend.height}"
-      puts "Checking gap pixel at: (#{content_x}, #{content_y})"
-      puts "Expected: #{panel3_layer.background_color} (panel background)"
-      puts "Got: #{after_click_content_pixel.inspect} (titlebar color - CHROME LEAK!)"
 
-      puts "\n=== 10x10 Pixel Grid Around (#{content_x}, #{content_y}) ==="
-      puts "Legend: 0=black, f=white, 7=#0078D7 (active titlebar)"
       start_y = content_y - 5
       start_x = content_x - 5
       (0...10).each do |dy|
@@ -127,9 +119,7 @@ describe "Panel chrome rendering on click" do
             row += "."
           end
         end
-        puts row
       end
-      puts "=== End Grid ==="
     end
 
     after_click_content_pixel.should_not eq(titlebar_active_color)

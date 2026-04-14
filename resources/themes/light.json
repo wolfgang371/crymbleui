@@ -34,6 +34,8 @@
     "panel.title_bar": "#0064B4",
     "panel.title_bar_active": "#0078D7",
     "panel.title_bar_inactive": "#005096",
+    "panel.title_bar_warning": "#C02020",
+    "panel.background_warning": "#FDE8E8",
     "panel.title_text": "#FFFFFF",
     "panel.border": "#0050A0",
     "panel.background": "#F0F0F0",
@@ -57,7 +59,7 @@
 
     "separator.color": "#C8C8C8",
 
-    "grid.content_background": "#282828",
+    "grid.content_background": "#F0F0F0",
     "grid.cursor_band": "#FFFFFF",
     "grid.cursor_flash": "#FFFFFF",
 
@@ -66,13 +68,30 @@
     "ruler.line": "#B4B4B9",
 
     "drag.highlight": "#B4DCFF",
+    "drag.ghost": "#8AB8E0",
     "dropzone.hover": "#B4DCFF",
-    "dropzone.background": "#F0F0F0"
+    "dropzone.background": "#F0F0F0",
+
+    "vhtree.unselected_bg": "#D8D8D8",
+    "vhtree.selected_bg": "#B8C8E0",
+    "vhtree.text": "#202020",
+    "vhtree.text_dim": "#606060",
+    "vhtree.line": "#808080",
+    "constraint.ok": "#90D890",
+    "constraint.nok": "#E8A0A0",
+    "fieldlist.col_bg": "#D0E0FF",
+    "fieldlist.row_bg": "#D0FFD0",
+    "fieldlist.free_bg": "#F0F0F0",
+    "fieldlist.agg_bg": "#FFE0C0",
+    "fieldlist.drag_hl": "#64A0FFC8",
+    "fieldlist.spacer": "#A0A0A0",
+    "statusbar.warning": "#C03000",
+    "statusbar.info": "#0050B0"
   },
   "constants": {
     "brightness.hover": 0.15,
     "brightness.focus": 0.35,
     "brightness.drag_opacity": 0.4,
-    "brightness.cursor_delta": 40
+    "brightness.cursor_delta": -40
   }
 }

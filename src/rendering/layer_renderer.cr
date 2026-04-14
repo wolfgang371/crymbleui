@@ -37,6 +37,7 @@ module CrymbleUI
     class_property frame_blit_plan_count : Int32 = 0              # sticky layers rendered via blit-plan fast path
     class_property frame_boundary_cells_invalidated : Int32 = 0   # cells at buffer boundary invalidated after blit-shift
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
+    class_property rendered_layer_ids : Array(String) = [] of String # Layer IDs rendered this frame
 
     # Per-phase timing (in milliseconds)
     class_property phase_layout_ms : Float64 = 0.0
@@ -59,6 +60,7 @@ module CrymbleUI
       @@frame_blit_plan_count = 0
       @@frame_boundary_cells_invalidated = 0
       @@rendered_widgets.clear
+      @@rendered_layer_ids.clear
       @@phase_layout_ms = 0.0
       @@phase_render_ms = 0.0
       @@phase_composite_ms = 0.0
@@ -113,10 +115,18 @@ module CrymbleUI
 
     # === Validation Helpers (Option C: Graceful Degradation) ===
 
-    # Check if layer has valid dimensions for rendering
+    # Check if layer has valid dimensions for rendering.
+    # Also checks owner widget ancestry — when a parent (e.g. TreeNode) collapses
+    # and zeros children bounds, the layer's own bounds may be stale. Walk up the
+    # parent chain from the owner widget; if any ancestor has zero bounds, the
+    # layer is hidden and should not be composited.
     private def valid_layer_dimensions?(layer : Layer) : Bool
-      layer.bounds.width > 0 && layer.bounds.height > 0 &&
+      return false unless layer.bounds.width > 0 && layer.bounds.height > 0 &&
         layer.bounds.width.finite? && layer.bounds.height.finite?
+      if owner = layer.owner_widget
+        return owner.ancestry_bounds_valid?
+      end
+      true
     end
 
     # Check if widget has valid dimensions for rendering
@@ -149,6 +159,7 @@ module CrymbleUI
     @layers_need_recollect : Bool = true
     @cached_ghost_layer : Layer? = nil
     @cached_highlight_layer : Layer? = nil
+    @last_overlay_version : Int32 = 0
 
     # Invalidate the collected-layers cache. Call after layout or when the
     # layer set may have changed (zoom, panel add/remove, etc.).
@@ -171,6 +182,15 @@ module CrymbleUI
         @cached_highlight_layer = highlight_layer
       end
 
+      # Invalidate cache if overlay set changed (popup added/removed)
+      if root_widget.responds_to?(:overlay_version)
+        ov = root_widget.overlay_version
+        if ov != @last_overlay_version
+          @layers_need_recollect = true
+          @last_overlay_version = ov
+        end
+      end
+
       # Collect layers (cached unless invalidated)
       layers = if @layers_need_recollect
         collected = profile("collect_layers") { collect_layers(root_widget) }
@@ -185,8 +205,10 @@ module CrymbleUI
           collected << ghost
         end
 
-        # Pre-sort by z_index (avoids allocation + sort every frame)
-        collected.sort_by!(&.z_index)
+        # Sort layers: group by parent panel z-index, then by layer z-index within panel
+        # This prevents cross-panel layer interleaving (e.g., ScrollView from panel_1
+        # appearing above panel_2's content)
+        sort_layers_for_compositing(collected)
 
         @cached_layers = collected
         @layers_need_recollect = false
@@ -223,12 +245,29 @@ module CrymbleUI
         end
       end
 
+      # Auto-detect size changes from pull-based bounds
+      layers.each do |layer|
+        if layer.size_changed?
+          if layer.viewport_cache
+            layer.backend = nil  # Force new backend at correct size
+            layer.mark_needs_clear_and_render
+          elsif !layer.backend_fits_bounds?
+            # Backend too small for new bounds — need clear after backend recreation
+            layer.mark_needs_clear_and_render
+          end
+          # Non-viewport-cache within buffer: no action needed.
+          # Already-dirty widgets handle the visual update via selective rendering.
+          # The 20% over-allocated backend margin already has background_color.
+        end
+      end
+
       # Render each layer that needs it
       rendered_count = 0
       profile("render_layers") do
         layers.each do |layer|
           if layer.needs_render?
             LayerRenderer.frame_layers_needing_render += 1 # Instrumentation
+            LayerRenderer.rendered_layer_ids << layer.id
             render_layer(layer)
             rendered_count += 1
           end
@@ -246,7 +285,9 @@ module CrymbleUI
         increment_compositor_call_count # Instrumentation
         clear_window_background
         layers.each do |layer|
-          composite_layer_to_window(layer)
+          # Skip layers whose owner widget is hidden (e.g., closed WindowPanel)
+          next if layer.owner_widget.try(&.skip_render?)
+          composite_layer_to_window(layer) if valid_layer_dimensions?(layer)
         end
       end
       LayerRenderer.phase_composite_ms = (Time.instant - composite_start).total_milliseconds
@@ -288,7 +329,9 @@ module CrymbleUI
       return unless backend = layer.backend # Skip if no backend assigned
 
       # FAST PATH: Blit-plan for sticky layers
-      # When set, skip full render pipeline — just clear and blit cached widget textures
+      # When set, skip full render pipeline — just clear and blit cached widget textures.
+      # Hybrid mode: if blit_plan_render_widgets is set, render those widgets normally
+      # after the blit (e.g., CachePolicy::Never ruler widgets that need fresh content).
       if plan = layer.blit_plan
         backend.clear(layer.background_color)
         clip_rect = Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
@@ -297,8 +340,21 @@ module CrymbleUI
           backend.blit(entry.source, entry.dest_x, entry.dest_y)
         end
         backend.pop_clip
+
+        # Hybrid: render additional widgets (rulers) after blit-plan
+        if render_widgets = layer.blit_plan_render_widgets
+          layer_offset_x = layer.bounds.x
+          layer_offset_y = layer.bounds.y
+          drag_offset = Vec2.new(0.0, 0.0)
+          render_widgets.each do |widget|
+            render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
+          end
+          layer.blit_plan_render_widgets = nil
+        end
+
         backend.display
         layer.blit_plan = nil # Consume (one-shot)
+        layer.needs_clear = false  # Consumed by blit-plan clear (prevents stale flag)
         LayerRenderer.frame_blit_plan_count += 1
         layer.clear_render_state
         return
@@ -477,7 +533,19 @@ module CrymbleUI
 
         # Second pass: render foreground primitives for DecoratedContainers
         # Foreground renders AFTER all children, on top of everything
-        widgets_to_render.each do |widget|
+        # IMPORTANT: Must iterate ALL widgets, not just dirty ones — foreground
+        # primitives (e.g., connecting lines) span multiple children and get
+        # overwritten when any child re-renders its background
+        all_layer_widgets = if full_render
+                              widgets_to_render
+                            else
+                              all_fg = [] of Widget
+                              layer.widgets.each do |w|
+                                collect_all_widgets_recursive(w, all_fg, layer)
+                              end
+                              all_fg
+                            end
+        all_layer_widgets.each do |widget|
           if widget.responds_to?(:has_foreground?) && widget.has_foreground?
             render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
           end
@@ -803,11 +871,21 @@ module CrymbleUI
       adjusted_y = widget_abs.y + drag_offset.y
 
       # Widget size in pixels (for backend creation)
-      # CRITICAL: Use ceil() not to_i (truncation) to ensure backend is large enough
-      # When bounds.height=31.5, primitives may extend to y=31.5, so backend needs 32 rows
-      # Truncation to 31 would clip the bottom border/content
-      widget_width = widget_abs.width.ceil.to_i
-      widget_height = widget_abs.height.ceil.to_i
+      # Compute from integer edge positions to guarantee perfect tiling:
+      # adjacent siblings share edges without overlap or gap.
+      # ceil(width) would create 1-pixel overlaps between siblings, causing
+      # stale background capture (earlier sibling captures panel bg at overlap
+      # pixel before later sibling renders → "white line" on selective re-render).
+      # Clamp to prevent arithmetic overflow from INFINITY/MAX bounds
+      if widget_abs.width > 16384.0 || widget_abs.height > 16384.0
+        {% if flag?(:DEBUG_RENDER) %}
+          STDERR.puts "[OVERFLOW_GUARD] #{widget.class.name}##{widget.path_id} bounds=#{widget_abs.width}x#{widget_abs.height} - clamped"
+        {% end %}
+      end
+      clamped_w = widget_abs.width.clamp(0.0, 16384.0)
+      clamped_h = widget_abs.height.clamp(0.0, 16384.0)
+      widget_width = (adjusted_x + clamped_w - offset_x).to_i - (adjusted_x - offset_x).to_i
+      widget_height = (adjusted_y + clamped_h - offset_y).to_i - (adjusted_y - offset_y).to_i
 
       # Skip zero-size widgets (no visible content)
       return nil if widget_width <= 0 || widget_height <= 0
@@ -899,6 +977,7 @@ module CrymbleUI
                 end
               {% end %}
               backend.blit(existing_backend, layer_local_x, layer_local_y)
+              widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
               {% if flag?(:cache_validation) %}
                 # CV trace: verify buffer content AFTER fast-path blit
                 if layer.id.starts_with?("matrix_content") && layer_local_y >= 815 && layer_local_y <= 830
@@ -1146,9 +1225,17 @@ module CrymbleUI
           end
         {% end %}
 
-        # needs_fresh_background: widget exited viewport, layer has widget's OLD pixels (Bug 2)
-        # Fill with background color instead of blit_region (can't trust layer content).
-        if widget.needs_fresh_background?
+        # Auto-detect stale background: widget moved, is new, or was explicitly flagged.
+        # If layer position changed since last render (or never rendered), layer content
+        # at current position can't be trusted → fill with background color.
+        # EXCEPTION: When buffer_just_cleared, layer content is guaranteed fresh (cleared +
+        # parent-first rendering). New/moved widgets can safely capture from the layer.
+        # Without this, child widgets inside colored containers get flat grey backgrounds
+        # instead of inheriting the parent's fill color.
+        current_layer_pos = {layer_local_x, layer_local_y}
+        use_stale_background = widget.needs_fresh_background? ||
+          (widget.last_rendered_layer_position != current_layer_pos && !layer.buffer_just_cleared)
+        if use_stale_background
           background_backend.clear(layer.background_color)
           widget.needs_fresh_background = false
         else
@@ -1227,6 +1314,7 @@ module CrymbleUI
       # Mark widget as having rendered to layer at current bounds
       # This prevents re-capturing background later (would capture own content!)
       widget.mark_rendered_to_layer!
+      widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
     end
 
     # Execute primitive on widget's own backend (no coordinate offset needed)
@@ -1250,6 +1338,8 @@ module CrymbleUI
         backend.draw_circle(primitive.center.x, primitive.center.y, primitive.radius, primitive.color, primitive.fill)
       when FillTriangle
         backend.fill_triangle(primitive.p1, primitive.p2, primitive.p3, primitive.color)
+      when DrawImage
+        backend.draw_image(primitive.path, primitive.bounds, primitive.color)
       end
     end
 
@@ -1323,6 +1413,14 @@ module CrymbleUI
         backend.push_clip(offset_rect)
       when PopClip
         backend.pop_clip
+      when DrawImage
+        offset_bounds = Rect.new(
+          primitive.bounds.x + offset_x,
+          primitive.bounds.y + offset_y,
+          primitive.bounds.width,
+          primitive.bounds.height
+        )
+        backend.draw_image(primitive.path, offset_bounds, primitive.color)
       end
     end
 
@@ -1331,6 +1429,12 @@ module CrymbleUI
     # should be rendered by that layer, not the parent layer
     # target_layer: the layer we're collecting widgets for (to detect layer boundaries)
     private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget), target_layer : Layer)
+      # Skip zero-size widgets and all their descendants.
+      # When a parent collapses (e.g., TreeNode), it zeros children bounds,
+      # but grandchildren retain old bounds from previous layout.
+      # Without this check, grandchildren render as "ghost" content at stale positions.
+      return if widget.bounds.width <= 0.0 || widget.bounds.height <= 0.0
+
       result << widget
       {% if flag?(:DEBUG_COLLECT) %}
         puts "  [COLLECT] #{widget.class.name.split("::").last}##{widget.path_id} to layer '#{target_layer.id}'"
@@ -1472,6 +1576,46 @@ module CrymbleUI
       layers
     end
 
+    # Sort layers for compositing: group by parent panel z-index, then by layer z-index
+    # This prevents cross-panel layer interleaving
+    private def sort_layers_for_compositing(layers : Array(Layer)) : Array(Layer)
+      layers.sort! do |a, b|
+        a_panel_z = find_panel_z_index(a)
+        b_panel_z = find_panel_z_index(b)
+        if a_panel_z != b_panel_z
+          a_panel_z <=> b_panel_z
+        else
+          a.z_index <=> b.z_index
+        end
+      end
+    end
+
+    # Find the z-index of the parent WindowPanel for a layer
+    # Layers without a WindowPanel ancestor (root content, overlays) use:
+    # - Int32::MIN for root layer (Window content, below all panels)
+    # - Int32::MAX for overlays (popups, tooltips, drag ghost, above all panels)
+    private def find_panel_z_index(layer : Layer) : Int32
+      widget = layer.owner_widget
+      # Ownerless layers (drag ghost, highlight) must render above all panels
+      return Int32::MAX if widget.nil?
+      while widget
+        if widget.is_a?(WindowPanel)
+          return widget.z_index
+        end
+        # LayerBox (from aligned_layer/layer DSL) owns its own z-ordering
+        if widget.is_a?(LayerBox)
+          return widget.z_index
+        end
+        # Overlays are children of Window but not inside any WindowPanel
+        # They must composite ABOVE all panels
+        if widget.is_a?(Popup)
+          return Int32::MAX
+        end
+        widget = widget.parent
+      end
+      Int32::MIN
+    end
+
     # Recursively collect layers from layer tree
     private def collect_layers_recursive(layer : Layer) : Array(Layer)
       layers = [layer]
@@ -1538,6 +1682,8 @@ module CrymbleUI
                    all_widgets.select { |w|
                      next true if dirty_set.includes?(w)
                      next false unless w.widget_backend.nil?
+                     # Skip widgets with overflow bounds
+                     next false if w.bounds.width > 16384.0 || w.bounds.height > 16384.0
                      # Check if widget is within buffer bounds
                      bx = w.bounds.x.to_i - buf_origin.x.to_i
                      by = w.bounds.y.to_i - buf_origin.y.to_i

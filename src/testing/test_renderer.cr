@@ -33,6 +33,9 @@ module CrymbleUI
       # Cursor tracking
       getter current_cursor : CursorType = CursorType::Arrow
 
+      # Window background color (synced from app each frame)
+      property background_color : Color = Color.new(255, 255, 255, 255)
+
       # Layout tracking (delegates to Widget class variable)
       def layout_count : Int32
         Widget.layout_count
@@ -136,11 +139,21 @@ module CrymbleUI
         @render_frame_count += 1
         @app = app  # Store for event simulation methods
 
+        # Sync background color from app (license-based coloring, etc.)
+        @background_color = app.app_background_color || Color.new(255, 255, 255, 255)
+
         # Clear widget backends before each frame
         # Backends will re-register as widgets render, ensuring we only count active backends
         @widget_backends.clear
 
         begin
+          # Process pending rebuild (matches SFML event loop behavior).
+          # Without this, headless tests skip the reconciliation path,
+          # hiding bugs that only manifest after widget tree rebuild.
+          if app.needs_rebuild?
+            app.rebuild
+          end
+
           # Prepare layout (increments layout_count if layout happens)
           window_size = Size.new(@backend.width.to_f, @backend.height.to_f)
           did_layout = app.prepare_layout(window_size)
@@ -286,9 +299,9 @@ module CrymbleUI
         @backend_blit_count += 1
       end
 
-      # Clear window buffer to white
+      # Clear window buffer to background color
       def clear_window_background
-        @backend.clear(Color.new(255, 255, 255, 255))
+        @backend.clear(@background_color)
       end
 
       # Instrumentation: Track compositor calls

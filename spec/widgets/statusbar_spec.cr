@@ -1,4 +1,5 @@
 require "../spec_helper"
+require "../../src/testing/test_renderer"
 
 # Test app for hover state testing
 class StatusBarHoverTestApp < CrymbleUI::App
@@ -240,6 +241,137 @@ describe CrymbleUI::StatusBar do
             text.size.should eq(14.0)
         end
 
+    end
+
+    describe "hover callback immediate redraw" do
+        it "event loop detects dirty layer after hover callback updates statusbar" do
+            renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+            app = StatusBarHoverTestApp.new
+            app.build_tree
+
+            btn = app.find("test_btn").not_nil!
+            btn.hover_text = "Hovering button"
+
+            # Wire hover callback that updates statusbar directly (like EmbraceApp does)
+            app.on_hover_change do
+                sb = app.find("status").try &.as?(CrymbleUI::StatusBar)
+                if sb && (hw = app.hovered_widget) && (ht = hw.hover_text)
+                    sb.text = ht
+                end
+            end
+
+            renderer.settle_rendering(app)
+
+            # Simulate hover to button
+            btn_bounds = btn.absolute_bounds
+            btn_center = CrymbleUI::Vec2.new(
+                btn_bounds.x + btn_bounds.width / 2.0,
+                btn_bounds.y + btn_bounds.height / 2.0
+            )
+            needs_redraw = app.update_hover(btn_center)
+
+            # Callback ran synchronously — statusbar text should be updated
+            sb = app.find("status").not_nil!.as(CrymbleUI::StatusBar)
+            sb.text.should eq("Hovering button")
+
+            # The SFML event loop timer path uses update_hover's return as
+            # its ONLY break condition. It must ALSO check layer dirty state.
+            root = app.root.not_nil!
+            layer_dirty = CrymbleUI::Layer.any_needs_render?(root)
+
+            # At least one of these must be true for the event loop to render:
+            (needs_redraw || layer_dirty).should be_true
+        end
+
+        it "event loop detects dirty layer when hovered widget didn't change" do
+            renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+            app = StatusBarHoverTestApp.new
+            app.build_tree
+
+            btn = app.find("test_btn").not_nil!
+            btn.hover_text = "Hovering button"
+
+            app.on_hover_change do
+                sb = app.find("status").try &.as?(CrymbleUI::StatusBar)
+                if sb && (hw = app.hovered_widget) && (ht = hw.hover_text)
+                    sb.text = ht
+                end
+            end
+
+            renderer.settle_rendering(app)
+
+            # First hover — moves to button (hover_changed=true)
+            btn_bounds = btn.absolute_bounds
+            btn_center = CrymbleUI::Vec2.new(
+                btn_bounds.x + btn_bounds.width / 2.0,
+                btn_bounds.y + btn_bounds.height / 2.0
+            )
+            app.update_hover(btn_center)
+            renderer.render_frame(app)
+
+            # Second hover — same widget, different position (hover_changed=false)
+            # Callback still fires, but statusbar text is same so no re-mark
+            # Change hover_text to simulate position-dependent text change
+            btn.hover_text = "Cell (2,3)"
+            nearby = CrymbleUI::Vec2.new(btn_center.x + 1.0, btn_center.y)
+            needs_redraw = app.update_hover(nearby)
+
+            # update_hover returns false (same widget) — this is the event loop's
+            # sole break condition in the timer sleep loop
+            needs_redraw.should be_false
+
+            # But the callback dirtied the statusbar layer — event loop must detect this
+            root = app.root.not_nil!
+            CrymbleUI::Layer.any_needs_render?(root).should be_true
+        end
+    end
+
+    describe "hover callback after rebuild" do
+        it "hover callback updates statusbar after rebuild (no stale cache)" do
+            renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+            app = StatusBarHoverTestApp.new
+            app.build_tree
+
+            btn = app.find("test_btn").not_nil!
+            btn.hover_text = "Hovering button"
+
+            # Use find() each time (not caching) — the correct pattern
+            app.on_hover_change do
+                sb = app.find("status").try &.as?(CrymbleUI::StatusBar)
+                if sb && (hw = app.hovered_widget) && (ht = hw.hover_text)
+                    sb.text = ht
+                end
+            end
+
+            renderer.settle_rendering(app)
+
+            # Hover works initially
+            btn_bounds = btn.absolute_bounds
+            btn_center = CrymbleUI::Vec2.new(
+                btn_bounds.x + btn_bounds.width / 2.0,
+                btn_bounds.y + btn_bounds.height / 2.0
+            )
+            app.update_hover(btn_center)
+            app.find("status").not_nil!.as(CrymbleUI::StatusBar).text.should eq("Hovering button")
+
+            # Trigger rebuild (like creating a new shape)
+            app.clicks = 1  # state change → request_rebuild
+            app.rebuild
+            renderer.render_frame(app)
+
+            # Re-find button in new tree and hover
+            btn = app.find("test_btn").not_nil!
+            btn.hover_text = "After rebuild"
+            btn_bounds = btn.absolute_bounds
+            btn_center = CrymbleUI::Vec2.new(
+                btn_bounds.x + btn_bounds.width / 2.0,
+                btn_bounds.y + btn_bounds.height / 2.0
+            )
+            app.update_hover(btn_center)
+
+            # The VISIBLE statusbar (new instance) should have the hover text
+            app.find("status").not_nil!.as(CrymbleUI::StatusBar).text.should eq("After rebuild")
+        end
     end
 
     describe "primitive caching" do

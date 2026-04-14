@@ -1,0 +1,258 @@
+require "../core/widget"
+require "../core/types"
+require "../core/font_scalable"
+require "../dsl/primitive_builder"
+
+module CrymbleUI
+  # Internal header widget for TreeNode - renders the triangle indicator and header text.
+  # This is a leaf widget (no children) so its widget_backend only covers the header area,
+  # preventing the full-bounds overwrite that occurred when TreeNode rendered its own primitives.
+  class TreeNodeHeader < Widget
+    include PrimitiveBuilder
+    include FontScalable
+
+    TRIANGLE_SIZE = TreeNode::TRIANGLE_SIZE
+    INDENT = TreeNode::INDENT
+    HEADER_PADDING = TreeNode::HEADER_PADDING
+
+    @header : String
+    @expanded : Bool
+    @text_color : Color
+    @indicator_color : Color
+
+    def initialize(
+      @header : String,
+      @expanded : Bool,
+      font_scale : Int32 = 0,
+      @text_color : Color = Theme.current.text_default,
+      @indicator_color : Color = Theme.current.text_default
+    )
+      @font_scale = font_scale
+      super(id: nil)
+    end
+
+    def label : String?
+      "header"
+    end
+
+    def expanded=(@expanded : Bool)
+    end
+
+    def measure(constraints : BoxConstraints) : Size
+      header_size = measure_text(@header, font_size)
+      header_height = header_size.height + HEADER_PADDING * 2
+      header_width = INDENT + header_size.width + HEADER_PADDING * 2
+      constraints.constrain(Size.new(header_width, header_height))
+    end
+
+    def perform_layout(constraints : BoxConstraints, position : Vec2)
+      size = measure(constraints)
+      @bounds = Rect.new(position, size)
+      mark_needs_render
+    end
+
+    def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+      header_size = measure_text(@header, font_size)
+      header_height = header_size.height + HEADER_PADDING * 2
+
+      # Triangle center position
+      tri_cx = TRIANGLE_SIZE + 2.0
+      tri_cy = header_height / 2.0
+
+      primitives do
+        if @expanded
+          # Downward-pointing triangle (expanded)
+          fill_triangle(
+            Vec2.new(tri_cx - TRIANGLE_SIZE/2, tri_cy - TRIANGLE_SIZE/3),
+            Vec2.new(tri_cx + TRIANGLE_SIZE/2, tri_cy - TRIANGLE_SIZE/3),
+            Vec2.new(tri_cx, tri_cy + TRIANGLE_SIZE/2),
+            @indicator_color
+          )
+        else
+          # Right-pointing triangle (collapsed)
+          fill_triangle(
+            Vec2.new(tri_cx - TRIANGLE_SIZE/3, tri_cy - TRIANGLE_SIZE/2),
+            Vec2.new(tri_cx + TRIANGLE_SIZE/2, tri_cy),
+            Vec2.new(tri_cx - TRIANGLE_SIZE/3, tri_cy + TRIANGLE_SIZE/2),
+            @indicator_color
+          )
+        end
+
+        # Header text
+        text_x = INDENT
+        text_y = HEADER_PADDING
+        draw_text(@header, Vec2.new(text_x, text_y), @text_color, @font_scale)
+      end
+    end
+
+    # Clicking the header toggles the parent TreeNode
+    def on_click
+      if tree_node = parent.as?(TreeNode)
+        tree_node.toggle
+      end
+    end
+
+    # Header is clickable
+    def focusable? : Bool
+      true
+    end
+
+    def trigger_click
+      on_click
+    end
+  end
+
+  # Collapsible tree node widget with triangle indicator and header text
+  #
+  # TreeNode is a PURE CONTAINER - it has no to_primitives of its own.
+  # The header (triangle + text) is rendered by a TreeNodeHeader child widget.
+  # This prevents the full-bounds widget_backend overwrite bug where parent blit
+  # would overwrite children pixels on selective re-render.
+  #
+  # Usage:
+  #   tree_node("Root", expanded: true) do
+  #     text("Child 1")
+  #     tree_node("Nested") do
+  #       text("Child 2")
+  #     end
+  #   end
+  class TreeNode < Widget
+    include FontScalable
+
+    INDENT = 20.0
+    TRIANGLE_SIZE = 8.0
+    HEADER_PADDING = 4.0
+
+    # Header text
+    @header : String
+
+    # Whether the node is expanded (children visible)
+    @[Reconcile]
+    property expanded : Bool
+
+    # Text color
+    @text_color : Color
+
+    # Triangle/indicator color
+    @indicator_color : Color
+
+    # Click callback for toggle
+    property on_toggle_callback : Proc(Nil)?
+
+    # The header child widget (always first child)
+    @header_widget : TreeNodeHeader
+
+    def initialize(
+      @header : String,
+      @expanded : Bool = false,
+      id : String? = nil,
+      font_scale : Int32 = 0,
+      @text_color : Color = Theme.current.text_default,
+      @indicator_color : Color = Theme.current.text_default,
+      on_toggle : Proc(Nil)? = nil
+    )
+      @font_scale = font_scale
+      super(id: id)
+      @on_toggle_callback = on_toggle
+
+      # Create header as first child - it renders the triangle + header text
+      @header_widget = TreeNodeHeader.new(
+        @header,
+        @expanded,
+        font_scale: font_scale,
+        text_color: @text_color,
+        indicator_color: @indicator_color
+      )
+      add_child(@header_widget)
+    end
+
+    # Override label for path_id generation
+    def label : String?
+      @header
+    end
+
+    # DSL children (excludes the internal header widget)
+    def dsl_children : Array(Widget)
+      @children.size > 1 ? @children[1..] : [] of Widget
+    end
+
+    # Measure header + children (if expanded)
+    def measure(constraints : BoxConstraints) : Size
+      Widget.increment_measure_count
+      header_size = @header_widget.measure(constraints)
+      header_height = header_size.height
+      header_width = header_size.width
+
+      total_height = header_height
+      max_width = header_width
+
+      if @expanded
+        dsl_children.each do |child|
+          child_constraints = BoxConstraints.loose(Size.new(
+            (constraints.max_width - INDENT).clamp(0.0, constraints.max_width),
+            constraints.max_height
+          ))
+          child_size = child.measure(child_constraints)
+          total_height += child_size.height
+          max_width = Math.max(max_width, child_size.width + INDENT)
+        end
+      end
+
+      constraints.constrain(Size.new(max_width, total_height))
+    end
+
+    # Layout header and children
+    def perform_layout(constraints : BoxConstraints, position : Vec2)
+      size = measure(constraints)
+      @bounds = Rect.new(position, size)
+
+      # Layout header (always visible, first child)
+      header_constraints = BoxConstraints.loose(Size.new(size.width, size.height))
+      @header_widget.layout(header_constraints, Vec2.new(0.0, 0.0))
+      header_height = @header_widget.bounds.height
+
+      # Sync expanded state to header for triangle rendering
+      @header_widget.expanded = @expanded
+
+      # Layout DSL children below header with indentation (positions relative to TreeNode)
+      if @expanded
+        y_offset = header_height
+        remaining_height = size.height - header_height
+        dsl_children.each do |child|
+          child_constraints = BoxConstraints.loose(Size.new(
+            (size.width - INDENT).clamp(0.0, size.width),
+            remaining_height
+          ))
+          child.layout(child_constraints, Vec2.new(INDENT, y_offset))
+          child_size = child.measure(child_constraints)
+          y_offset += child_size.height
+          remaining_height = (remaining_height - child_size.height).clamp(0.0, Float64::MAX)
+        end
+      else
+        # Collapsed: reset dsl_children bounds to zero to prevent stale rendering.
+        # Without this, children retain old bounds from the expanded state and get
+        # rendered at stale positions during the next full_render pass.
+        # Also invalidate constraints so re-expand triggers full perform_layout
+        # (otherwise can_skip_layout? returns true → size stays 0×0).
+        dsl_children.each(&.zero_bounds!)
+      end
+    end
+
+    # Pure container - no primitives (header renders via TreeNodeHeader child)
+    def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+      [] of DrawPrimitive
+    end
+
+    # Toggle expansion (called by TreeNodeHeader.on_click)
+    def toggle
+      @expanded = !@expanded
+      @on_toggle_callback.try &.call
+      mark_needs_layout
+    end
+
+    # TreeNode itself is not focusable/clickable — only TreeNodeHeader handles toggle
+    def focusable? : Bool
+      false
+    end
+  end
+end

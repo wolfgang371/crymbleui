@@ -22,6 +22,7 @@ module CrymbleUI
         @timers : Array(Timer)
         @next_id : Int32
         @redraw_callback : Proc(Nil)?
+        @cancelled_ids : Set(Int32) = Set(Int32).new
 
         def initialize
             @timers = [] of Timer
@@ -55,6 +56,7 @@ module CrymbleUI
         # Cancel a timer by ID
         def cancel(timer_id : Int32)
             @timers.reject! { |t| t.id == timer_id }
+            @cancelled_ids.add(timer_id)
         end
 
         # Get time until next timer fires
@@ -89,12 +91,13 @@ module CrymbleUI
             @timers.shift(expired.size)
 
             # Fire callbacks and reschedule repeating timers
+            @cancelled_ids.clear
             expired.each do |timer|
                 timer.callback.call
                 fired_count += 1
 
-                # Reschedule if repeating
-                if timer.repeating? && timer.interval
+                # Reschedule if repeating — but skip if callback self-cancelled
+                if timer.repeating? && timer.interval && !@cancelled_ids.includes?(timer.id)
                     timer.wake_time = Time.instant + timer.interval.not_nil!
                     @timers << timer
                 end

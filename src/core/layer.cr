@@ -40,9 +40,25 @@ module CrymbleUI
     property z_index : Int32
 
     # Spatial properties
-    property bounds : Rect
+    # bounds is pull-based: computed from owner_widget when available,
+    # falls back to @cached_bounds for ownerless layers (drag ghost, initial creation)
+    @cached_bounds : Rect
     property opacity : Float64 # 0.0 - 1.0
     property blend_mode : BlendMode
+
+    # Pull-based bounds: ask owner widget for current bounds, fall back to cached
+    def bounds : Rect
+      if (owner = @owner_widget) && owner.responds_to?(:compute_bounds_for_layer)
+        owner.compute_bounds_for_layer(self)
+      else
+        @cached_bounds
+      end
+    end
+
+    # Setter: updates cached_bounds (used for drag ghost layer and initial creation)
+    def bounds=(value : Rect)
+      @cached_bounds = value
+    end
 
     # Background color for buffer clearing (panel content area, over-allocated texture space)
     # Used instead of rendering full-panel background FillRect primitive
@@ -55,6 +71,10 @@ module CrymbleUI
     # Track bounds from last render for change detection
     @last_rendered_bounds : Rect?
 
+    # Baseline bounds captured at resize start for apply_resize_clip.
+    # Prevents cumulative drift when last_rendered_bounds updates every frame.
+    property resize_baseline : Rect?
+
     # Tree structure
     property parent : Layer?
     property children : Array(Layer)
@@ -66,6 +86,10 @@ module CrymbleUI
     # Blit-plan: when set, render_layer uses fast path (clear + blit cached textures)
     # instead of full widget render pipeline. Used for sticky layers on scroll.
     property blit_plan : Array(BlitEntry)? = nil
+    # Widgets to render normally AFTER blit-plan blits (e.g., CachePolicy::Never rulers).
+    # These are rendered through the full render_single_widget path after the blit-plan
+    # handles data cells. This enables hybrid mode: blit cached cells + render fresh rulers.
+    property blit_plan_render_widgets : Array(Widget)? = nil
 
     # State
     property state : WidgetState
@@ -79,7 +103,30 @@ module CrymbleUI
     # - scroll_offset tracks viewport position in content space
     # - buffer_origin tracks which content coord is at buffer position (0,0)
     # - Enables O(1) scrolling (only render newly visible widgets, cached ones are blitted)
-    property scroll_offset : Vec2 = Vec2.zero
+    @scroll_offset : Vec2 = Vec2.zero
+
+    def scroll_offset : Vec2
+      @scroll_offset
+    end
+
+    def scroll_offset=(value : Vec2)
+      return if value == @scroll_offset
+      @scroll_offset = value
+      # Auto-mark viewport_cache layers for render when scroll changes,
+      # so handle_viewport_cache_scroll runs and recenters buffer if needed.
+      # Without this, scrollbar drag/wheel/arrow would set scroll_offset
+      # without triggering buffer recenter — content appears stuck.
+      if @viewport_cache
+        if owner = @owner_widget
+          mark_needs_render(owner)
+        end
+      end
+    end
+
+    # Skip clear on rebuild — for layers with CachePolicy::Never widgets that regenerate fresh.
+    # Without this, app.rebuild clears ALL layers including overlays (expensive, unnecessary).
+    property skip_rebuild_clear : Bool = false
+
     property viewport_cache : Bool = false
     property cache_extent : Float64 = 0.0     # Extra pixels to pre-render beyond viewport
     property buffer_origin : Vec2 = Vec2.zero # Content coord at buffer position (0,0)
@@ -90,7 +137,7 @@ module CrymbleUI
     # NeedsLayout is heavier than needed (forces sibling validation on first_render).
     property needs_clear : Bool = false
 
-    def initialize(@id : String, @bounds : Rect, @z_index : Int32 = 0, @background_color : Color = Color.new(0, 0, 0, 0), @owner_widget : Widget? = nil)
+    def initialize(@id : String, @cached_bounds : Rect, @z_index : Int32 = 0, @background_color : Color = Color.new(0, 0, 0, 0), @owner_widget : Widget? = nil)
       @opacity = 1.0
       @blend_mode = BlendMode::Normal
       @parent = nil
@@ -162,6 +209,35 @@ module CrymbleUI
     # Get current registry size (for debugging/metrics)
     def self.registry_size : Int32
       @@all_layers.size
+    end
+
+    # Remove orphaned widgets from all active layers.
+    # After rebuild, reconciled layers may retain widgets from the old tree
+    # (e.g., CursorOverlayWidget added to layer.widgets but not @[Reconcile]d).
+    # New widgets get appended, old ones accumulate → stale rendering.
+    def self.cleanup_orphaned_widgets(root : Widget)
+      active_layers(root).each do |layer|
+        original_size = layer.widgets.size
+        layer.widgets.reject! do |widget|
+          # Walk up parent chain — widget must be reachable from root
+          current : Widget? = widget
+          in_tree = false
+          while current
+            if current == root
+              in_tree = true
+              break
+            end
+            current = current.parent
+          end
+          !in_tree
+        end
+        {% if flag?(:DEBUG_RENDER) %}
+          removed = original_size - layer.widgets.size
+          if removed > 0
+            puts "[WIDGET CLEANUP] Layer '#{layer.id}': removed #{removed} orphaned widgets (#{layer.widgets.size} remain)"
+          end
+        {% end %}
+      end
     end
 
     # Check if this layer's owner widget is reachable from root
@@ -237,19 +313,26 @@ module CrymbleUI
       @state = WidgetState::Clean
       @dirty_widgets.clear
       @needs_clear = false
-      @last_rendered_bounds = @bounds # Track bounds for change detection
+      @last_rendered_bounds = bounds # Track bounds for change detection
     end
 
     # Check if bounds changed since last render
     def bounds_changed? : Bool
-      @last_rendered_bounds != @bounds
+      @last_rendered_bounds != bounds
     end
 
     # Check if SIZE changed (not just position)
     def size_changed? : Bool
       last = @last_rendered_bounds
       return false if last.nil? # First render, not a "change"
-      last.width != @bounds.width || last.height != @bounds.height
+      current = bounds
+      last.width != current.width || last.height != current.height
+    end
+
+    # Check if current backend is large enough for current bounds
+    def backend_fits_bounds? : Bool
+      return false unless b = @backend
+      b.width >= bounds.width.ceil.to_i && b.height >= bounds.height.ceil.to_i
     end
 
     # Get last rendered bounds (for debugging)
@@ -270,7 +353,7 @@ module CrymbleUI
     # Restore first_render state (called when backend resized but content preserved)
     # Sets last_rendered_bounds to current bounds to indicate content exists
     def restore_first_render_state
-      @last_rendered_bounds = @bounds.dup
+      @last_rendered_bounds = bounds.dup
     end
 
     # Reset layer for recovery after exception (graceful degradation)
@@ -301,8 +384,9 @@ module CrymbleUI
     # Calculate buffer size for viewport_cache layers including cache extent
     # Buffer = viewport + 2×cache_extent (margin on each side)
     def calculate_buffer_size_with_cache : {Int32, Int32}
-      width = (@bounds.width + 2 * @cache_extent).ceil.to_i
-      height = (@bounds.height + 2 * @cache_extent).ceil.to_i
+      current = bounds
+      width = (current.width + 2 * @cache_extent).ceil.to_i
+      height = (current.height + 2 * @cache_extent).ceil.to_i
       {width, height}
     end
 
@@ -335,7 +419,8 @@ module CrymbleUI
     # Get the viewport rectangle in content space
     # This represents what portion of the content is currently visible
     def viewport_rect : Rect
-      Rect.new(@scroll_offset.x, @scroll_offset.y, @bounds.width, @bounds.height)
+      current = bounds
+      Rect.new(@scroll_offset.x, @scroll_offset.y, current.width, current.height)
     end
 
     # Check if a widget (by its bounds in content space) is visible in the viewport
@@ -367,7 +452,7 @@ module CrymbleUI
 
     # Concise inspect for readable spec output (prevents dumping widget arrays)
     def inspect(io : IO)
-      io << "Layer(id=#{@id.inspect}, z=#{@z_index}, bounds=#{@bounds}, widgets=#{@widgets.size})"
+      io << "Layer(id=#{@id.inspect}, z=#{@z_index}, bounds=#{bounds}, widgets=#{@widgets.size})"
     end
   end
 end

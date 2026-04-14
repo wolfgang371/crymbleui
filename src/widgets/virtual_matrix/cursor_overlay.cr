@@ -60,20 +60,20 @@ module CrymbleUI
         delta = @matrix.cursor_highlight_delta.abs.clamp(0, 255)
         band_delta = (delta * 1.5).to_i.clamp(0, 255)
         flash_delta = (delta * 2.5).to_i.clamp(0, 255)
-        band_color = Color.new(255_u8, 255_u8, 255_u8, band_delta.to_u8)
-        cell_flash_color = Color.new(255_u8, 255_u8, 255_u8, flash_delta.to_u8)
+        band_base = Theme.current.grid_cursor_band
+        flash_base = Theme.current.grid_cursor_flash
+        band_color = Color.new(band_base.r, band_base.g, band_base.b, band_delta.to_u8)
+        cell_flash_color = Color.new(flash_base.r, flash_base.g, flash_base.b, flash_delta.to_u8)
 
         # Sticky region dimensions for clipping (includes ruler space)
         sticky_h = @matrix.sticky_row_height_pixels + @matrix.ruler_row_height_pixels
         sticky_w = @matrix.sticky_col_width_pixels + @matrix.ruler_col_width_pixels
 
-        # Non-sticky bands must be at least partially visible beyond sticky area
-        unless is_sticky_row
-          return [] of DrawPrimitive unless band_y + row_h > sticky_h && band_y < bounds.height
-        end
-        unless is_sticky_col
-          return [] of DrawPrimitive unless band_x + col_w > sticky_w && band_x < bounds.width
-        end
+        # Check visibility of each band independently (don't kill both when one is off-screen)
+        row_visible = is_sticky_row || (band_y + row_h > sticky_h && band_y < bounds.height)
+        col_visible = is_sticky_col || (band_x + col_w > sticky_w && band_x < bounds.width)
+
+        return [] of DrawPrimitive unless row_visible || col_visible
 
         # Clamp band positions to sticky boundary (don't draw behind sticky area)
         effective_band_y = is_sticky_row ? band_y : {band_y, sticky_h}.max
@@ -81,23 +81,69 @@ module CrymbleUI
         effective_row_h = row_h - (effective_band_y - band_y)
         effective_col_w = col_w - (effective_band_x - band_x)
 
+        # Clamp bands to actual data extent (prevents visible darkening beyond last row/col
+        # since subtractive blending on the content background creates gray stripes).
+        # Use actual layer bounds (not widget bounds) for robustness during resize transitions.
+        overlay_h = @matrix.cursor_overlay_layer.try(&.bounds.height) || bounds.height
+        overlay_w = @matrix.cursor_overlay_layer.try(&.bounds.width) || bounds.width
+        total_data_h = ruler_y + row_sizes.sum(&.to_f64) - scroll.y
+        total_data_w = ruler_x + col_sizes.sum(&.to_f64) - scroll.x
+        data_bottom = {total_data_h, overlay_h}.min
+        data_right = {total_data_w, overlay_w}.min
+
         # Col band: extends into sticky row area to highlight column header,
         # UNLESS cursor is on a sticky col (avoid header-highlighting-header).
-        # effective_band_x clamping prevents bleeding into sticky col area.
         col_band_y = is_sticky_col ? sticky_h : 0.0
-        col_band_h = bounds.height - col_band_y
+        col_band_h = {data_bottom - col_band_y, 0.0}.max
 
         # Row band: extends into sticky col area to highlight row label,
         # UNLESS cursor is on a sticky row (avoid header-highlighting-header).
-        # effective_band_y clamping prevents bleeding into sticky row area.
         row_band_x = is_sticky_row ? sticky_w : 0.0
-        row_band_w = bounds.width - row_band_x
+        row_band_w = {data_right - row_band_x, 0.0}.max
+
+        # Drag highlight color (reddish, matching ImGui's CellDragDropColor)
+        drag_color = Color.new(204_u8, 102_u8, 102_u8, 128_u8)
 
         primitives do
-          fill_rect(Rect.new(row_band_x, effective_band_y, row_band_w, effective_row_h), band_color)
-          fill_rect(Rect.new(effective_band_x, col_band_y, effective_col_w, col_band_h), band_color)
-          if @flash_on
+          if row_visible
+            fill_rect(Rect.new(row_band_x, effective_band_y, row_band_w, effective_row_h), band_color)
+          end
+          if col_visible
+            fill_rect(Rect.new(effective_band_x, col_band_y, effective_col_w, col_band_h), band_color)
+          end
+          if row_visible && col_visible && @flash_on
             fill_rect(Rect.new(effective_band_x, effective_band_y, effective_col_w, effective_row_h), cell_flash_color)
+          end
+
+          # Drag source/target highlights (bounding box regions)
+          {@matrix.@drag_source_cell, @matrix.@drag_target_cell}.each do |drag_cell|
+            next unless drag_cell
+            if adapter = @matrix.adapter
+              bb = adapter.cell_get_drag_bounding_box(drag_cell[0], drag_cell[1])
+              min_r, min_c = bb[0]
+              max_r, max_c = bb[1]
+              bb_y = ruler_y + (0...min_r).sum { |r| row_sizes[r] }.to_f64 - scroll.y
+              bb_x = ruler_x + (0...min_c).sum { |c| col_sizes[c] }.to_f64 - scroll.x
+              bb_h = (min_r..max_r).sum { |r| row_sizes[r] }.to_f64
+              bb_w = (min_c..max_c).sum { |c| col_sizes[c] }.to_f64
+              fill_rect(Rect.new(bb_x, bb_y, bb_w, bb_h), drag_color)
+            end
+          end
+
+          # Change animation: white borders on cells with active highlights (skip when idle)
+          if (adapter = @matrix.adapter) && adapter.has_active_highlights?
+            @matrix.@visible_rows.each do |r|
+              @matrix.@visible_cols.each do |c|
+                alpha = adapter.cell_highlight_alpha(r, c)
+                next if alpha == 0
+                cell_y = ruler_y + (0...r).sum { |ri| row_sizes[ri] }.to_f64 - scroll.y
+                cell_x = ruler_x + (0...c).sum { |ci| col_sizes[ci] }.to_f64 - scroll.x
+                cell_h = r < row_sizes.size ? row_sizes[r].to_f64 : 0.0
+                cell_w = c < col_sizes.size ? col_sizes[c].to_f64 : 0.0
+                glow_color = Color.new(255_u8, 255_u8, 255_u8, (alpha // 2).to_u8)
+                fill_rect(Rect.new(cell_x, cell_y, cell_w, cell_h), glow_color)
+              end
+            end
           end
         end
       end

@@ -87,4 +87,16 @@ module CrymbleUI
     def initialize
     end
   end
+
+  # Draw an image from a file path at the given bounds
+  # The renderer handles texture loading/caching internally
+  # Color is used for tinting/alpha (White = no tint)
+  struct DrawImage < DrawPrimitive
+    property path : String
+    property bounds : Rect
+    property color : Color
+
+    def initialize(@path : String, @bounds : Rect, @color : Color = Color.white)
+    end
+  end
 end

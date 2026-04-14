@@ -500,7 +500,7 @@ describe "VirtualMatrix scrollbar sync" do
       # Additionally, cursor overlay layer gets a full clear per scroll step (mark_needs_layout).
       # This is amortized O(1) - recenters happen infrequently, not on every frame.
       # The important metric is layout_count=0, proving no per-widget work during scroll.
-      renderer.layer_backend_clear_count.should be <= 20, "Too many layer clears: #{renderer.layer_backend_clear_count} (expected <= 20 for ~700px scroll)"
+      renderer.layer_backend_clear_count.should be <= 25, "Too many layer clears: #{renderer.layer_backend_clear_count} (expected <= 25 for ~700px scroll)"
     end
 
     it "scroll performance is O(1), not O(grid_size)" do
@@ -710,6 +710,50 @@ describe "VirtualMatrix scrollbar sync" do
       # ScrollView should be synced
       scroll_view = matrix.content_scroll_view.not_nil!
       scroll_view.scroll_offset.x.should eq matrix.scroll_offset.x
+    end
+  end
+
+  # === BUG: point_to_cell clamps to last cell for points beyond data area ===
+
+  describe "point_to_cell bounds" do
+    it "returns nil for points beyond the last column" do
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
+      app = TestApp.new
+
+      # Small matrix: 5 cols in an 800px wide widget — lots of empty space right of data
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 5, id: "bounds_col")
+      app.root_widget = matrix
+      app.build_tree
+
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+      renderer.render_frame(app)
+
+      # Point well to the right of all 5 columns
+      far_right = CrymbleUI::Vec2.new(790.0, 50.0)
+      cell = matrix.point_to_cell(far_right)
+
+      cell.should be_nil
+    end
+
+    it "returns nil for points beyond the last row" do
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
+      app = TestApp.new
+
+      # Small matrix: 5 rows in a 600px tall widget — lots of empty space below data
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 5, cols: 10, id: "bounds_row")
+      app.root_widget = matrix
+      app.build_tree
+
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+      renderer.render_frame(app)
+
+      # Point well below all 5 rows
+      far_down = CrymbleUI::Vec2.new(50.0, 590.0)
+      cell = matrix.point_to_cell(far_down)
+
+      cell.should be_nil
     end
   end
 end

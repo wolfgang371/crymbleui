@@ -27,7 +27,7 @@ module VirtualMatrixZoomHelper
   end
 end
 
-describe "VirtualMatrix zoom scaling" do
+describe "VirtualMatrix zoom scaling", tags: "slow" do
   describe "cell dimensions scale with zoom" do
     it "col_width_pixels increases at zoom 1.5" do
       _, _, matrix_100 = VirtualMatrixZoomHelper.make_matrix(zoom_steps: 0)
@@ -99,7 +99,7 @@ describe "VirtualMatrix zoom scaling" do
   end
 
   describe "scroll position preserved across zoom change" do
-    it "scroll offset scales proportionally on zoom change" do
+    it "scroll offset scales proportionally on zoom change", tags: "slow" do
       renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
       app = TestApp.new
       matrix = CrymbleUI::VirtualMatrix.new(rows: 100, cols: 20, id: "scroll_zoom")

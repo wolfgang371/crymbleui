@@ -7,6 +7,7 @@ require "../widgets/window_panel"
 require "../widgets/layer_box"
 require "../widgets/popup"
 require "../widgets/statusbar"
+require "../widgets/image"
 require "../widgets/checkbox"
 require "../widgets/menubar"
 require "../widgets/menu"
@@ -24,6 +25,7 @@ require "../widgets/combo_box_item"
 require "../widgets/combo_box"
 require "../layout/recursive_grid"
 require "../widgets/border_box"
+require "../widgets/tree_node"
 
 module CrymbleUI
     module DSL
@@ -308,6 +310,7 @@ module CrymbleUI
                 text_color : Color = Theme.current.button_text,
                 background_color : Color = Theme.current.button_background,
                 border_color : Color = Theme.current.button_border,
+                text_align : TextAlign = TextAlign::Center,
                 padding : Float64 = 10.0,
                 user_data : Hash(Symbol, String)? = nil,
                 &block : -> Nil
@@ -320,6 +323,7 @@ module CrymbleUI
                     text_color: text_color,
                     background_color: background_color,
                     border_color: border_color,
+                    text_align: text_align,
                     padding: padding,
                     &block
                 )
@@ -368,6 +372,14 @@ module CrymbleUI
                     height: height,
                     padding: padding
                 )
+                current_container.add_child(widget)
+                widget
+            end
+
+            # Create an image widget from a file path
+            def image(path : String, id : String? = nil, tint : Color = Color.white,
+                      width : Float64? = nil, height : Float64? = nil)
+                widget = Image.new(path, id: id, tint: tint, width: width, height: height)
                 current_container.add_child(widget)
                 widget
             end
@@ -975,10 +987,29 @@ module CrymbleUI
                 nil
             end
 
-            # Check if we're currently inside a MenuBar (for global shortcuts)
-            private def in_menubar? : Bool
-                return false unless stack = @container_stack
-                stack.any? { |widget| widget.is_a?(MenuBar) }
+            def tree_node(
+                header : String,
+                expanded : Bool = false,
+                id : String? = nil,
+                font_scale : Int32 = 0,
+                text_color : Color = Theme.current.text_default,
+                indicator_color : Color = Theme.current.text_default,
+                &block
+            )
+                ensure_container_stack
+                widget = TreeNode.new(
+                    header,
+                    expanded: expanded,
+                    id: id,
+                    font_scale: font_scale,
+                    text_color: text_color,
+                    indicator_color: indicator_color
+                )
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(widget)
+                end
+                with_container(widget, &block)
+                widget
             end
 
             # Register a keyboard shortcut with the ShortcutManager
@@ -996,15 +1027,12 @@ module CrymbleUI
                     return  # ShortcutManager not initialized yet, skip registration
                 end
 
-                # Determine context: Global (in menubar) or Panel (in panel)
-                if in_menubar?
-                    # MenuBar shortcuts are always global
-                    manager.register(shortcut_str, ShortcutContext::Global, nil, &block)
-                elsif panel = find_current_panel
-                    # Panel shortcuts are panel-specific
+                # Determine context: Panel (inside a WindowPanel) or Global (root-level)
+                if panel = find_current_panel
+                    # Inside a panel — panel-scoped (even if inside that panel's menubar)
                     manager.register(shortcut_str, ShortcutContext::Panel, panel.path_id, &block)
                 else
-                    # Default: global shortcuts (root window, not in a panel)
+                    # Root-level (including root menubar) — global
                     manager.register(shortcut_str, ShortcutContext::Global, nil, &block)
                 end
             end
@@ -1032,6 +1060,7 @@ module CrymbleUI
                 text_color : Color = Theme.current.button_text,
                 background_color : Color = Theme.current.button_background,
                 border_color : Color = Theme.current.button_border,
+                text_align : TextAlign = TextAlign::Center,
                 padding : Float64 = 10.0,
                 user_data : Hash(Symbol, String)? = nil,
                 &block : -> Nil
@@ -1044,6 +1073,7 @@ module CrymbleUI
                     text_color: text_color,
                     background_color: background_color,
                     border_color: border_color,
+                    text_align: text_align,
                     padding: padding,
                     &block
                 )

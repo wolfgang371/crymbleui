@@ -66,7 +66,7 @@ class FlashingButton < CrymbleUI::Button
   end
 end
 
-describe "Stress Panel Drag Performance (Realistic)" do
+describe "Stress Panel Drag Performance (Realistic)", tags: "slow" do
   it "drag performance is O(1) with CPUMonitor and 400 buttons (no timers active)" do
     renderer = CrymbleUI::Testing::TestRenderer.new(1200, 900)
     app = TestApp.new
@@ -233,7 +233,7 @@ describe "Stress Panel Drag Performance (Realistic)" do
   end
 end
 
-describe "Stress Panel Resize Performance (Realistic)" do
+describe "Stress Panel Resize Performance (Realistic)", tags: "slow" do
   it "resize performance is O(1) with 400 buttons" do
     renderer = CrymbleUI::Testing::TestRenderer.new(1200, 900)
     app = TestApp.new

@@ -2,7 +2,11 @@
 #
 # Shared by CrSFMLBackend and SFMLPaintContext for widget content clipping
 # Note: Requires X11 display - tests using these backends need DISPLAY set
-@[Link("GL")]
+{% if flag?(:win32) %}
+  @[Link("opengl32")]
+{% else %}
+  @[Link("GL")]
+{% end %}
 lib LibGL
   fun enable = glEnable(cap : UInt32)
   fun disable = glDisable(cap : UInt32)

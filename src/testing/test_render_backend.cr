@@ -167,11 +167,12 @@ module CrymbleUI
         y1 = bounds.y.to_i.clamp(0, @height - 1)
         x2 = (bounds.x + bounds.width).to_i.clamp(0, @width)
         y2 = (bounds.y + bounds.height).to_i.clamp(0, @height)
+        return if x1 >= x2 || y1 >= y2
 
+        cols = x2 - x1
         (y1...y2).each do |y|
-          (x1...x2).each do |x|
-            set_pixel(x, y, color)
-          end
+          offset = y * @width + x1
+          cols.times { |i| @pixels[offset + i] = color }
         end
       end
 
@@ -440,6 +441,50 @@ module CrymbleUI
       # clip_width/clip_height specify the visible portion to blit (defaults to full buffer)
       # opacity: Layer opacity multiplier (0.0-1.0), applied to source alpha during blending
       def blit_to(target : TestRenderBackend, offset_x : Int32, offset_y : Int32, clip_width : Int32 = @width, clip_height : Int32 = @height, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
+        # FAST PATH: Row-level copy for opaque blits (most common case).
+        # Skips per-pixel get/set/clip overhead — direct array slice copy.
+        if !use_alpha_blend || (opacity >= 1.0 && blend_mode == BlendMode::Normal)
+          # Clamp to valid target region
+          src_y_start = offset_y < 0 ? -offset_y : 0
+          src_x_start = offset_x < 0 ? -offset_x : 0
+          rows = Math.min(clip_height - src_y_start, target.height - (offset_y + src_y_start))
+          cols = Math.min(clip_width - src_x_start, target.width - (offset_x + src_x_start))
+          return if rows <= 0 || cols <= 0
+
+          rows.times do |i|
+            sy = src_y_start + i
+            ty = offset_y + sy
+            src_offset = sy * @width + src_x_start
+            dst_offset = ty * target.width + (offset_x + src_x_start)
+
+            if use_alpha_blend
+              # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent
+              cols.times do |j|
+                src_color = @pixels[src_offset + j]
+                if src_color.a == 255
+                  target.@pixels[dst_offset + j] = src_color
+                elsif src_color.a > 0
+                  bg = target.@pixels[dst_offset + j]
+                  a = src_color.a / 255.0
+                  target.@pixels[dst_offset + j] = Color.new(
+                    ((src_color.r * a + bg.r * (1 - a)).to_i).clamp(0, 255).to_u8,
+                    ((src_color.g * a + bg.g * (1 - a)).to_i).clamp(0, 255).to_u8,
+                    ((src_color.b * a + bg.b * (1 - a)).to_i).clamp(0, 255).to_u8,
+                    255_u8
+                  )
+                end
+              end
+            else
+              # COPY mode: direct array copy (no alpha check)
+              @pixels[src_offset, cols].each_with_index do |c, j|
+                target.@pixels[dst_offset + j] = c
+              end
+            end
+          end
+          return
+        end
+
+        # SLOW PATH: Per-pixel blending for special blend modes (additive, subtractive)
         clip_height.times do |src_y|
           clip_width.times do |src_x|
             src_color = get_pixel(src_x, src_y)
@@ -448,52 +493,42 @@ module CrymbleUI
             target_x = src_x + offset_x
             target_y = src_y + offset_y
 
-            if use_alpha_blend
-              # Apply layer opacity multiplier to source alpha
-              effective_alpha = (src_color.a / 255.0) * opacity
-              next if effective_alpha == 0.0  # Skip fully transparent
+            # Apply layer opacity multiplier to source alpha
+            effective_alpha = (src_color.a / 255.0) * opacity
+            next if effective_alpha == 0.0  # Skip fully transparent
 
-              if blend_mode == BlendMode::Additive
-                # ADDITIVE: result = src * alpha + dst (non-damping, for glow/highlight)
-                if bg = target.get_pixel(target_x, target_y)
-                  blended = Color.new(
-                    (bg.r + src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    (bg.g + src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    (bg.b + src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    255_u8
-                  )
-                  target.set_pixel(target_x, target_y, blended)
-                end
-              elsif blend_mode == BlendMode::Subtractive
-                # SUBTRACTIVE: result = dst - src * alpha (for darkening highlight on light bg)
-                if bg = target.get_pixel(target_x, target_y)
-                  blended = Color.new(
-                    (bg.r - src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    (bg.g - src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    (bg.b - src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
-                    255_u8
-                  )
-                  target.set_pixel(target_x, target_y, blended)
-                end
-              elsif effective_alpha >= 1.0
-                # Fully opaque after opacity, just copy
-                target.set_pixel(target_x, target_y, src_color)
-              else
-                # ALPHA BLEND: result = src * alpha + dst * (1 - alpha)
-                if bg = target.get_pixel(target_x, target_y)
-                  blended = Color.new(
-                    ((src_color.r * effective_alpha + bg.r * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
-                    ((src_color.g * effective_alpha + bg.g * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
-                    ((src_color.b * effective_alpha + bg.b * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
-                    255_u8
-                  )
-                  target.set_pixel(target_x, target_y, blended)
-                end
+            if blend_mode == BlendMode::Additive
+              if bg = target.get_pixel(target_x, target_y)
+                blended = Color.new(
+                  (bg.r + src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  (bg.g + src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  (bg.b + src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  255_u8
+                )
+                target.set_pixel(target_x, target_y, blended)
               end
-            else
-              # COPY mode: Replace pixels (matches SFML's BlendNone for widget restoration)
-              # Transparent pixels MUST overwrite old content!
+            elsif blend_mode == BlendMode::Subtractive
+              if bg = target.get_pixel(target_x, target_y)
+                blended = Color.new(
+                  (bg.r - src_color.r * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  (bg.g - src_color.g * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  (bg.b - src_color.b * effective_alpha).clamp(0, 255).to_i.to_u8,
+                  255_u8
+                )
+                target.set_pixel(target_x, target_y, blended)
+              end
+            elsif effective_alpha >= 1.0
               target.set_pixel(target_x, target_y, src_color)
+            else
+              if bg = target.get_pixel(target_x, target_y)
+                blended = Color.new(
+                  ((src_color.r * effective_alpha + bg.r * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
+                  ((src_color.g * effective_alpha + bg.g * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
+                  ((src_color.b * effective_alpha + bg.b * (1 - effective_alpha)).to_i).clamp(0, 255).to_u8,
+                  255_u8
+                )
+                target.set_pixel(target_x, target_y, blended)
+              end
             end
           end
         end

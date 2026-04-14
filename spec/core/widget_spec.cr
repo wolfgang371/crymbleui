@@ -1,4 +1,5 @@
 require "../spec_helper"
+require "../../src/testing/test_render_backend"
 
 describe CrymbleUI::Widget do
     describe "#initialize" do
@@ -294,6 +295,49 @@ describe CrymbleUI::Widget do
             widget.bounds.y.should eq(20.0)
             widget.bounds.width.should eq(100.0)
             widget.bounds.height.should eq(50.0)
+        end
+    end
+
+    describe "#layout skip path" do
+        it "invalidates background_backend when position changes" do
+            # Sibling B at position (0, 50). After layout skip, moved to (0, 80).
+            # Its background_backend must be invalidated (holds content from old position).
+            widget = TestWidget.new(id: "sibling_b")
+            constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 50.0))
+
+            # First layout — sets bounds and caches constraints
+            widget.layout(constraints, CrymbleUI::Vec2.new(0.0, 50.0))
+            widget.bounds.y.should eq(50.0)
+
+            # Simulate a render that sets up background_backend
+            fake_backend = CrymbleUI::Testing::TestRenderBackend.new(100, 50)
+            widget.background_backend = fake_backend
+            widget.state = CrymbleUI::WidgetState::Clean
+
+            # Second layout with same constraints but different position (sibling A grew)
+            widget.layout(constraints, CrymbleUI::Vec2.new(0.0, 80.0))
+
+            # Position should be updated
+            widget.bounds.y.should eq(80.0)
+
+            # Background must be invalidated (old content was at y=50, now at y=80)
+            widget.background_backend.should be_nil
+        end
+
+        it "keeps background_backend when position unchanged" do
+            widget = TestWidget.new(id: "stable")
+            constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 50.0))
+
+            widget.layout(constraints, CrymbleUI::Vec2.new(0.0, 50.0))
+
+            fake_backend = CrymbleUI::Testing::TestRenderBackend.new(100, 50)
+            widget.background_backend = fake_backend
+            widget.state = CrymbleUI::WidgetState::Clean
+
+            # Same constraints AND same position — skip path, keep background
+            widget.layout(constraints, CrymbleUI::Vec2.new(0.0, 50.0))
+
+            widget.background_backend.should_not be_nil
         end
     end
 end

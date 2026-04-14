@@ -128,8 +128,8 @@ describe "Texture caching behavior" do
                 constraints = CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(800.0, 600.0))
                 root.layout(constraints, CrymbleUI::Vec2.new(0.0, 0.0))
 
-                # Verify tree is ready for rendering
-                root.state.should eq(CrymbleUI::WidgetState::Clean)
+                # First layout changes size from 0→actual, so widget needs render
+                root.state.should eq(CrymbleUI::WidgetState::NeedsRender)
                 root.bounds.width.should be > 0
                 root.bounds.height.should be > 0
             end

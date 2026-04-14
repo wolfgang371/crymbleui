@@ -24,7 +24,7 @@ class StickySyncTestAdapter
   end
 end
 
-describe "VirtualMatrix sticky header scroll sync" do
+describe "VirtualMatrix sticky header scroll sync", tags: "slow" do
   # The definitive test: mouse wheel and scrollbar scroll to the same offset
   # must produce identical sticky cell positions.
   it "scrollbar and mouse wheel produce identical sticky cell positions" do

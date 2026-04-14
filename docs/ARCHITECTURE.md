@@ -67,6 +67,27 @@
 
 Widgets propagate state changes by calling `mark_needs_render` or `mark_needs_layout` on themselves. The property macros (`render_property`, `layout_property`) do this automatically on setter. Parent changes cascade to children; the renderer skips widgets that are clean.
 
+### 3. The Rebuild Cycle (DSL Apps)
+
+In DSL-style apps, `build()` creates the **entire widget tree from scratch** on every call. The framework reconciles old and new trees, preserving widget state via `copy_state_from`.
+
+**`request_rebuild`** tells the framework: "my app state changed — call `build()` again on the next frame."
+
+**When to call `request_rebuild`:**
+- App state changed that affects which widgets exist or their structure
+  (opening/closing dialogs, adding/removing shapes, changing data that adds/removes rows)
+- Example: `@dialogs << dialog; request_rebuild`
+
+**When NOT to call `request_rebuild`:**
+- Widget-internal state changes (typing, scrolling, cursor movement, hover)
+  — these use `mark_needs_render` or `mark_needs_layout` internally
+- Data changes that only affect cell VALUES, not tree structure
+  — use `invalidate_all!` on the adapter instead
+
+**Key rule:** If `build()` would produce a **different widget tree** (different widgets, different structure), call `request_rebuild`. If the same widgets just need to repaint with new data, use `mark_needs_render` or `invalidate_all!`.
+
+**Avoid `mark_needs_layout` from app code** — in DSL apps, `mark_needs_layout` propagating to root triggers a full rebuild. Use `mark_needs_render` for visual-only changes, or `request_rebuild` for structural changes.
+
 ### 3. Testability First
 
 All business logic must be testable without rendering:

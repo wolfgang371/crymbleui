@@ -52,6 +52,7 @@ module CrymbleUI
     render_property text_color : Color
     render_property background_color : Color
     render_property border_color : Color
+    render_property text_align : TextAlign = TextAlign::Center
     layout_property padding : Float64
 
     # Hover state
@@ -68,6 +69,7 @@ module CrymbleUI
       @text_color : Color = Theme.current.button_text,
       @background_color : Color = Theme.current.button_background,
       @border_color : Color = Theme.current.button_border,
+      @text_align : TextAlign = TextAlign::Center,
       @padding : Float64 = 10.0,
       on_click : Proc(Nil)? = nil,
     )
@@ -87,10 +89,11 @@ module CrymbleUI
       text_color : Color = Theme.current.button_text,
       background_color : Color = Theme.current.button_background,
       border_color : Color = Theme.current.button_border,
+      text_align : TextAlign = TextAlign::Center,
       padding : Float64 = 10.0,
       &block : -> Nil
     )
-      new(text, shortcut, id, font_scale, text_color, background_color, border_color, padding, on_click: block)
+      new(text, shortcut, id, font_scale, text_color, background_color, border_color, text_align, padding, on_click: block)
     end
 
     # Override label for path_id generation
@@ -118,18 +121,7 @@ module CrymbleUI
     # Layout the button at the given position
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       size = measure(constraints)
-      new_bounds = Rect.new(position, size)
-
-      # Check if size changed (requires re-rendering due to text centering)
-      # Position-only changes don't require re-render (widget-local coords)
-      old_bounds = @bounds
-      size_changed = old_bounds.nil? || (old_bounds.width != new_bounds.width || old_bounds.height != new_bounds.height)
-
-      @bounds = new_bounds
-
-      if size_changed
-        mark_needs_render
-      end
+      @bounds = Rect.new(position, size)
     end
 
     # Generate primitives for rendering
@@ -139,8 +131,11 @@ module CrymbleUI
       # Calculate hover/focus colors if hovered or focus_highlighted
       bg_color = @background_color
       border_color = @border_color
+      text_color = @text_color
 
-      if @hovered || focus_highlighted?
+      if !enabled?
+        text_color = Color.new(text_color.r, text_color.g, text_color.b, (text_color.a // 3).to_u8)
+      elsif @hovered || focus_highlighted?
         hover_brightness = Theme.current.brightness_hover
         bg_color = @background_color.highlight(hover_brightness)
         border_color = @border_color.highlight(hover_brightness)
@@ -148,8 +143,12 @@ module CrymbleUI
 
       # Calculate text position in widget-local coordinates
       text_size = measure_text(display_text, font_size)
-      # Center both horizontally and vertically within bounds
-      text_x = (bounds.width - text_size.width) / 2.0
+      # Horizontal alignment based on text_align property
+      text_x = case @text_align
+      when TextAlign::Left  then @padding
+      when TextAlign::Right then bounds.width - text_size.width - @padding
+      else                       (bounds.width - text_size.width) / 2.0 # Center (default)
+      end
       text_y = (bounds.height - font_size) / 2.0
       text_position = Vec2.new(text_x, text_y)
 
@@ -159,7 +158,7 @@ module CrymbleUI
       primitives do
         fill_rect(local_rect, bg_color)
         draw_rect(local_rect, border_color, 1.0)
-        draw_text(display_text, text_position, @text_color, @font_scale)
+        draw_text(display_text, text_position, text_color, @font_scale)
       end
     end
 
@@ -177,6 +176,7 @@ module CrymbleUI
 
     # Override on_click to call callback
     def on_click
+      return unless enabled?
       @on_click_callback.try &.call
     end
 

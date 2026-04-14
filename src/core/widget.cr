@@ -7,10 +7,21 @@ require "../input/shortcut_manager"
 require "../input/focus_manager"
 
 module CrymbleUI
+    enum MouseButton
+        Left
+        Right
+        Middle
+    end
+
     # Annotation for properties that should be automatically copied during reconciliation
     # Used by render_property, layout_property, and reconcile_property macros
     # The auto_copy_reconcile_properties method iterates all @[Reconcile] annotated vars
     annotation Reconcile
+    end
+
+    # Annotation for properties explicitly excluded from reconciliation.
+    # Used with -Daudit_reconcile to ensure every ivar is classified.
+    annotation NoReconcile
     end
 
     # Explicit focus navigation overrides
@@ -262,6 +273,11 @@ module CrymbleUI
         # Explicit layer override for propagate_to_layer (set by VirtualMatrix for sticky cells)
         property render_layer : Layer?
 
+        # Cached ancestry bounds validity (nil = uncached).
+        # Valid when this widget and all ancestors have positive bounds.
+        # Cleared on mark_needs_layout (upward propagation clears entire chain).
+        @ancestry_bounds_valid : Bool? = nil
+
         # Visibility - hidden widgets are skipped in layout/render/hit-test
         @visible : Bool = true
 
@@ -273,6 +289,19 @@ module CrymbleUI
           return if @visible == value
           @visible = value
           mark_needs_layout
+        end
+
+        # Enabled state - disabled widgets render but don't respond to clicks
+        @enabled : Bool = true
+
+        def enabled? : Bool
+          @enabled
+        end
+
+        def enabled=(value : Bool)
+          return if @enabled == value
+          @enabled = value
+          mark_needs_render
         end
 
         # Children can be positioned outside parent bounds (for Popup, etc.)
@@ -329,6 +358,10 @@ module CrymbleUI
         # This is the same pattern as layer.buffer_just_cleared (Bug 1 fix)
         # Set by ScrollView when widget exits, cleared after capture
         @needs_fresh_background : Bool = false
+
+        # Layer position where widget was last rendered (for auto-detecting stale background).
+        # Cleared when widget_backend is disposed (scroll exit, rebuild).
+        @last_rendered_layer_position : Tuple(Int32, Int32)? = nil
 
         # Last constraints used for layout (for incremental layout optimization)
         # If current constraints match and widget is clean, layout can be skipped
@@ -407,6 +440,7 @@ module CrymbleUI
         # This implies rendering will also be needed
         def mark_needs_layout
             @state = WidgetState::NeedsLayout
+            @ancestry_bounds_valid = nil  # Invalidate bounds cache (propagates up via parent chain)
 
             # Invalidate cached constraints (forces re-layout even if constraints unchanged)
             invalidate_last_constraints
@@ -521,6 +555,8 @@ module CrymbleUI
 
         # render_property: mark_needs_render on setter
         # reconcile: if true, preserve this value during widget reconciliation (default: false)
+        # When reconciled, a shadow @_build_<name> tracks the build-time value.
+        # During reconciliation, if build value changed, app's value wins over old state.
         macro render_property(declaration, reconcile = false)
             {% if declaration.is_a?(TypeDeclaration) %}
                 {% if reconcile %}
@@ -528,6 +564,9 @@ module CrymbleUI
                 {% end %}
                 {% if !declaration.value.is_a?(Nop) %}
                     @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    {% if reconcile %}
+                        @_build_{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    {% end %}
                 {% else %}
                     @{{declaration.var}} : {{declaration.type}}
                 {% end %}
@@ -552,6 +591,9 @@ module CrymbleUI
                 {% end %}
                 {% if !declaration.value.is_a?(Nop) %}
                     @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    {% if reconcile %}
+                        @_build_{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    {% end %}
                 {% else %}
                     @{{declaration.var}} : {{declaration.type}}
                 {% end %}
@@ -570,11 +612,14 @@ module CrymbleUI
         # reconcile_property: Auto-reconcile only, no invalidation on setter
         # Use for internal state that must survive rebuilds but doesn't directly affect rendering
         # Examples: interaction_mode, drag state, internal flags
+        # When a default value exists, a shadow @_build_<name> tracks the build-time value
+        # so reconciliation can detect when the app changed it (app wins over old state).
         macro reconcile_property(declaration)
             {% if declaration.is_a?(TypeDeclaration) %}
                 @[::CrymbleUI::Reconcile]
                 {% if !declaration.value.is_a?(Nop) %}
                     @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    @_build_{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
                 {% else %}
                     @{{declaration.var}} : {{declaration.type}}
                 {% end %}
@@ -677,17 +722,50 @@ module CrymbleUI
             # Skip layout if constraints unchanged and widget is clean
             if can_skip_layout?(constraints)
                 # Just update position, skip full layout
+                old_pos = @bounds.position
                 @bounds = Rect.new(position, @bounds.size)
+                # Position changed → background_backend holds content from old location
+                if old_pos.x != position.x || old_pos.y != position.y
+                    self.background_backend = nil
+                    mark_needs_render
+                    # Pull-based: layer bounds auto-update via compute_bounds_for_layer
+                end
                 return
             end
 
             # Set state to Clean first (before perform_layout)
-            # This allows perform_layout to call mark_needs_render if needed
-            # (e.g., Button/Text mark NeedsRender if size changed)
             @state = WidgetState::Clean
+
+            # Remember old size for change detection
+            old_width = @bounds.width
+            old_height = @bounds.height
 
             # Delegate to subclass implementation
             perform_layout(constraints, position)
+
+            # Invalidate primitive cache when size changes.
+            # Cached primitives (e.g., fill_rect) use the old bounds dimensions and would
+            # leave unfilled regions on the new, differently-sized widget_backend.
+            if old_width != @bounds.width || old_height != @bounds.height
+                mark_needs_render
+            end
+
+            # Verify bounds satisfaction: widget size must respect constraints.
+            # Found by Z3 verification: Image, Expanded, TextInput violated this.
+            {% if flag?(:verify_bounds) %}
+              if constraints.max_width.finite? && @bounds.width > constraints.max_width + 0.5
+                STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} width #{@bounds.width.round(1)} > max #{constraints.max_width.round(1)}"
+              end
+              if constraints.max_height.finite? && @bounds.height > constraints.max_height + 0.5
+                STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} height #{@bounds.height.round(1)} > max #{constraints.max_height.round(1)}"
+              end
+              if @bounds.width < constraints.min_width - 0.5
+                STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} width #{@bounds.width.round(1)} < min #{constraints.min_width.round(1)}"
+              end
+              if @bounds.height < constraints.min_height - 0.5
+                STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} height #{@bounds.height.round(1)} < min #{constraints.min_height.round(1)}"
+              end
+            {% end %}
 
             # Save constraints and zoom epoch for next skip check
             @last_constraints = constraints
@@ -706,7 +784,17 @@ module CrymbleUI
         protected def auto_copy_reconcile_properties(old_widget : Widget)
             {% for ivar in @type.instance_vars %}
                 {% if ivar.annotation(::CrymbleUI::Reconcile) %}
-                    @{{ivar.name}} = old_widget.as({{@type}}).@{{ivar.name}}
+                    {% build_var = "_build_#{ivar.name}".id %}
+                    {% has_build = @type.instance_vars.any? { |v| v.name == build_var } %}
+                    {% if has_build %}
+                        # Only reconcile if build value didn't change (app didn't change it)
+                        if @{{build_var}} == old_widget.as({{@type}}).@{{build_var}}
+                            @{{ivar.name}} = old_widget.as({{@type}}).@{{ivar.name}}
+                        end
+                    {% else %}
+                        # No build tracking (manual @[Reconcile]) — always reconcile
+                        @{{ivar.name}} = old_widget.as({{@type}}).@{{ivar.name}}
+                    {% end %}
                 {% end %}
             {% end %}
         end
@@ -811,6 +899,7 @@ module CrymbleUI
         # Set widget's render backend (managed by renderer)
         def widget_backend=(backend : RenderBackend?)
             @widget_backend = backend
+            @last_rendered_layer_position = nil if backend.nil?
         end
 
         # Get background backend (nil if not yet captured)
@@ -846,6 +935,61 @@ module CrymbleUI
         # Set needs_fresh_background flag (set by ScrollView on exit, cleared by renderer after capture)
         def needs_fresh_background=(value : Bool)
             @needs_fresh_background = value
+        end
+
+        # Layer position where widget was last rendered (for centralized stale-background detection)
+        def last_rendered_layer_position : Tuple(Int32, Int32)?
+            @last_rendered_layer_position
+        end
+
+        def last_rendered_layer_position=(pos : Tuple(Int32, Int32)?)
+            @last_rendered_layer_position = pos
+        end
+
+        # Check if this widget and all ancestors have positive bounds (cached).
+        # Used by valid_layer_dimensions? to avoid O(depth) walk every frame.
+        def ancestry_bounds_valid? : Bool
+            if cached = @ancestry_bounds_valid
+                return cached
+            end
+            valid = bounds.width > 0 && bounds.height > 0
+            if valid && (p = @parent)
+                valid = p.ancestry_bounds_valid?
+            end
+            @ancestry_bounds_valid = valid
+            valid
+        end
+
+        # Recursively invalidate ancestry_bounds_valid cache on this widget and all descendants.
+        # Called when a parent (e.g., TreeNode) collapses and zeros children bounds —
+        # without this, cached `true` values persist and layer compositing continues
+        # for child-owned layers (e.g., VirtualMatrix viewport_cache), causing ghost pixels.
+        # Check if this widget is reachable from root via parent chain.
+        # Used by reconciliation validator to detect orphaned widgets.
+        # Zero bounds and invalidate all caches. Called when a widget becomes hidden
+        # (e.g., TreeNode collapse). Ensures no stale cached state persists —
+        # prevents ghost pixels, stale primitive caches, and stale ancestry_bounds.
+        def zero_bounds!
+            @bounds = Rect.zero
+            invalidate_last_constraints
+            @cached_primitives = nil
+            self.background_backend = nil
+            self.widget_backend = nil
+            invalidate_ancestry_bounds_cache
+        end
+
+        def widget_in_tree?(root : Widget) : Bool
+            current : Widget? = self
+            while current
+                return true if current == root
+                current = current.parent
+            end
+            false
+        end
+
+        def invalidate_ancestry_bounds_cache
+            @ancestry_bounds_valid = nil
+            @children.each(&.invalidate_ancestry_bounds_cache)
         end
 
         # === END PER-WIDGET TEXTURE BACKEND ===
@@ -887,18 +1031,40 @@ module CrymbleUI
             # Default: do nothing
         end
 
+        # Whether this widget claimed the mouse_down for its own purpose
+        # (e.g., resize), suppressing DragManager tracking.
+        def suppresses_drag? : Bool
+            false
+        end
+
+        # Right-click callback (set by caller, dispatched from on_mouse_down)
+        property on_right_click_handler : Proc(Vec2, Nil)? = nil
+
+        # Hover text shown in statusbar when mouse is over this widget
+        property hover_text : String? = nil
+
         # Mouse event handlers (override in subclasses for drag support)
-        def on_mouse_down(point : Vec2)
+        def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
             # Bring containing panel to front if inside one
             bring_containing_panel_to_front
-            # Default: do nothing else
+            if button == MouseButton::Right
+                # Bubble up: find nearest ancestor with right-click handler
+                current : Widget? = self
+                while current
+                    if handler = current.on_right_click_handler
+                        handler.call(point)
+                        break
+                    end
+                    current = current.parent
+                end
+            end
         end
 
         def on_mouse_move(point : Vec2)
             # Default: do nothing
         end
 
-        def on_mouse_up(point : Vec2)
+        def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
             # Default: do nothing
         end
 
@@ -949,7 +1115,7 @@ module CrymbleUI
 
         # Handle key down event
         # Returns true if event was handled
-        def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool) : Bool
+        def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
             false  # Not handled
         end
 
@@ -1161,35 +1327,16 @@ module CrymbleUI
         # === LAYER OWNER NOTIFICATION BROADCASTING ===
         # These methods broadcast notifications to all LayerOwner descendants.
         # Used by WindowPanel to notify ScrollView (and other layer owners) of
-        # position/size/z-index changes without direct type coupling.
-
-        # Broadcast position change to all LayerOwner descendants
-        protected def notify_layer_owners_position_changed(delta : Vec2)
-          @children.each do |child|
-            if child.responds_to?(:on_ancestor_position_changed)
-              child.on_ancestor_position_changed(delta)
-            end
-            child.notify_layer_owners_position_changed(delta)
-          end
-        end
-
-        # Broadcast resize start to all LayerOwner descendants
-        protected def notify_layer_owners_resize_start
-          @children.each do |child|
-            if child.responds_to?(:on_ancestor_resize_start)
-              child.on_ancestor_resize_start
-            end
-            child.notify_layer_owners_resize_start
-          end
-        end
+        # size/z-index changes without direct type coupling.
+        # Position changes are handled by pull-based bounds (compute_bounds_for_layer).
 
         # Broadcast resize move to all LayerOwner descendants
-        protected def notify_layer_owners_resize_move(dw : Float64, dh : Float64)
+        protected def notify_layer_owners_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0)
           @children.each do |child|
             if child.responds_to?(:on_ancestor_resize_move)
-              child.on_ancestor_resize_move(dw, dh)
+              child.on_ancestor_resize_move(dw, dh, dx, dy)
             end
-            child.notify_layer_owners_resize_move(dw, dh)
+            child.notify_layer_owners_resize_move(dw, dh, dx, dy)
           end
         end
 

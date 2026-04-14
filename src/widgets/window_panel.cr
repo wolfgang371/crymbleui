@@ -32,6 +32,11 @@ module CrymbleUI
         include PrimitiveBuilder
         include LayerOwner
 
+        # Pull-based layer bounds: panel bounds = self-positioned Rect(@x, @y, @width, @height)
+        def compute_bounds_for_layer(layer : Layer) : Rect
+            Rect.new(@x, @y, @width, @height)
+        end
+
         # Minimum visible area to keep panel accessible (prevents dragging completely off-screen)
         MIN_VISIBLE_MARGIN = 50.0
 
@@ -61,6 +66,9 @@ module CrymbleUI
         # Close button support
         property closeable : Bool
         reconcile_property closed : Bool = false
+
+        # Close callback - invoked when panel is closed (via close button or programmatic close)
+        @on_closed_callback : Proc(Nil)?
 
         # Maximize state
         reconcile_property maximized : Bool = false
@@ -95,10 +103,10 @@ module CrymbleUI
         @resize_start_bounds : Rect = Rect.zero
 
         # Visual properties - reconcile: true to preserve user color changes
-        render_property title_bar_color : Color = Theme.current.panel_title_bar, reconcile: true
-        render_property title_text_color : Color = Theme.current.panel_title_text, reconcile: true
-        render_property border_color : Color = Theme.current.panel_border, reconcile: true
-        render_property background_color : Color = Theme.current.panel_background, reconcile: true
+        render_property title_bar_color : Color = Theme.current.panel_title_bar
+        render_property title_text_color : Color = Theme.current.panel_title_text
+        render_property border_color : Color = Theme.current.panel_border
+        render_property background_color : Color = Theme.current.panel_background
         # Title font scale (relative sizing: 0 = base, +1 = larger, -1 = smaller)
         # Note: Uses layout_property because title_bar_height depends on font_scale
         layout_property title_font_scale : Int32 = 0
@@ -180,8 +188,14 @@ module CrymbleUI
             def to_primitives(bounds : Rect) : Array(DrawPrimitive)
                 return [] of DrawPrimitive if panel.closed
 
-                # Determine active color based on panel topmost status
-                active_color = panel.topmost? ? Theme.current.panel_title_bar_active : Theme.current.panel_title_bar_inactive
+                # Determine active color: use custom title_bar_color if set, else theme active/inactive
+                active_color = if panel.title_bar_color != Theme.current.panel_title_bar
+                    panel.title_bar_color  # Custom color (e.g., warning dialogs)
+                elsif panel.topmost?
+                    Theme.current.panel_title_bar_active
+                else
+                    Theme.current.panel_title_bar_inactive
+                end
 
                 # Get dynamic sizes
                 title_height = panel.title_bar_height
@@ -442,13 +456,12 @@ module CrymbleUI
             # (ignoring position parameter - panels float)
             @bounds = Rect.new(@x, @y, @width, @height)
 
-            # Update internal layer bounds to match panel
+            # Update internal layer
             if layer = @internal_layer
-                # Layer bounds = panel content bounds (border drawn during composite, not cached)
-                layer.bounds = @bounds
-
                 # Sync layer z_index with panel z_index (important after reconciliation)
                 layer.z_index = @z_index
+                # Sync layer background color with current theme (important after theme switch)
+                layer.background_color = @background_color
 
                 # Populate layer.widgets with chrome and content (NOT panel self!)
                 # Chrome first (renders first for correct background capture order)
@@ -493,9 +506,6 @@ module CrymbleUI
                     @width = window_bounds.width
                     @height = window_bounds.height
                     @bounds = Rect.new(@x, @y, @width, @height)
-                    if layer = @internal_layer
-                        layer.bounds = @bounds
-                    end
                     mark_needs_layout
                 end
                 return
@@ -517,12 +527,7 @@ module CrymbleUI
                 @x = new_x
                 @y = new_y
                 @bounds = Rect.new(@x, @y, @width, @height)
-                # Update layer bounds for compositor (no layout needed - children positions are relative)
-                if layer = @internal_layer
-                    layer.bounds = @bounds
-                end
-                # Notify layer-owning descendants (ScrollView, etc.) to update their layer positions
-                notify_layer_owners_position_changed(delta)
+                # Pull-based: layer.bounds will auto-update from compute_bounds_for_layer
             end
         end
 
@@ -593,14 +598,14 @@ module CrymbleUI
         end
 
         # Mouse down - start drag or resize
-        def on_mouse_down(point : Vec2)
+        def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
             return if @closed
 
             # Bring this panel to front
             bring_to_front
 
             # Also call super to handle any parent panel (nested panels)
-            super(point)
+            super(point, button)
 
             # Check for resize edge/corner first (blocked when maximized)
             if @resizable && !@maximized
@@ -610,7 +615,6 @@ module CrymbleUI
                     @resize_edge = edge
                     @resize_start_pos = point
                     @resize_start_bounds = Rect.new(@x, @y, @width, @height)
-                    @content.notify_layer_owners_resize_start
                     return
                 end
             end
@@ -682,22 +686,12 @@ module CrymbleUI
                 # Update bounds
                 @bounds = Rect.new(@x, @y, @width, @height)
 
-                # Update layer bounds to match new panel position
-                # Panel menubar is in same layer, so it moves automatically!
-                if layer = @internal_layer
-                    layer.bounds = @bounds
-                end
-
-                # Notify layer owners (ScrollView, etc.) of position change
-                @content.notify_layer_owners_position_changed(drag_delta)
-
                 # NOTE: No layout_children needed during drag!
                 # Children absolute positions will be updated in on_mouse_up
                 # During drag, hit testing is not needed (mouse is held down)
 
                 # NOTE: No mark_needs_render needed during drag!
-                # Chrome primitives are in widget-local coordinates - they don't change
-                # Layer buffer just moves during composite (layer.bounds updated above)
+                # Pull-based: layer.bounds auto-updates from compute_bounds_for_layer
                 # This achieves O(1) drag performance - zero re-renders!
             elsif @interaction_mode == InteractionMode::Resizing
                 # Calculate deltas
@@ -742,11 +736,7 @@ module CrymbleUI
 
                 # Update bounds
                 @bounds = Rect.new(@x, @y, @width, @height)
-
-                # Update layer bounds to match new panel size/position
-                if layer = @internal_layer
-                    layer.bounds = @bounds
-                end
+                # Pull-based: layer.bounds auto-updates from compute_bounds_for_layer
 
                 # Update Chrome bounds directly (flex widget - width changed)
                 @chrome.bounds = Rect.new(0.0, 0.0, @width, title_bar_height)
@@ -788,12 +778,14 @@ module CrymbleUI
                 # Notify layer owners of resize (uses cumulative delta from start)
                 delta_width = @width - @resize_start_bounds.width
                 delta_height = @height - @resize_start_bounds.height
-                @content.notify_layer_owners_resize_move(delta_width, delta_height)
+                delta_x = @x - @resize_start_bounds.x
+                delta_y = @y - @resize_start_bounds.y
+                @content.notify_layer_owners_resize_move(delta_width, delta_height, delta_x, delta_y)
             end
         end
 
         # Mouse up - stop dragging or resizing
-        def on_mouse_up(point : Vec2)
+        def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
             was_dragging = @interaction_mode == InteractionMode::Dragging
             was_resizing = @interaction_mode == InteractionMode::Resizing
 
@@ -821,12 +813,21 @@ module CrymbleUI
             # during resize without triggering full layout or performance issues
         end
 
+        # Set callback invoked when panel is closed
+        def on_closed(&block : -> Nil)
+            @on_closed_callback = block
+        end
+
         # Close this panel (hides it)
         def close
-            @closed = true
-            mark_needs_layout
-            # Trigger app rebuild to update dynamic content (e.g., panel counts)
-            Widget.app?.try(&.rebuild)
+            if callback = @on_closed_callback
+                callback.call
+            else
+                @closed = true
+                mark_needs_layout
+                # Trigger app rebuild to update dynamic content (e.g., panel counts)
+                Widget.app?.try(&.request_rebuild)
+            end
         end
 
         # Open/show this panel
@@ -834,7 +835,7 @@ module CrymbleUI
             @closed = false
             mark_needs_layout
             # Trigger app rebuild to update dynamic content (e.g., panel counts)
-            Widget.app?.try(&.rebuild)
+            Widget.app?.try(&.request_rebuild)
         end
 
         # Toggle panel open/closed
@@ -842,7 +843,7 @@ module CrymbleUI
             @closed = !@closed
             mark_needs_layout
             # Trigger app rebuild to update dynamic content (e.g., panel counts)
-            Widget.app?.try(&.rebuild)
+            Widget.app?.try(&.request_rebuild)
         end
 
         # Maximize panel to fill window bounds

@@ -138,17 +138,7 @@ module CrymbleUI
       size = measure(constraints)
       # Use constraint width if available (fill parent)
       width = constraints.max_width.finite? ? constraints.max_width : size.width
-      new_bounds = Rect.new(position.x, position.y, width, size.height)
-
-      # Mark for render if size changed (text needs re-rendering at new size)
-      old_bounds = @bounds
-      size_changed = old_bounds.nil? || (old_bounds.width != new_bounds.width || old_bounds.height != new_bounds.height)
-
-      @bounds = new_bounds
-
-      if size_changed
-        mark_needs_render
-      end
+      @bounds = Rect.new(position.x, position.y, width, size.height)
     end
 
     # Mouse events
