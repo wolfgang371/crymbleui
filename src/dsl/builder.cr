@@ -19,6 +19,7 @@ require "../widgets/draggable_box"
 require "../widgets/drop_zone_box"
 require "../layout/vstack"
 require "../layout/hstack"
+require "../layout/flow"
 require "../widgets/scroll_view"
 require "../widgets/expanded"
 require "../widgets/combo_box_item"
@@ -82,6 +83,26 @@ module CrymbleUI
                 end
                 with_container(stack, &block)
                 stack
+            end
+
+            # Create a flow layout — arranges children left-to-right, wrapping
+            # to a new row when the next child would exceed the available width.
+            # Like CSS flex-wrap. Adaptive to container width (resize-aware).
+            #
+            # Example:
+            #   flow(hspacing: 8.0, vspacing: 4.0) do
+            #     tags.each { |t| button(t) { ... } }   # wraps gracefully
+            #   end
+            def flow(id : String? = nil, hspacing : Float64 = 8.0, vspacing : Float64 = 4.0,
+                     padding : Float64 = 0.0, background_color : Color? = nil, &block)
+                ensure_container_stack
+                layout = FlowLayout.new(id: id, hspacing: hspacing, vspacing: vspacing,
+                                        padding: padding, background_color: background_color)
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(layout)
+                end
+                with_container(layout, &block)
+                layout
             end
 
             # Create a scrollable view container

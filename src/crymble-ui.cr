@@ -24,6 +24,7 @@ require "./widgets/tree_node"
 # Layout containers
 require "./layout/vstack"
 require "./layout/hstack"
+require "./layout/flow"
 require "./layout/decorated_container"
 
 # Rendering

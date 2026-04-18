@@ -36,6 +36,7 @@ module CrymbleUI
     class_property frame_empty_leaf_primitives : Int32 = 0         # leaf widgets with empty primitives (potential bug)
     class_property frame_blit_plan_count : Int32 = 0              # sticky layers rendered via blit-plan fast path
     class_property frame_boundary_cells_invalidated : Int32 = 0   # cells at buffer boundary invalidated after blit-shift
+    class_property frame_layer_recollect_count : Int32 = 0       # times collect_layers was called (expensive O(n) tree walk)
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
     class_property rendered_layer_ids : Array(String) = [] of String # Layer IDs rendered this frame
 
@@ -59,6 +60,7 @@ module CrymbleUI
       @@frame_empty_leaf_primitives = 0
       @@frame_blit_plan_count = 0
       @@frame_boundary_cells_invalidated = 0
+      @@frame_layer_recollect_count = 0
       @@rendered_widgets.clear
       @@rendered_layer_ids.clear
       @@phase_layout_ms = 0.0
@@ -193,6 +195,7 @@ module CrymbleUI
 
       # Collect layers (cached unless invalidated)
       layers = if @layers_need_recollect
+        LayerRenderer.frame_layer_recollect_count += 1
         collected = profile("collect_layers") { collect_layers(root_widget) }
 
         # Add highlight layer if present (for drop zone feedback)

@@ -1,7 +1,7 @@
 
 # CrymbleUI
 
-**Version 0.4.0**
+**Version 0.5.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -13,7 +13,7 @@ Currently with SFML 3.0 backend, for Linux and Windows.
 
 CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
-Currently is has: src/: ~28384 LOC · spec/: ~47929 LOC
+Currently is has: src/: ~28790 LOC · spec/: ~48425 LOC
 
 ## Features
 
@@ -91,6 +91,70 @@ and many more in examples/
 
 ## New Features
 
+### v0.5.0
+
+#### Tutorial 26: FlowLayout
+Wrap-aware horizontal layout. Arranges children left-to-right and
+
+![Tutorial 26: FlowLayout](screenshots/tutorial-26.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial26App < CrymbleUI::App
+  state check_count : Int32 = 0
+
+  TAGS = %w(
+    crystal ruby python rust go java c++ typescript javascript elixir haskell
+    scala kotlin swift lua perl ocaml clojure racket zig nim
+  )
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 26: FlowLayout", 600, 400) do
+      vstack(padding: 15.0, spacing: 12.0) do
+        text("Resize the window — the tags below reflow automatically.", font_scale: 1)
+
+        # Plain flow of buttons. No chunking, no max-per-row — the flow
+        # measures each child against the available width and wraps as needed.
+        flow(hspacing: 8.0, vspacing: 6.0) do
+          TAGS.each do |tag|
+            button(tag, padding: 4.0) { self.check_count += 1 }
+          end
+        end
+
+        text("Clicks: #{check_count}", font_scale: -1)
+
+        text("Mixed widths also wrap correctly:", font_scale: 1)
+        flow(hspacing: 8.0, vspacing: 6.0) do
+          [
+            "short",
+            "a somewhat longer chip",
+            "tiny",
+            "medium length",
+            "an even longer one that takes a lot of width",
+            "x",
+            "another",
+            "final entry"
+          ].each do |s|
+            button(s, padding: 4.0) { }
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial26App.new)
+```
+
+</details>
+
+---
 ### v0.4.0
 
 #### Tutorial 24: Image Widget
@@ -179,7 +243,7 @@ class Tutorial25App < CrymbleUI::App
       vstack(padding: 15.0, spacing: 10.0) do
         text("Collapsible Tree Sections", font_scale: 1)
 
-        scroll_view(direction: ScrollDirection::Vertical) do
+        expanded do scroll_view(direction: ScrollDirection::Vertical) do
           vstack(spacing: 4.0) do
             tree_node("Getting Started", expanded: true, font_scale: 1) do
               vstack(padding: 10.0, spacing: 5.0) do
@@ -238,7 +302,7 @@ class Tutorial25App < CrymbleUI::App
               end
             end
           end
-        end
+        end end
       end
     end
   end
@@ -1800,7 +1864,7 @@ class Tutorial25App < CrymbleUI::App
       vstack(padding: 15.0, spacing: 10.0) do
         text("Collapsible Tree Sections", font_scale: 1)
 
-        scroll_view(direction: ScrollDirection::Vertical) do
+        expanded do scroll_view(direction: ScrollDirection::Vertical) do
           vstack(spacing: 4.0) do
             tree_node("Getting Started", expanded: true, font_scale: 1) do
               vstack(padding: 10.0, spacing: 5.0) do
@@ -1859,13 +1923,75 @@ class Tutorial25App < CrymbleUI::App
               end
             end
           end
-        end
+        end end
       end
     end
   end
 end
 
 CrymbleUI.run(Tutorial25App.new)
+```
+
+</details>
+
+---
+### Tutorial 26: FlowLayout
+Wrap-aware horizontal layout. Arranges children left-to-right and
+
+![Tutorial 26: FlowLayout](screenshots/tutorial-26.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial26App < CrymbleUI::App
+  state check_count : Int32 = 0
+
+  TAGS = %w(
+    crystal ruby python rust go java c++ typescript javascript elixir haskell
+    scala kotlin swift lua perl ocaml clojure racket zig nim
+  )
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 26: FlowLayout", 600, 400) do
+      vstack(padding: 15.0, spacing: 12.0) do
+        text("Resize the window — the tags below reflow automatically.", font_scale: 1)
+
+        # Plain flow of buttons. No chunking, no max-per-row — the flow
+        # measures each child against the available width and wraps as needed.
+        flow(hspacing: 8.0, vspacing: 6.0) do
+          TAGS.each do |tag|
+            button(tag, padding: 4.0) { self.check_count += 1 }
+          end
+        end
+
+        text("Clicks: #{check_count}", font_scale: -1)
+
+        text("Mixed widths also wrap correctly:", font_scale: 1)
+        flow(hspacing: 8.0, vspacing: 6.0) do
+          [
+            "short",
+            "a somewhat longer chip",
+            "tiny",
+            "medium length",
+            "an even longer one that takes a lot of width",
+            "x",
+            "another",
+            "final entry"
+          ].each do |s|
+            button(s, padding: 4.0) { }
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial26App.new)
 ```
 
 </details>

@@ -16,6 +16,11 @@ module CrymbleUI
       super(id: "highlight")
     end
 
+    # Update dimensions and color for reuse (avoids recreating the widget)
+    def update(@width : Float64, @height : Float64, @color : Color)
+      invalidate_primitive_cache
+    end
+
     def measure(constraints : BoxConstraints) : Size
       Size.new(@width, @height)
     end

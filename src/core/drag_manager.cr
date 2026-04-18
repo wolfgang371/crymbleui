@@ -312,6 +312,49 @@ module CrymbleUI
       @highlight_layer = layer
     end
 
+    # Update existing highlight layer to match new target, or create one.
+    # Reusing the same Layer object avoids changing object identity,
+    # which would trigger expensive layer recollection in render_all_layers.
+    private def update_or_create_highlight_layer(target : Widget)
+      bounds = target.absolute_bounds
+      color = if target.is_a?(DropTarget)
+        target.as(DropTarget).highlight_color
+      else
+        Theme.current.drag_highlight
+      end
+      opacity = if target.is_a?(DropTarget)
+        target.as(DropTarget).highlight_opacity
+      else
+        Theme.current.brightness_drag_opacity
+      end
+
+      if layer = @highlight_layer
+        # Reuse existing layer — update bounds and widget
+        layer.bounds = bounds
+        layer.opacity = opacity
+        if highlight_widget = layer.widgets.first?
+          highlight_widget.as(HighlightWidget).update(bounds.width, bounds.height, color)
+          highlight_widget.perform_layout(
+            BoxConstraints.tight(Size.new(bounds.width, bounds.height)),
+            Vec2.new(bounds.x, bounds.y)
+          )
+        end
+        layer.mark_needs_full_render
+      else
+        # First highlight — create new layer
+        create_highlight_layer(target)
+      end
+    end
+
+    # Hide highlight layer without destroying it (preserves object identity for layer cache).
+    # Used when target becomes nil (gap between drop zones) or has opacity=0.
+    private def hide_highlight_layer
+      if layer = @highlight_layer
+        layer.bounds = Rect.new(-1000.0, -1000.0, 0.0, 0.0)
+      end
+    end
+
+    # Destroy highlight layer (only used in cleanup after drag ends)
     private def destroy_highlight_layer
       @highlight_layer = nil
     end
@@ -359,15 +402,22 @@ module CrymbleUI
           dt.drag_hover = false
           dt.on_drag_leave(data)
         end
-        destroy_highlight_layer
 
         # Enter new target
         if new_target && new_target.is_a?(DropTarget)
           dt = new_target.as(DropTarget)
           dt.drag_hover = true
           dt.on_drag_enter(data)
-          # Skip highlight layer if target handles its own highlighting (opacity=0)
-          create_highlight_layer(new_target) if dt.highlight_opacity > 0.0
+          if dt.highlight_opacity > 0.0
+            # Reuse existing highlight layer (avoids layer recollection from object identity change)
+            update_or_create_highlight_layer(new_target)
+          else
+            hide_highlight_layer
+          end
+        else
+          # Target is nil (mouse in gap between drop zones) — hide, don't destroy.
+          # Destroying forces layer recollection when re-entering a drop zone.
+          hide_highlight_layer
         end
 
         @state.current_target = new_target
