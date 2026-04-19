@@ -809,6 +809,17 @@ module CrymbleUI
         background_color: Color.new(0, 0, 0, 0),
         owner_widget: self
       )
+      # Bounds grew (e.g. a sibling section above collapsed and the matrix
+      # gained height)? The layer backend may still fit but the newly-exposed
+      # area would otherwise retain prior pixels. CursorOverlayWidget has
+      # CachePolicy::Never and only paints its current highlight region, so
+      # without an explicit clear the old (smaller) cursor band stays visible
+      # on the bigger layer → column cursor stops short of the last row.
+      if last = @cursor_overlay_layer.not_nil!.last_rendered_bounds
+        if overlay_bounds.height > last.height || overlay_bounds.width > last.width
+          @cursor_overlay_layer.not_nil!.mark_needs_clear_and_render
+        end
+      end
       @cursor_overlay_layer.not_nil!.z_index = base_z + CURSOR_OVERLAY_Z
       @cursor_overlay_layer.not_nil!.blend_mode = @cursor_highlight_delta >= 0 ? BlendMode::Additive : BlendMode::Subtractive
       @cursor_overlay_layer.not_nil!.skip_rebuild_clear = true
@@ -1089,11 +1100,15 @@ module CrymbleUI
       end
       @active_cells.clear
 
-      # Clear content layer to erase stale pixels from old configuration.
-      # Without this, old cell content persists where new cells don't cover the same positions.
-      # NOTE: cursor overlay NOT cleared — it has CachePolicy::Never and regenerates fresh.
+      # Clear every VM layer to erase stale pixels from the pre-invalidate state.
+      # The cursor overlay in particular had "cursor overlay NOT cleared — it has
+      # CachePolicy::Never and regenerates fresh" — but the widget only paints its
+      # CURRENT highlight region; everything outside stays untouched. Old pixels
+      # from a wider (pre-invalidate) band persist → visible ghost row / column
+      # cursor extending past the new data extent.
       @content_layer.try(&.mark_needs_clear_and_render)
       @content_layer.try { |l| l.buffer_origin = Vec2.zero }
+      @cursor_overlay_layer.try(&.mark_needs_clear_and_render)
       if sv = @content_scroll_view
         sv.sticky_row_layer.try(&.mark_needs_clear_and_render)
         sv.sticky_col_layer.try(&.mark_needs_clear_and_render)

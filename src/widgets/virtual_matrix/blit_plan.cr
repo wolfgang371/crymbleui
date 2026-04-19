@@ -30,10 +30,14 @@ module CrymbleUI
           end
         end
 
-        # Non-compound cells must have cached textures and not need fresh content
-        next unless widget.widget_backend
-        return false if widget.needs_render?
-        cells_with_backend += 1
+        # Non-compound cells without widget_backend are freshly created (e.g.
+        # bounds grew and a new sticky cell became visible). The fast path can
+        # still run — those cells will be added to blit_plan_render_widgets and
+        # rendered normally after the blits. So no "return false" here.
+        # But if the cell already has a backend and needs a re-render, the cache
+        # is stale — full render is required.
+        return false if widget.widget_backend && widget.needs_render?
+        cells_with_backend += 1 if widget.widget_backend
       end
       cells_with_backend > 0  # Need at least one cell with cached texture
     end
@@ -131,8 +135,13 @@ module CrymbleUI
           next
         end
 
-        # Non-compound: must have widget_backend for blitting
-        next unless wb
+        # Non-compound: if no cached texture yet (newly created after bounds
+        # grow), render it normally after the blit-plan runs. Otherwise, blit
+        # the cached widget_backend at the (possibly updated) position.
+        unless wb
+          render_list << widget unless widget.bounds.x < -100.0
+          next
+        end
         # Compute new position and blit cached texture
         if !is_sticky_col
           if @viewport_col_positions.has_key?(col) && col < @viewport_col_shifting_index

@@ -455,6 +455,25 @@ the cursor itself is on a sticky row/col (avoids header-highlighting-header).
 
 Cursor flash uses a repeating timer (`CURSOR_FLASH_MS = 400ms`) toggling `flash_on`. Moving the cursor restarts the flash cycle with `flash_on = true` for immediate visual feedback.
 
+### Bounds-grow pixel-clear invariant
+
+The cursor overlay layer is configured with `skip_rebuild_clear = true` because
+the widget has `CachePolicy::Never` and regenerates primitives every frame —
+so in normal operation a per-frame clear is wasteful. But `CachePolicy::Never`
+only promises "fresh primitives", not "fresh pixels over the entire layer": the
+widget only draws its current highlight region.
+
+When the overlay layer's bounds *grow* (e.g. a sibling panel collapses and the
+matrix gains height) while its pre-allocated backend still fits the new
+bounds, `size_changed?` returns false and no automatic re-clear happens.
+The newly-exposed area then retains whatever was there before (old highlight
+pixels, or uninitialized memory for a fresh texture) — producing a cursor
+band that stops one row short, or a ghost row below the data.
+
+`setup_cursor_overlay_layer` defends against this by comparing the new
+`overlay_bounds` against `last_rendered_bounds`; if either dimension grew,
+it explicitly calls `mark_needs_clear_and_render`.
+
 ## Interactive Resize
 
 ### Detection and Drag
@@ -520,23 +539,35 @@ For each sticky cell:
 
 ### Fast Path: compute_sticky_blit_plans
 
-When all sticky cells have cached `widget_backend` and none need re-rendering, the blit plan fast path skips layout+render entirely:
+The blit plan fast path skips layout+render for cells whose cached texture is still valid, but must NOT silently skip cells whose cache is absent:
 
 ```
 Eligibility (sticky_cells_can_use_blit_plan?):
-  - At least one sticky cell with widget_backend
-  - No sticky cell needs_render
+  - At least one sticky cell with widget_backend (so we have SOMETHING to blit)
+  - No cached widget_backend is stale (has widget_backend AND needs_render)
   - No compound cells in non-sticky dimension (they resize on scroll)
+
+  NOTE: cells WITHOUT widget_backend do NOT disqualify the fast path.
+  They are freshly-created cells (e.g. a sibling section collapsed and new
+  sticky rows became visible) and fall through to the render_list below.
 
 Fast path:
   1. Compute new position (same logic as reposition)
   2. Update widget.bounds (for hit-testing)
-  3. Create BlitEntry(source_backend, dest_x, dest_y)
-  4. Set layer.blit_plan = entries
+  3a. If widget_backend present: create BlitEntry(source_backend, dest_x, dest_y)
+  3b. If widget_backend absent: append widget to blit_plan_render_widgets
+  4. Set layer.blit_plan = entries, layer.blit_plan_render_widgets = render_list
   5. mark_needs_full_render (triggers layer_renderer blit plan path)
 ```
 
-Cost: O(sticky_cells) position math + O(sticky_cells) GPU blits, no CPU re-rendering.
+Cost: O(sticky_cells) position math + O(sticky_cells) GPU blits + normal render for
+any uncached cells (usually 0; a handful when bounds grow).
+
+**Cache-validity invariant**: a cell participates in a blit plan only if its
+`widget_backend` accurately reflects its current visual state. The builder MUST
+check both "do I have a cached texture?" AND "is that cache stale?". Silently
+skipping a cell that lacks a cache (instead of rendering it) leaves its layer
+region untouched — blank pixels for the user.
 
 ## Push-Based Adapter Invalidation
 
@@ -549,12 +580,22 @@ Adapter -> VirtualMatrix:
 
 pre_render_flush() (called before rendering):
   If invalidate_all:
-    Re-read dimensions, destroy all cells, trigger_update_visible_cells
+    Re-read dimensions, destroy all cells, clear EVERY VM layer's pixels,
+    trigger_update_visible_cells
   If cell invalidations:
     Destroy specific cells, trigger_update_visible_cells
 ```
 
 Cell-level invalidation destroys only the affected cell from `@active_cells`. The next `update_visible_cells` call will recreate it via `adapter.cell_paint()`, picking up the new data.
+
+**Full-invalidate pixel-clear invariant**: `flush_invalidate_all` MUST call
+`mark_needs_clear_and_render` on every VM-owned layer — content, sticky_row,
+sticky_col, AND cursor_overlay. The cursor overlay is easy to overlook because
+its widget has `CachePolicy::Never` ("it always paints fresh"), but the widget
+only paints its CURRENT highlight region; pixels outside that region are not
+touched. If the previous highlight covered a wider area than the post-invalidate
+one, those old pixels remain visible — the cursor band appears to extend past
+the last data row.
 
 ## Reconciliation
 
