@@ -141,11 +141,27 @@ module CrymbleUI
             size = measure(constraints)
 
             # Use target_x/target_y for absolute positioning if set
-            # Convert from absolute window coords to relative-to-parent coords
+            # Convert from absolute window coords to relative-to-parent coords.
+            # Clamp so the popup never spills past the parent's right/bottom
+            # edges (context menus opened near the right edge of a window
+            # were having their right column clipped).
             actual_position = if @target_x != 0.0 || @target_y != 0.0
-                # Calculate parent's absolute position to convert target to relative
-                parent_abs = @parent.try(&.absolute_bounds.position) || Vec2.zero
-                Vec2.new(@target_x - parent_abs.x, @target_y - parent_abs.y)
+                parent_abs_rect = @parent.try(&.absolute_bounds)
+                parent_abs = parent_abs_rect.try(&.position) || Vec2.zero
+                tx = @target_x
+                ty = @target_y
+                if parent_abs_rect
+                    parent_right = parent_abs.x + parent_abs_rect.width
+                    parent_bottom = parent_abs.y + parent_abs_rect.height
+                    overflow_x = (tx + size.width) - parent_right
+                    overflow_y = (ty + size.height) - parent_bottom
+                    tx -= overflow_x if overflow_x > 0
+                    ty -= overflow_y if overflow_y > 0
+                    # Don't push past the parent's top/left either.
+                    tx = parent_abs.x if tx < parent_abs.x
+                    ty = parent_abs.y if ty < parent_abs.y
+                end
+                Vec2.new(tx - parent_abs.x, ty - parent_abs.y)
             else
                 position
             end

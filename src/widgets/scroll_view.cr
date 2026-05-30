@@ -59,7 +59,15 @@ module CrymbleUI
     # Called after scroll_offset changes via scrollbar interaction, NOT during layout
     @on_scroll_changed : Proc(Vec2, Nil)?
 
-    def initialize(@direction = ScrollDirection::Vertical, id : String? = nil)
+    # Optional size-to-content caps. When set, the ScrollView shrinks to its
+    # content's intrinsic size along the scrolling axis (or both, for
+    # Both-direction) up to these caps. When nil, the ScrollView fills the
+    # parent's constraint (falling back to 200 px if the constraint is
+    # infinite) — the legacy behaviour.
+    property max_height : Float64? = nil
+    property max_width : Float64? = nil
+
+    def initialize(@direction = ScrollDirection::Vertical, @max_height : Float64? = nil, @max_width : Float64? = nil, id : String? = nil)
       super(id: id)
     end
 
@@ -228,10 +236,40 @@ module CrymbleUI
     end
 
     def measure(constraints : BoxConstraints) : Size
-      # Fill available space if constraints are finite
-      # Use reasonable default if constraints are infinite
+      # Legacy default: fill available space; fall back to 200 px when unbounded.
       width = constraints.max_width.finite? ? constraints.max_width : 200.0
       height = constraints.max_height.finite? ? constraints.max_height : 200.0
+
+      # Opt-in size-to-content: when max_height / max_width is set, we first
+      # measure the content at the scrolling axis with infinity, then shrink
+      # the viewport to min(content_extent, cap). The non-scrolling axis
+      # (and the scrolling axis when no content is attached) keeps the
+      # legacy fill-the-constraint behaviour.
+      if (mh = @max_height) && @direction != ScrollDirection::Horizontal
+        content_h = 0.0
+        if content = @content_widget
+          content_w_cap = Math.min(width, @max_width || Float64::INFINITY)
+          measured = content.measure(BoxConstraints.new(
+            min_width: content_w_cap - SCROLLBAR_WIDTH, max_width: content_w_cap - SCROLLBAR_WIDTH,
+            min_height: 0.0, max_height: Float64::INFINITY
+          ))
+          content_h = measured.height
+        end
+        height = Math.min(Math.min(height, mh), content_h)
+      end
+      if (mw = @max_width) && @direction != ScrollDirection::Vertical
+        content_w = 0.0
+        if content = @content_widget
+          content_h_cap = Math.min(height, @max_height || Float64::INFINITY)
+          measured = content.measure(BoxConstraints.new(
+            min_width: 0.0, max_width: Float64::INFINITY,
+            min_height: content_h_cap - SCROLLBAR_WIDTH, max_height: content_h_cap - SCROLLBAR_WIDTH
+          ))
+          content_w = measured.width
+        end
+        width = Math.min(Math.min(width, mw), content_w)
+      end
+
       Size.new(width, height)
     end
 

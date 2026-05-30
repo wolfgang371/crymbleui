@@ -35,6 +35,7 @@
     "panel.title_bar_active": "#1E88E5",
     "panel.title_bar_inactive": "#0D47A1",
     "panel.title_bar_warning": "#B03030",
+    "panel.title_bar_marked": "#3C8C5A",
     "panel.background_warning": "#2E1E1E",
     "panel.title_text": "#FFFFFF",
     "panel.border": "#1565C0",

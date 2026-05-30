@@ -3,6 +3,12 @@ require "./virtual_matrix"
 module CrymbleUI
   module Widgets
     module DirBrowser
+      # Mouse-click double-click window. A second click on the SAME file
+      # within this many milliseconds fires `on_accept` (auto-close the
+      # dialog with that file). Matches the convention used elsewhere in
+      # the framework (TextInput::DOUBLE_CLICK_THRESHOLD_MS = 500).
+      DOUBLE_CLICK_THRESHOLD_MS = 500
+
       # VirtualMatrix adapter for file browser table
       # Row 0 = sticky header (Filename, Size, Date)
       # Rows 1..N = file/directory entries
@@ -19,6 +25,27 @@ module CrymbleUI
         property on_navigate : Proc(String, Nil)? = nil
         property on_select_file : Proc(String, Nil)? = nil
         property on_sort : Proc(Int32, Nil)? = nil
+        # Fired when the user double-clicks a file row (two clicks on the
+        # same file name within DOUBLE_CLICK_THRESHOLD_MS). Hosts wire
+        # this to "accept the dialog with this file selected".
+        property on_accept : Proc(String, Nil)? = nil
+
+        # Double-click bookkeeping — exposed as properties because the
+        # host (a dialog/window panel) typically recreates the adapter on
+        # every render frame, so state can't live on the adapter alone.
+        # Host pattern:
+        #   adapter.last_click_file = dialog.last_click_file
+        #   adapter.last_click_time = dialog.last_click_time
+        # and in `on_select_file` / `on_accept`, the host writes the
+        # values back to the dialog so the NEXT frame re-seeds correctly.
+        property last_click_file : String? = nil
+        property last_click_time : Time::Instant = Time::Instant.new(0_i64, 0_u32)
+
+        # Test seam: rewind the last-click stamp so the next click is
+        # outside the double-click window without sleeping.
+        def expire_last_click_for_test! : Nil
+          @last_click_time = Time::Instant.new(0_i64, 0_u32)
+        end
 
         def get_scrollorder : {Array(Int32), Array(Int32)}
           n = @items.size + 1
@@ -75,9 +102,23 @@ module CrymbleUI
               text_align: TextAlign::Left,
               id: "dirbrowser_item_#{index}") do
               if captured_is_dir
+                # Directory click is always a navigation, never a double-click
+                # accept. Reset the file-side tracker so a stray prior file
+                # click can't double-fire after intervening dir navigation.
+                @last_click_file = nil
                 @on_navigate.try &.call(captured_name.rstrip('/'))
               else
-                @on_select_file.try &.call(captured_name)
+                # File click: check for double-click on the same name.
+                now = Time.instant
+                if @last_click_file == captured_name &&
+                   (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
+                  @last_click_file = nil  # prevent triple-click → re-fire
+                  @on_accept.try &.call(captured_name)
+                else
+                  @last_click_file = captured_name
+                  @last_click_time = now
+                  @on_select_file.try &.call(captured_name)
+                end
               end
             end
           when 1

@@ -392,13 +392,16 @@ end
 
 describe CrymbleUI::Separator do
     describe "#measure" do
-        it "returns fixed height" do
+        it "returns fixed height and minimal natural width" do
             sep = CrymbleUI::Separator.new
             constraints = CrymbleUI::BoxConstraints.new(max_width: 200.0)
             size = sep.measure(constraints)
 
             size.height.should eq(CrymbleUI::Separator::SEPARATOR_HEIGHT)
-            size.width.should eq(200.0)
+            # Separator returns 0 natural width so it doesn't dominate its
+            # column in auto-sizing layouts (see separator.cr for details).
+            # Visual stretching happens in #perform_layout, not #measure.
+            size.width.should eq(0.0)
         end
     end
 end

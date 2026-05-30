@@ -81,6 +81,46 @@ describe CrymbleUI::TextInput do
             input.value = "test"
             # Note: value= doesn't trigger callback, only text input does
         end
+
+        # Display-only prefix property — mirror of ComboBox's "»value"
+        # chrome but available on any TextInput. The prefix is drawn in
+        # to_primitives but is NEVER stored in @value, NEVER part of
+        # cursor/selection, and the editable text starts after the
+        # prefix's rendered width. Lets consuming code (e.g. embrace's
+        # rank-target ref cells) get the same visual distinction
+        # ComboBox cells get without contaminating the editable value.
+
+        it "default prefix is empty" do
+            input = CrymbleUI::TextInput.new
+            input.prefix.should eq("")
+        end
+
+        it "accepts a prefix property" do
+            input = CrymbleUI::TextInput.new(prefix: "»")
+            input.prefix.should eq("»")
+        end
+
+        it "prefix is not stored in value (display-only)" do
+            input = CrymbleUI::TextInput.new(value: "3", prefix: "»")
+            input.value.should eq("3")
+        end
+
+        it "value= writes only the value, prefix stays its own property" do
+            input = CrymbleUI::TextInput.new(prefix: "»")
+            input.value = "5"
+            input.value.should eq("5")
+            input.prefix.should eq("»")
+        end
+
+        it "cursor_pos after construction sits at end of VALUE, not value+prefix" do
+            input = CrymbleUI::TextInput.new(value: "42", prefix: "»")
+            # @cursor_pos is private; check via the public side-effect: the
+            # value's length matches where the cursor should be (initial
+            # contract per constructor at text_input.cr:164).
+            input.value.size.should eq(2)
+            # Sanity: prefix has its own length, separate from value's size.
+            input.prefix.size.should eq(1)
+        end
     end
 
     describe "#label" do

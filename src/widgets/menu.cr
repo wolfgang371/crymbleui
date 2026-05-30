@@ -56,6 +56,27 @@ module CrymbleUI
 
         def open? : Bool; @open end
 
+        # Closed menus keep their items in @menu_items rather than @children,
+        # so the default Widget#find_by_id (which walks @children only) can't
+        # reach them — which would force every headless UX test to first
+        # open the parent menu before locating items by id. Override here to
+        # also descend through preserved items, so logical addressing stays
+        # consistent regardless of menu open/close state.
+        def find_by_id(target_id : String) : Widget?
+            return self if @id == target_id
+            @menu_items.each do |item|
+                if found = item.find_by_id(target_id)
+                    return found
+                end
+            end
+            @children.each do |child|
+                if found = child.find_by_id(target_id)
+                    return found
+                end
+            end
+            nil
+        end
+
         def initialize(
             label : String,
             id : String? = nil,

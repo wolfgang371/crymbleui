@@ -56,6 +56,14 @@ module CrymbleUI
       mark_needs_render
     end
 
+    # Display-only prefix drawn at the cell's left edge before the
+    # editable value. Mirror of CrymbleUI::ComboBox's "»value" chrome,
+    # but available on any TextInput. NEVER appears in @value, the
+    # cursor, or selection — it occupies its own rendered width and the
+    # editable text starts after it. Empty string (the default) means
+    # no prefix is drawn and the widget behaves exactly as before.
+    render_property prefix : String
+
     # Placeholder text (shown when value is empty)
     render_property placeholder : String
 
@@ -146,6 +154,7 @@ module CrymbleUI
       id : String? = nil,
       width : Float64? = nil,
       @placeholder : String = "",
+      @prefix : String = "",
       font_scale : Int32 = 0,
       @text_color : Color = Theme.current.input_text,
       @background_color : Color = Theme.current.input_background,
@@ -174,6 +183,7 @@ module CrymbleUI
       id : String? = nil,
       width : Float64? = nil,
       placeholder : String = "",
+      prefix : String = "",
       font_scale : Int32 = 0,
       text_color : Color = Theme.current.input_text,
       background_color : Color = Theme.current.input_background,
@@ -185,7 +195,7 @@ module CrymbleUI
       on_event : Proc(String, TextInputEvent, Nil)? = nil,
       &block : String -> Nil
     )
-      new(value, id, width, placeholder, font_scale, text_color, background_color, border_color, focused_border_color, placeholder_color, padding, mode, on_event, on_change: block)
+      new(value, id, width, placeholder, prefix, font_scale, text_color, background_color, border_color, focused_border_color, placeholder_color, padding, mode, on_event, on_change: block)
     end
 
     # Override label for path_id generation
@@ -309,6 +319,13 @@ module CrymbleUI
       content_width = bounds.width - (BORDER_WIDTH + @padding) * 2
       content_height = bounds.height - (BORDER_WIDTH + @padding) * 2
 
+      # Display-only prefix — drawn at the left edge in @text_color, never
+      # part of the editable value. After drawing, shift content_x by the
+      # rendered prefix width so the value text / cursor / selection all
+      # auto-align past the prefix (every downstream calculation uses
+      # content_x as the anchor, so a single shift here propagates).
+      prefix_width = @prefix.empty? ? 0.0 : measure_text(@prefix, font_size).width
+
       # Text to display (value or placeholder)
       display_empty = @value.empty?
       display_text = display_empty ? @placeholder : @value
@@ -319,6 +336,8 @@ module CrymbleUI
       # In tall merged cells, text centers properly and scrolls out
       # when the cell shrinks behind a sticky row header.
       text_y = content_y + (content_height - font_size) / 2.0
+      prefix_position = Vec2.new(content_x, text_y)
+      content_x = content_x + prefix_width
       text_position = Vec2.new(content_x, text_y)
 
       primitives do
@@ -330,6 +349,9 @@ module CrymbleUI
         fill_rect(Rect.new(0.0, bounds.height - BORDER_WIDTH, bounds.width, BORDER_WIDTH), current_border_color) # Bottom
         fill_rect(Rect.new(0.0, 0.0, BORDER_WIDTH, bounds.height), current_border_color)                         # Left
         fill_rect(Rect.new(bounds.width - BORDER_WIDTH, 0.0, BORDER_WIDTH, bounds.height), current_border_color) # Right
+
+        # Draw prefix (if any) before the value/cursor/selection area.
+        draw_text(@prefix, prefix_position, @text_color, @font_scale) unless @prefix.empty?
 
         # Draw selection highlight (before text so it's behind)
         # Show selection for: actual selection OR pending_replace (all text will be replaced)

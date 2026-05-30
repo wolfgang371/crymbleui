@@ -291,16 +291,19 @@ module CrymbleUI
             children.find { |c| c.is_a?(MenuBar) }
         end
 
-        # Get bounds for panel area (excludes menubar)
-        # Used for maximize to avoid overlapping menubar
+        # Get bounds for the panel area (excludes menubar at the top AND
+        # statusbar at the bottom). Used for maximize / drag-constrain so
+        # panels never cover either system surface. Without the statusbar
+        # exclusion, maximizing a panel filled to the very bottom of the
+        # window and the statusbar disappeared underneath.
         def panel_area_bounds : Rect
             menubar = children.find { |c| c.is_a?(MenuBar) }
-            if mb = menubar
-                menubar_height = mb.bounds.height
-                Rect.new(@bounds.x, @bounds.y + menubar_height, @bounds.width, @bounds.height - menubar_height)
-            else
-                @bounds
-            end
+            statusbar = children.find { |c| c.is_a?(StatusBar) }
+            top = @bounds.y
+            bottom = @bounds.y + @bounds.height
+            top += menubar.bounds.height if menubar
+            bottom -= statusbar.bounds.height if statusbar
+            Rect.new(@bounds.x, top, @bounds.width, bottom - top)
         end
 
         # Expose root layer for widget state propagation

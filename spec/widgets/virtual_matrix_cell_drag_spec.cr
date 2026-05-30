@@ -102,4 +102,78 @@ describe "VirtualMatrix cell drag-and-drop" do
         # cell_move should have been called
         adapter.move_calls.size.should eq(1)
     end
+
+    it "stamps drag_owner_key into the drag data" do
+        renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+        app = TestApp.new
+
+        adapter = CellDragTestAdapter.new
+        matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "owner_key_test")
+        matrix.drag_owner_key = "shape-A"
+        app.root_widget = matrix
+        app.build_tree
+
+        constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
+        matrix.layout(constraints, CrymbleUI::Vec2.zero)
+        renderer.render_frame(app)
+
+        matrix.on_mouse_down(CrymbleUI::Vec2.new(80.0, 50.0))
+        data = matrix.get_drag_data
+        data.should be_a(CrymbleUI::CellDragData)
+        data.as(CrymbleUI::CellDragData).owner_key.should eq("shape-A")
+    end
+
+    it "delegates a cross-owner drop to cross_drop_handler instead of cell_move" do
+        renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+        app = TestApp.new
+
+        adapter = CellDragTestAdapter.new
+        matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "cross_drop_test")
+        matrix.drag_owner_key = "shape-A"
+        captured = nil.as({CrymbleUI::CellDragData, Int32, Int32}?)
+        matrix.cross_drop_handler = ->(d : CrymbleUI::CellDragData, tr : Int32, tc : Int32) {
+            captured = {d, tr, tc}
+            nil
+        }
+        app.root_widget = matrix
+        app.build_tree
+
+        constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
+        matrix.layout(constraints, CrymbleUI::Vec2.zero)
+        renderer.render_frame(app)
+
+        # A drop whose payload originates from a DIFFERENT owner.
+        foreign = CrymbleUI::CellDragData.new(0, 0, "R0C0", owner_key: "shape-B")
+        matrix.on_drop(foreign, CrymbleUI::Vec2.new(80.0, 150.0))
+
+        captured.should_not be_nil
+        captured.not_nil![0].should eq(foreign)
+        adapter.move_calls.should be_empty
+    end
+
+    it "treats a same-owner drop as a native intra-shape cell_move" do
+        renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+        app = TestApp.new
+
+        adapter = CellDragTestAdapter.new
+        matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "same_owner_test")
+        matrix.drag_owner_key = "shape-A"
+        handler_called = false
+        matrix.cross_drop_handler = ->(d : CrymbleUI::CellDragData, tr : Int32, tc : Int32) {
+            handler_called = true
+            nil
+        }
+        app.root_widget = matrix
+        app.build_tree
+
+        constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
+        matrix.layout(constraints, CrymbleUI::Vec2.zero)
+        renderer.render_frame(app)
+
+        same = CrymbleUI::CellDragData.new(0, 0, "R0C0", owner_key: "shape-A")
+        matrix.on_drop(same, CrymbleUI::Vec2.new(80.0, 150.0))
+
+        handler_called.should be_false
+        adapter.move_calls.size.should eq(1)
+    end
 end

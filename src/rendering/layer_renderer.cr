@@ -345,7 +345,9 @@ module CrymbleUI
         backend.pop_clip
 
         # Hybrid: render additional widgets (rulers) after blit-plan
+        render_widgets_count = 0
         if render_widgets = layer.blit_plan_render_widgets
+          render_widgets_count = render_widgets.size
           layer_offset_x = layer.bounds.x
           layer_offset_y = layer.bounds.y
           drag_offset = Vec2.new(0.0, 0.0)
@@ -359,6 +361,29 @@ module CrymbleUI
         layer.blit_plan = nil # Consume (one-shot)
         layer.needs_clear = false  # Consumed by blit-plan clear (prevents stale flag)
         LayerRenderer.frame_blit_plan_count += 1
+
+        {% if flag?(:cache_validation) %}
+          # CV: validate blit-plan output against immediate-mode fresh render.
+          # Without this, the blit-plan fast path is completely invisible to cv,
+          # so stale widget_backends blitted at wrong positions never trip the dual pipeline.
+          is_matrix_layer = layer.viewport_cache ||
+                            layer.id.starts_with?("sticky_col") ||
+                            layer.id.starts_with?("sticky_row") ||
+                            layer.id.starts_with?("sticky_corner")
+          if CacheValidation.enabled?(:immediate_mode) && is_matrix_layer && backend.responds_to?(:capture_region_pixels)
+            validate_immediate_mode(layer, backend, layer.bounds.x, layer.bounds.y)
+          end
+
+          # Diagnostic: mark where blit-plan fast path actually executes.
+          # Pair with compute_sticky_blit_plans trace to see, per frame,
+          # which cells were routed to blit vs render_list vs skipped.
+          if layer.id.starts_with?("sticky_col")
+            File.open("/tmp/embrace_cv_trace.log", "a") do |f|
+              f.puts "  [blit-plan executed] frame=#{CacheValidation.frame_counter} layer=#{layer.id} entries=#{plan.size} render_widgets=#{render_widgets_count} buffer=#{backend.width}x#{backend.height}"
+            end
+          end
+        {% end %}
+
         layer.clear_render_state
         return
       end
@@ -567,8 +592,15 @@ module CrymbleUI
       {% end %}
 
       {% if flag?(:cache_validation) %}
-        # Immediate mode validation: painter's algorithm via to_primitives() vs cached buffer
-        if CacheValidation.enabled?(:immediate_mode) && layer.viewport_cache && backend.responds_to?(:capture_region_pixels)
+        # Immediate mode validation: painter's algorithm via to_primitives() vs cached buffer.
+        # Runs on matrix_content (viewport-cached) and matrix sticky layers (non-viewport-cached
+        # but still blit-plan-prone). Skip unrelated panels — they have legitimate antialiasing
+        # jitter that would produce spurious cv failures without a real bug.
+        is_matrix_layer = layer.viewport_cache ||
+                          layer.id.starts_with?("sticky_col") ||
+                          layer.id.starts_with?("sticky_row") ||
+                          layer.id.starts_with?("sticky_corner")
+        if CacheValidation.enabled?(:immediate_mode) && is_matrix_layer && backend.responds_to?(:capture_region_pixels)
           validate_immediate_mode(layer, backend, layer_offset_x, layer_offset_y)
         end
       {% end %}
@@ -1916,11 +1948,20 @@ module CrymbleUI
         end
       {% end %}
 
-      # Invalidate widget_backends of cells that were partially clipped at the old buffer
+      # Invalidate the cached backends of cells that were partially clipped at the old buffer
       # boundary. After blit-shift, these cells take the fast path (valid primitive cache,
       # existing widget_backend), but the fast-path blit reproduces the old truncated pixel
-      # count from the clipped position. Force full render path by clearing widget_backend
+      # count from the clipped position. Force the full render path by clearing widget_backend
       # so they get a fresh backend with correct blit dimensions at the new position.
+      #
+      # CRITICAL: also clear background_backend. A boundary-clipped cell captured its
+      # background while partially OUTSIDE the old buffer, so the clipped edge of that cached
+      # background is transparent. On re-render the full path RESTORES the cached background
+      # (size unchanged → no re-capture), re-imprinting the transparent clipped edge as a thin
+      # seam at the old buffer boundary — visible once a column resize shifts a cell across the
+      # boundary and you scroll into it (cells composite over the layer background rather than
+      # painting their own, so a transparent captured edge shows through). Nulling it forces a
+      # fresh capture from the recentered buffer, matching clear_all_widget_backends.
       lo_x = layer.bounds.x.round.to_i
       lo_y = layer.bounds.y.round.to_i
       layer.widgets.each do |widget|
@@ -1933,6 +1974,8 @@ module CrymbleUI
         if ob_y + w_h > buf_h || ob_y < 0 || ob_x + w_w > buf_w || ob_x < 0
           widget.widget_backend.try(&.dispose)
           widget.widget_backend = nil
+          widget.background_backend.try(&.dispose)
+          widget.background_backend = nil
           LayerRenderer.frame_boundary_cells_invalidated += 1
         end
       end

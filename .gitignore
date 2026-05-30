@@ -19,3 +19,7 @@ bin/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code machine-local settings (the memory/ subdir IS tracked, but stays
+# private via `.claude export-ignore` in .gitattributes — never published)
+.claude/settings.local.json

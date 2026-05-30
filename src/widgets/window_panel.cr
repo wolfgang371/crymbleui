@@ -85,6 +85,42 @@ module CrymbleUI
         # Interaction support
         property draggable : Bool
         property resizable : Bool
+
+        # Right-click on the title-bar area. Set by the application; the
+        # internal Chrome widget dispatches to this handler instead of
+        # bubbling up the generic on_right_click_handler. Keeps
+        # body-area right-clicks (which inner widgets like VirtualMatrix
+        # claim for cell context menus) cleanly separated from
+        # title-bar gestures — no coordinate gating needed by callers.
+        property on_title_bar_right_click_handler : Proc(Vec2, Nil)? = nil
+
+        # Optional widget placed at the leading edge of the title bar
+        # (left of the title text). Sized + positioned by Chrome to fit
+        # the title bar height, vertically centered. hit_test routes
+        # mouse events to this widget BEFORE the panel-drag fallback —
+        # so a Draggable widget here acts as a drag handle without
+        # moving the whole panel. The title text shifts right so it
+        # doesn't overlap.
+        @title_bar_leading : Widget? = nil
+
+        def title_bar_leading : Widget?
+            @title_bar_leading
+        end
+
+        def title_bar_leading=(w : Widget?) : Widget?
+            if old = @title_bar_leading
+                @chrome.children.delete(old)
+                old.parent = nil
+            end
+            @title_bar_leading = w
+            if w
+                w.parent = @chrome
+                @chrome.children << w
+            end
+            mark_needs_layout
+            w
+        end
+
         @[Reconcile]
         @interaction_mode : InteractionMode = InteractionMode::Idle
 
@@ -182,6 +218,17 @@ module CrymbleUI
             def perform_layout(constraints : BoxConstraints, position : Vec2)
                 # Chrome bounds = title bar area only (non-overlapping with content!)
                 @bounds = Rect.new(position, Size.new(panel.width, panel.title_bar_height))
+
+                # Lay out the optional leading widget (e.g., a drag handle):
+                # square, sized to match the close button, vertically centred,
+                # with the same edge padding the close button uses.
+                if leading = panel.title_bar_leading
+                    side = panel.close_button_size
+                    pad = panel.close_button_padding
+                    lx = position.x + pad
+                    ly = position.y + (panel.title_bar_height - side) / 2.0
+                    leading.layout(BoxConstraints.tight(Size.new(side, side)), Vec2.new(lx, ly))
+                end
             end
 
             # Render title bar chrome
@@ -208,8 +255,15 @@ module CrymbleUI
                 title_bar = Rect.new(0.0, 0.0, panel.width, title_height)
                 title_bar_border = Rect.new(0.0, title_height - 1, panel.width, 1.0)
 
-                # Title text position
+                # Title text position — shift past the leading widget if present.
+                # leading.bounds is Chrome-relative (parent-relative @bounds),
+                # which is the same coord system text_x lives in. Renderer adds
+                # Chrome's absolute offset when drawing.
                 text_x = panel.title_text_padding
+                if leading = panel.title_bar_leading
+                    lb = leading.bounds
+                    text_x = lb.x + lb.width + panel.title_text_padding
+                end
                 text_y = (title_height - panel.title_font_size) / 2.0
                 text_position = Vec2.new(text_x, text_y)
 
@@ -300,6 +354,17 @@ module CrymbleUI
 
                     if close_btn_rect.contains_point(point)
                         return panel  # Panel handles close button click
+                    end
+                end
+
+                # Optional leading widget (e.g., drag handle): claims hits in
+                # its bounds before the panel-drag fallback below, so dragging
+                # the icon doesn't move the panel.
+                if leading = panel.title_bar_leading
+                    if leading.absolute_bounds.contains_point(point)
+                        if hit = leading.hit_test(point)
+                            return hit
+                        end
                     end
                 end
 
@@ -506,7 +571,18 @@ module CrymbleUI
                     @width = window_bounds.width
                     @height = window_bounds.height
                     @bounds = Rect.new(@x, @y, @width, @height)
-                    mark_needs_layout
+                    # Re-flow children NOW. Window.perform_layout already
+                    # called panel.layout earlier in this pass, using the
+                    # pre-resize @width/@height — so the chrome and the
+                    # content widgets are still positioned for the old
+                    # size. mark_needs_layout alone defers the fix to
+                    # whichever future pass picks it up, leaving stale
+                    # content in the meantime (visible as a maximized
+                    # panel-border with old-size content inside).
+                    perform_layout(
+                        BoxConstraints.tight(Size.new(@width, @height)),
+                        Vec2.new(@x, @y)
+                    )
                 end
                 return
             end
@@ -603,6 +679,20 @@ module CrymbleUI
 
             # Bring this panel to front
             bring_to_front
+
+            # Title-bar right-click → dedicated handler. Routed here
+            # rather than via the generic `on_right_click_handler`
+            # bubble (super below) so application code can attach to
+            # title-bar gestures without coordinate-gating body
+            # right-clicks that inner widgets (VirtualMatrix etc.)
+            # should claim.
+            if button == MouseButton::Right
+                if (h = @on_title_bar_right_click_handler) &&
+                   Rect.new(@x, @y, @width, title_bar_height).contains_point(point)
+                    h.call(point)
+                    return
+                end
+            end
 
             # Also call super to handle any parent panel (nested panels)
             super(point, button)

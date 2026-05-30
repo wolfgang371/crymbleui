@@ -1,7 +1,7 @@
 
 # CrymbleUI
 
-**Version 0.5.0**
+**Version 0.6.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -9,11 +9,15 @@ Declarative and reactive.
 Its name is a pun of Crystal and nimble :smiley:
 
 Currently with SFML 3.0 backend, for Linux and Windows.
-(Windows needed slight patching of SFML.)
+(Windows needed slight patching of SFML, included here)
 
 CrymbleUI is fully AI generated.
+
 Its first line of code emerged 2.11.2025, 19:46.
-Currently is has: src/: ~28790 LOC · spec/: ~48425 LOC
+
+Currently is has:
+- src/: ~29669 LOC
+- spec/: ~50298 LOC
 
 ## Features
 

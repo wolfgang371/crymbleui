@@ -13,6 +13,7 @@ require "./sfml_font"
 require "./draw_primitive"
 require "./layer_renderer"
 require "./crsfml_backend"
+require "./render_debug"
 
 module CrymbleUI
   # SFML-based renderer for CrymbleUI applications
@@ -735,6 +736,14 @@ module CrymbleUI
               @focus_manager.cycle_panel(forward: !key.shift, root: root)
             end
             return true
+          when SF::Keyboard::D # Ctrl+Shift+D = dump render state (dev diagnostic)
+            if key.shift
+              if root = app.root
+                RenderDebug.dump(root)
+                puts "[render dump] /tmp/render_dump/ — #{Layer.active_layers(root).size} layers (PNG per layer + report.txt)"
+              end
+              return true
+            end
           end
         end
 

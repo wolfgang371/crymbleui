@@ -158,6 +158,38 @@ module CrymbleUI
         end
       end
 
+      # Non-interactive mode: let cell widgets receive direct clicks (no
+      # cursor navigation, no proxy forwarding). Used by the `matrix` DSL
+      # sugar for summary / listing tables AND by DirBrowser-style
+      # dialogs where the cells ARE the action targets.
+      #
+      # Cell widgets keep their LOGICAL bounds — scrolling shifts only the
+      # rendering layer, not widget positions (per ScrollView's
+      # "Widget positions don't change, only the viewport offset changes"
+      # contract). So we route through `point_to_cell` (which handles
+      # ruler offset, sticky bands, AND scroll offset) to find which
+      # logical cell the mouse is over, then look up that cell's widget
+      # in @active_cells. Without this, descending into children with a
+      # raw screen-space point returns whatever cell happens to share
+      # the un-scrolled logical position — visibly offset from where the
+      # mouse actually is whenever scroll_offset != 0.
+      unless @interactive_cells
+        ancestor_scroll = ancestor_scroll_offset
+        content_point = Vec2.new(point.x + ancestor_scroll.x, point.y + ancestor_scroll.y)
+        if sv = @content_scroll_view
+          @scroll_offset = sv.scroll_offset
+        end
+        if cell_rc = point_to_cell(content_point)
+          if widget = @active_cells[cell_rc]?
+            # Deep hit_test inside the cell widget in case it contains
+            # nested children. Pass content_point because the cell's
+            # bounds (and its descendants') are in LOGICAL coordinates.
+            return widget.hit_test(content_point) || widget
+          end
+        end
+        return nil
+      end
+
       # VirtualMatrix handles all mouse input for the content area.
       # Cell widgets are managed internally via proxy focus — they should never
       # receive direct clicks (which would steal focus from VirtualMatrix).
@@ -281,12 +313,18 @@ module CrymbleUI
         row, col = cell
         now = Time.instant
 
-        # Double-click on same cell: forward to proxy widget (opens ComboBox, etc.)
+        # Double-click on same cell: first give on_cell_activate callback a
+        # chance (e.g. drill-down into aggregate cells); if it returns true the
+        # activation is handled and proxy forwarding is skipped. Otherwise fall
+        # back to proxy forwarding (opens ComboBox, edit mode, etc.).
         if {row, col} == @last_click_cell &&
            (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
           @last_click_time = Time.instant - 1.hour  # prevent triple-click
-          if proxy = @proxy_focused_widget
-            proxy.on_mouse_up(Vec2.zero)
+          handled = @on_cell_activate.try(&.call({row, col})) || false
+          unless handled
+            if proxy = @proxy_focused_widget
+              proxy.on_mouse_up(Vec2.zero)
+            end
           end
         else
           set_cursor_from_cell({row, col})
@@ -360,16 +398,23 @@ module CrymbleUI
 
     def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       if resize_axis != ResizeAxis::None
-        # Update ScrollView content size directly (avoids mark_needs_layout → rebuild
-        # in DSL apps, which would recreate the adapter and lose user-edited cell data)
-        if sv = @content_scroll_view
-          sv.content_size = Size.new(total_content_width, total_content_height)
-        end
-        # Persist sizes to adapter (survives shape duplication)
+        # Persist the new sizes to the adapter (survives shape duplication).
         if adapter = @adapter
           adapter.custom_col_widths = @col_widths.dup
           adapter.custom_row_heights = @row_heights.dup
         end
+        # Re-lay-out THIS matrix so the finished resize renders identically to a Ctrl+0 full layout.
+        # A column/row resize can flip scrollbar visibility (the content now overflows the viewport),
+        # but the incremental drag path only updates pieces — content_size is a reconcile_property
+        # with no invalidation — so the horizontal scrollbar stays unrendered and the content area
+        # stale until a full layout (the user had to press Ctrl+0 to get a scrollbar). Calling
+        # perform_layout directly with the UNCHANGED bounds re-runs setup_scroll_view (→ the
+        # ScrollView re-evaluates + re-renders its scrollbars) and update_visible_cells (→ cells
+        # reflow into the now scrollbar-reduced content area). Unlike mark_needs_layout it does NOT
+        # go through App#prepare_layout, so it triggers neither an app-level layout nor a DSL rebuild
+        # — cell widget instances (and any in-progress edit) survive. can_skip_layout? would short-
+        # circuit the public layout() here (constraints are unchanged), so we call perform_layout.
+        perform_layout(BoxConstraints.tight(@bounds.size), @bounds.position)
         mark_needs_render
       end
       self.resize_axis = ResizeAxis::None
@@ -413,17 +458,20 @@ module CrymbleUI
       end
 
       # Cell operations BEFORE proxy forwarding (Ctrl+X/V, Insert, Delete)
-      # Must be first — otherwise proxy (TextInput) intercepts Ctrl+V as clipboard paste
+      # Must be first — otherwise proxy (TextInput) intercepts Ctrl+V as clipboard paste.
+      # Require unmodified Ctrl (no Shift/Alt) so combined shortcuts like Ctrl+Shift+X
+      # pass through to the shortcut manager — those address shape/app-level actions
+      # distinct from the cell-level Cut/Paste/SetUndefined this branch covers.
       if handler = @on_key_action
         rc = @cursor_rc
         case key
         when SF::Keyboard::Key::X
-          if control
+          if control && !shift && !alt
             handler.call(CellAction::Cut, rc)
             return true
           end
         when SF::Keyboard::Key::V
-          if control
+          if control && !shift && !alt
             handler.call(CellAction::Paste, rc)
             return true
           end
@@ -433,6 +481,11 @@ module CrymbleUI
         when SF::Keyboard::Key::Delete
           handler.call(CellAction::Delete, rc)
           return true
+        when SF::Keyboard::Key::U
+          if control && !shift && !alt
+            handler.call(CellAction::SetUndefined, rc)
+            return true
+          end
         end
       end
 
@@ -461,6 +514,12 @@ module CrymbleUI
         when SF::Keyboard::Key::Tab
           # Don't forward Tab — let VirtualMatrix handle it
         when SF::Keyboard::Key::Enter, SF::Keyboard::Key::Space
+          # App-level activation (e.g. drill-down) gets priority over the
+          # proxy's default Enter/Space handler. If on_cell_activate returns
+          # true, skip proxy forward entirely.
+          if @on_cell_activate.try(&.call(@cursor_rc))
+            return true
+          end
           if proxy.on_key_down(key, control, shift)
             return true
           end
@@ -535,6 +594,13 @@ module CrymbleUI
       # and re-establishes proxy focus via update_visible_cells
       snap_to_cursor(for_edit: true)
 
+      # App-level activation (e.g. drill-down on aggregate cells) takes
+      # priority over edit mode. If on_cell_activate returns true, the first
+      # typed character opens the drilled view instead of seeding edit text.
+      if @on_cell_activate.try(&.call(@cursor_rc))
+        return true
+      end
+
       # Proxy focus forwarding: forward text to the proxy-focused cell widget
       if proxy = @proxy_focused_widget
         proxy.on_text_input(char)
@@ -568,7 +634,7 @@ module CrymbleUI
       if src = @drag_source_cell
         if adapter = @adapter
           name = adapter.cell_get_name(src[0], src[1])
-          CellDragData.new(src[0], src[1], name)
+          CellDragData.new(src[0], src[1], name, @drag_owner_key)
         end
       end
     end
@@ -600,14 +666,21 @@ module CrymbleUI
 
     def on_drop(data : DragData, position : Vec2)
       return unless data.is_a?(CellDragData)
-      if target = point_to_cell(position)
-        if adapter = @adapter
-          new_cursor = adapter.cell_move(data.row, data.col, target[0], target[1])
-          set_cursor_from_cell(new_cursor)
-          update_cell_states
-          mark_needs_render
-          @on_cell_drop_handler.try &.call
-        end
+      return unless target = point_to_cell(position)
+      # Cross-owner drop: the payload came from a different matrix, so its
+      # (row, col) are meaningless here — a native cell_move would corrupt
+      # data. Delegate to the app, which reconstructs the source cell from
+      # the payload's owner_key and routes through its own dispatcher.
+      if (owner = data.owner_key) && owner != @drag_owner_key
+        @cross_drop_handler.try &.call(data, target[0], target[1])
+        return
+      end
+      if adapter = @adapter
+        new_cursor = adapter.cell_move(data.row, data.col, target[0], target[1])
+        set_cursor_from_cell(new_cursor)
+        update_cell_states
+        mark_needs_render
+        @on_cell_drop_handler.try &.call
       end
     end
 

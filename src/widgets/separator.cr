@@ -40,16 +40,30 @@ module CrymbleUI
             "separator"
         end
 
-        # Measure separator - full width, fixed height
+        # Measure separator. Width is MINIMAL at measure time so that layout
+        # containers (grids, popups) don't size themselves around the
+        # separator's preferred width — the separator visually stretches at
+        # `perform_layout` time when the parent allocates a tight width.
+        #
+        # Previously this returned `constraints.max_width`, which broke
+        # auto-sizing layouts: a parent's first measure (INFINITY constraints)
+        # got 150 px while a second measure under tight constraints (e.g.
+        # popup.perform_layout passing loose(available_width)) got the full
+        # available width — making the natural width balloon between the two
+        # passes and forcing RecursiveGrid#scale_to_fill to shrink ALL
+        # columns proportionally. Concrete bug: cell-context-menu shortcut
+        # column (e.g. "Ctrl+U") was scaled down ~15%, clipping the
+        # rightmost glyph.
         def measure(constraints : BoxConstraints) : Size
-            width = constraints.max_width.finite? ? constraints.max_width : 150.0
-            Size.new(width, SEPARATOR_HEIGHT)
+            Size.new(0.0, SEPARATOR_HEIGHT)
         end
 
-        # Layout separator
+        # Layout separator — stretch to the allocated width (the parent has
+        # decided how much room we get; fill it). Falls back to 150 px if the
+        # parent gave an unbounded constraint, mirroring the pre-fix default.
         def perform_layout(constraints : BoxConstraints, position : Vec2)
-            size = measure(constraints)
-            @bounds = Rect.new(position, size)
+            width = constraints.max_width.finite? ? constraints.max_width : 150.0
+            @bounds = Rect.new(position, Size.new(width, SEPARATOR_HEIGHT))
         end
 
         # Generate primitives for rendering

@@ -30,23 +30,22 @@ describe CrymbleUI::Separator do
     end
 
     describe "#measure" do
-        it "returns full width with fixed height" do
+        it "returns minimal natural width (0) regardless of constraint" do
+            # A separator should NOT dominate a column's natural width — its
+            # job is to fill space at layout time, not claim it at measure
+            # time. Returning constraint.max_width here was a real bug: the
+            # natural width grew between popup measure passes (INFINITY → 150,
+            # loose(N) → N), forcing RecursiveGrid#scale_to_fill to shrink
+            # other columns and clipping their content (e.g. "Ctrl+U" in the
+            # cell context menu).
             separator = CrymbleUI::Separator.new
-            constraints = CrymbleUI::BoxConstraints.new(max_width: 200.0, max_height: 300.0)
 
-            size = separator.measure(constraints)
+            size = separator.measure(CrymbleUI::BoxConstraints.new(max_width: 200.0, max_height: 300.0))
+            size.width.should eq(0.0)
+            size.height.should eq(CrymbleUI::Separator::SEPARATOR_HEIGHT)
 
-            size.width.should eq(200.0)  # Full constraint width
-            size.height.should eq(CrymbleUI::Separator::SEPARATOR_HEIGHT)  # Fixed 5.0
-        end
-
-        it "uses default width when max_width is infinite" do
-            separator = CrymbleUI::Separator.new
-            constraints = CrymbleUI::BoxConstraints.new
-
-            size = separator.measure(constraints)
-
-            size.width.should eq(150.0)  # Default fallback
+            size = separator.measure(CrymbleUI::BoxConstraints.new)  # infinite
+            size.width.should eq(0.0)
             size.height.should eq(CrymbleUI::Separator::SEPARATOR_HEIGHT)
         end
     end

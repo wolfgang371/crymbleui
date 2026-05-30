@@ -56,6 +56,11 @@ module CrymbleUI
     render_property text_background_color : Color?
     render_property text_background_colors : Array(Color)?
 
+    # Collapsed-cell background override. When nil, the collapsed ComboBox
+    # uses Theme.current.combo_background; when set, it uses this color.
+    # Used e.g. by diff-highlighted cells in embrace.
+    render_property background_color : Color?
+
     # Selection callback
     @on_select : Proc(Int32, String, Nil)?
 
@@ -113,6 +118,7 @@ module CrymbleUI
       id : String? = nil,
       @text_background_color : Color? = nil,
       @text_background_colors : Array(Color)? = nil,
+      @background_color : Color? = nil,
       &block : Int32, String -> Nil
     )
       super(id: id)
@@ -131,7 +137,8 @@ module CrymbleUI
       width : Float64? = nil,
       id : String? = nil,
       @text_background_color : Color? = nil,
-      @text_background_colors : Array(Color)? = nil
+      @text_background_colors : Array(Color)? = nil,
+      @background_color : Color? = nil
     )
       super(id: id)
       @items = items
@@ -193,8 +200,9 @@ module CrymbleUI
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
       primitives do
-        # Background
-        fill_rect(local_bounds, Theme.current.combo_background)
+        # Background — override-able so callers (e.g. embrace's diff-Shape
+        # highlight) can tint the cell without losing the combo widget.
+        fill_rect(local_bounds, @background_color || Theme.current.combo_background)
         # Border
         draw_rect(local_bounds, Theme.current.combo_border)
         # Text (vertically centered in content area, matching TextInput alignment)

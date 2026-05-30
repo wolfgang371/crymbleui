@@ -758,11 +758,17 @@ describe CrymbleUI::VirtualMatrix do
       cell = matrix.active_cells[{0, 1}]?
       cell.should_not be_nil, "Cell (0,1) should exist"
 
-      # col 1 has natural index < shifting_index (2), so it's PINNED at positions[1] = col_w.
-      # With rulers, add ruler_col_width_pixels since sticky_row_layer starts at
-      # ruler_col_w + sticky_col_w and the pinned position needs ruler offset.
+      # A sticky-ROW cell is a header sitting above its column; it must track that column
+      # horizontally so it stays aligned with BOTH the content layer and the column ruler,
+      # which scroll uniformly (content_x − live_scroll). So at scroll=10 cell (0,1) sits at
+      # its content position MINUS the scroll (= ruler + col_w − 10 = 133), aligning with
+      # column 1's data — exactly what this example's name asserts. The earlier expectation
+      # here pinned it at a scroll-independent slot (143), per the old StickyMath "freeze
+      # not-yet-shifted columns" model; that model is the very sub-column-hscroll FREEZE the
+      # uniform-scroll fix removed (see virtual_matrix_sticky_row_hscroll_spec). Pinning would
+      # misalign the header from its own column and ruler.
       ruler_col_w = CrymbleUI::VirtualMatrix::RULER_COL_WIDTH * 20.0  # 40px
-      cell.not_nil!.bounds.x.should be_close(col_w + ruler_col_w, 1.0)
+      cell.not_nil!.bounds.x.should be_close(col_w + ruler_col_w - scroll_x, 1.0)
     end
   end
 

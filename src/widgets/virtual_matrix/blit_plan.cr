@@ -135,38 +135,38 @@ module CrymbleUI
           next
         end
 
-        # Non-compound: if no cached texture yet (newly created after bounds
-        # grow), render it normally after the blit-plan runs. Otherwise, blit
-        # the cached widget_backend at the (possibly updated) position.
-        unless wb
-          render_list << widget unless widget.bounds.x < -100.0
-          next
-        end
-        # Compute new position and blit cached texture
+        # Non-compound: always recompute the scroll-adjusted position
+        # BEFORE deciding blit vs render. If a newly-visible cell (wb=NIL)
+        # carried a stale position from a prior scroll state, render_single_widget
+        # would otherwise paint it off-screen — that's the Amanita-rank-blank bug.
+        # Screen-space position = content position − live scroll. (The removed
+        # @viewport_col_positions/@viewport_row_positions branch reused the content layer's CACHED
+        # StickyMath positions, which drop the sub-column scroll → froze sticky cells for any scroll
+        # smaller than one column. Sticky layers aren't viewport_cache, so they carry the scroll.)
         if !is_sticky_col
-          if @viewport_col_positions.has_key?(col) && col < @viewport_col_shifting_index
-            new_x = ruler_x_offset + @viewport_col_positions[col].to_f64
-          else
-            content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-            new_x = ruler_x_offset + content_x - @scroll_offset.x.to_i.to_f64
-          end
+          content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
+          new_x = ruler_x_offset + content_x - @scroll_offset.x.to_i.to_f64
         else
           new_x = ruler_x_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
         end
 
         if !is_sticky_row
-          if @viewport_row_positions.has_key?(row) && row < @viewport_row_shifting_index
-            new_y = ruler_y_offset + @viewport_row_positions[row].to_f64
-          else
-            content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-            new_y = ruler_y_offset + content_y - @scroll_offset.y.to_i.to_f64
-          end
+          content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
+          new_y = ruler_y_offset + content_y - @scroll_offset.y.to_i.to_f64
         else
           new_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
         end
 
         if widget.bounds.x != new_x || widget.bounds.y != new_y
           widget.bounds = Rect.new(new_x, new_y, widget.bounds.width, widget.bounds.height)
+        end
+
+        # No cached texture yet (newly created after bounds grow / viewport
+        # shift). Route to render_list for normal rendering at the freshly
+        # set bounds — cull only if truly off-screen horizontally.
+        unless wb
+          render_list << widget unless widget.bounds.x < -100.0
+          next
         end
 
         dest_x = (vm_abs.x + new_x - layer.bounds.x).to_i
@@ -191,6 +191,108 @@ module CrymbleUI
         sticky_corner_layer.blit_plan = corner_entries
         sticky_corner_layer.blit_plan_render_widgets = corner_render if corner_render.any?
         sticky_corner_layer.mark_needs_full_render
+      end
+
+      {% if flag?(:cache_validation) %}
+        validate_sticky_cell_bounds_invariant(col_sizes, row_sizes, col_cum, row_cum,
+          ruler_x_offset, ruler_y_offset, sticky_rows, sticky_cols)
+      {% end %}
+      {% if flag?(:verify_bounds) %} verify_sticky_positions! {% end %}
+    end
+
+    # Dev assertion (build with -Dverify_bounds, e.g. in CI). Every non-compound sticky cell's bounds
+    # must equal the screen-space position derived INDEPENDENTLY from its index + the LIVE scroll:
+    # sticky axis → pinned at the content position; scrolling axis → content position − scroll. This
+    # is the exact invariant the "sticky cell positioned from a stale cache" bug (the column-widen
+    # ruler/data desync, 2026-05-30) violated. Unlike the cache-validation dual pipeline, it does NOT
+    # read the same cached positions the renderer used, so it cannot "agree on garbage"; it fires the
+    # frame the bounds go wrong. Cheap (a few comparisons over the handful of sticky header cells).
+    {% if flag?(:verify_bounds) %}
+      private def verify_sticky_positions!
+        srows = sticky_row_count
+        scols = sticky_col_count
+        return if srows == 0 && scols == 0
+        cc = @cached_col_physical_cum
+        rc = @cached_row_physical_cum
+        return unless cc && rc
+        rx = ruler_col_width_pixels
+        ry = ruler_row_height_pixels
+        sx = @scroll_offset.x.to_i.to_f64
+        sy = @scroll_offset.y.to_i.to_f64
+        @active_cells.each do |key, w|
+          row, col = key
+          next unless row < srows || col < scols
+          bb = get_bounding_box(key)
+          next if bb[0] != bb[1] # compound cells size themselves; checked elsewhere
+          exp_x = col < scols ? rx + cc[col].to_f64 : rx + cc[col].to_f64 - sx
+          exp_y = row < srows ? ry + rc[row].to_f64 : ry + rc[row].to_f64 - sy
+          if (w.bounds.x - exp_x).abs > 1.0 || (w.bounds.y - exp_y).abs > 1.0
+            STDERR.puts "[VERIFY_BOUNDS] matrix##{@id}: sticky cell #{key} at " \
+                        "(#{w.bounds.x.round(1)},#{w.bounds.y.round(1)}) expected " \
+                        "(#{exp_x.round(1)},#{exp_y.round(1)}) scroll=(#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)})"
+          end
+        end
+      end
+    {% end %}
+
+    # Structural invariant: every active cell's widget.bounds must match
+    # the canonical position derived from its (row,col) index and current
+    # scroll_offset. Violations of this invariant are the "stale bounds"
+    # class of rendering bugs (widget paints at the wrong position, often
+    # off-screen → appears blank). cv's dual pipeline can't detect them —
+    # both paths read widget.bounds, so both render at the same wrong
+    # position and "agree" on garbage. This check catches the bug at its
+    # source, one frame after the offending layout runs, with zero false
+    # positives and identical behavior in headless and real GUI.
+    private def validate_sticky_cell_bounds_invariant(
+        col_sizes : Array(Int32), row_sizes : Array(Int32),
+        col_cum : Array(Int32)?, row_cum : Array(Int32)?,
+        ruler_x_offset : Float64, ruler_y_offset : Float64,
+        sticky_rows : Int32, sticky_cols : Int32)
+      return unless col_cum && row_cum
+      scroll_x_i = @scroll_offset.x.to_i.to_f64
+      scroll_y_i = @scroll_offset.y.to_i.to_f64
+      violations = [] of String
+      @active_cells.each do |key, widget|
+        row, col = key
+        # Skip cells outside the sticky corridor (they live on content_layer,
+        # repositioned by a different code path).
+        next unless row < sticky_rows || col < sticky_cols
+        # Compound cells use custom sizing logic; verify separately.
+        bb = get_bounding_box(key)
+        next if bb[0] != bb[1]
+
+        is_sticky_col = col < sticky_cols
+        is_sticky_row = row < sticky_rows
+        expected_x = if is_sticky_col
+                       ruler_x_offset + col_cum[col].to_f64
+                     else
+                       ruler_x_offset + col_cum[col].to_f64 - scroll_x_i
+                     end
+        expected_y = if is_sticky_row
+                       ruler_y_offset + row_cum[row].to_f64
+                     else
+                       ruler_y_offset + row_cum[row].to_f64 - scroll_y_i
+                     end
+        if (widget.bounds.x - expected_x).abs > 1.0 || (widget.bounds.y - expected_y).abs > 1.0
+          violations << "key=(#{row},#{col}) expected=(#{expected_x.round(1)},#{expected_y.round(1)}) actual=(#{widget.bounds.x.round(1)},#{widget.bounds.y.round(1)}) wb=#{widget.widget_backend ? "yes" : "NIL"}"
+        end
+      end
+
+      # Log every frame (trace) plus register a cv failure when violations
+      # exist — the latter makes the failure visible to test assertions.
+      File.open("/tmp/embrace_cv_trace.log", "a") do |f|
+        f.puts "--- compute_sticky_blit_plans frame=#{CacheValidation.frame_counter} scroll=(#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) active=#{@active_cells.size} violations=#{violations.size}"
+        violations.each { |v| f.puts "    !!! BOUNDS-STALE #{v}" }
+      end
+      if violations.any?
+        CacheValidation.record_failure(
+          CacheValidation::CacheLevel::LayoutCache,
+          "virtual_matrix:#{@id || "?"}",
+          violations.size,
+          @active_cells.size,
+          {0, 0, 0_u32, 0_u32}
+        )
       end
     end
 
@@ -247,8 +349,20 @@ module CrymbleUI
             compound_w = single_col_size
           end
         else
-          new_x = OFFSCREEN_PARK
-          compound_w = 0.0
+          # All constituent columns outside viewport. Distinguish scrolled-past
+          # (behind sticky header) from not-yet-visible (right of viewport).
+          # Without this, row-0 compound headers whose cols are initially right-of-
+          # viewport get parked at OFFSCREEN_PARK with w=0 instead of their true
+          # off-screen content position — so returning from scroll-right leaves
+          # them parked instead of restoring their original layout.
+          last_col_right = ruler_x_offset + (col_cum ? col_cum[bb_c2 + 1].to_f64 : (0..bb_c2).sum { |c| col_sizes[c] }.to_f64)
+          if last_col_right - @scroll_offset.x.to_i.to_f64 <= sticky_col_w
+            new_x = OFFSCREEN_PARK
+            compound_w = 0.0
+          else
+            new_x = true_x
+            compound_w = (bb_c1..bb_c2).sum { |ci| col_sizes[ci].to_f64 }
+          end
         end
       end
 
@@ -286,8 +400,15 @@ module CrymbleUI
             compound_h = single_row_size
           end
         else
-          new_y = OFFSCREEN_PARK
-          compound_h = 0.0
+          # Mirror of the column path above for rows (row-scroll case).
+          last_row_bottom = ruler_y_offset + (row_cum ? row_cum[bb_r2 + 1].to_f64 : (0..bb_r2).sum { |r| row_sizes[r] }.to_f64)
+          if last_row_bottom - @scroll_offset.y.to_i.to_f64 <= sticky_row_h
+            new_y = OFFSCREEN_PARK
+            compound_h = 0.0
+          else
+            new_y = true_y
+            compound_h = (bb_r1..bb_r2).sum { |ri| row_sizes[ri].to_f64 }
+          end
         end
       end
 

@@ -55,9 +55,22 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Override to set custom sizes (e.g. wider header columns, taller header rows).
     def get_sizes : {Array(Float64), Array(Float64)}
       row_order, col_order = get_scrollorder
-      rows = custom_row_heights || Array.new(row_order.size, DEFAULT_ROW_HEIGHT)
-      cols = custom_col_widths || Array.new(col_order.size, DEFAULT_COLUMN_WIDTH)
+      rows = fit_custom_sizes(custom_row_heights, row_order.size, DEFAULT_ROW_HEIGHT)
+      cols = fit_custom_sizes(custom_col_widths, col_order.size, DEFAULT_COLUMN_WIDTH)
       {rows, cols}
+    end
+
+    # Normalize a persisted custom-size array to EXACTLY `count` entries. The row/column structure
+    # can change (commits added/removed, fields added) AFTER custom_row_heights/custom_col_widths
+    # were persisted on a drag-resize, leaving them the wrong length. Returning a mismatched array
+    # desyncs VirtualMatrix's @col_widths from @cols: the ruler iterates 0...@cols while the data
+    # extent uses @col_widths, so they disagree (only the ruler scrolls), and get_col_width(col)
+    # raises IndexError past the array end (seen in copy_state_from → max_content_scroll_x). Preserve
+    # the existing prefix (per-column resize survives), pad new columns with the default, drop removed.
+    private def fit_custom_sizes(custom : Array(Float64)?, count : Int32, default : Float64) : Array(Float64)
+      return Array.new(count, default) unless custom
+      return custom if custom.size == count
+      Array.new(count) { |i| custom[i]? || default }
     end
 
     # Row operations (optional - default implementations do nothing)

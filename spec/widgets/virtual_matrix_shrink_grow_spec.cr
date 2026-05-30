@@ -89,7 +89,7 @@ describe "VirtualMatrix shrink+grow invariants" do
 
         sv = matrix.@content_scroll_view.not_nil!
         sc = sv.sticky_col_layer.not_nil!
-        backend = sc.backend.not_nil!
+        backend = sc.backend.not_nil!.as(CrymbleUI::Testing::TestRenderBackend)
 
         # Sample every sticky-col cell's center; every one should have at least
         # some TextInput ink (not just the sticky bg color).
@@ -185,7 +185,7 @@ describe "VirtualMatrix shrink+grow invariants" do
         renderer.settle_rendering(app)
 
         overlay = matrix.@cursor_overlay_layer.not_nil!
-        backend = overlay.backend.not_nil!
+        backend = overlay.backend.not_nil!.as(CrymbleUI::Testing::TestRenderBackend)
 
         # Compute expected data extent: ruler + N rows × row_height
         fh = CrymbleUI::VirtualMatrix::FRAME_HEIGHT_BASE * CrymbleUI::FontSizing.zoom_factor

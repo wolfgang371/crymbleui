@@ -42,8 +42,12 @@ module CrymbleUI
     getter row : Int32
     getter col : Int32
     getter display : String
+    # Identity of the matrix this cell was dragged from (copied from the
+    # source VM's drag_owner_key). Lets a drop on a *different* matrix
+    # recognise the payload as cross-owner. nil = untagged (legacy callers).
+    getter owner_key : String?
 
-    def initialize(@row : Int32, @col : Int32, @display : String)
+    def initialize(@row : Int32, @col : Int32, @display : String, @owner_key : String? = nil)
     end
 
     def data_type : String
@@ -68,6 +72,17 @@ module CrymbleUI
     # Callback after cell drop completes (for app-level updates like shape.update + rebuild)
     property on_cell_drop_handler : Proc(Nil)? = nil
 
+    # Identity of the shape/owner this matrix belongs to. Stamped into the
+    # drag data (get_drag_data) so a drop on a *different* matrix can tell
+    # the payload is cross-owner and route it differently.
+    property drag_owner_key : String? = nil
+
+    # Handler for a cross-owner cell drop (payload whose owner_key differs
+    # from this matrix's drag_owner_key). When set, such a drop is delegated
+    # here with (data, target_row, target_col) INSTEAD of the native
+    # intra-shape cell_move. Same-owner / untagged drops are unaffected.
+    property cross_drop_handler : Proc(CellDragData, Int32, Int32, Nil)? = nil
+
     # Cell keyboard actions dispatched via on_key_action callback
     enum CellAction
       Cut
@@ -75,10 +90,20 @@ module CrymbleUI
       Insert
       Delete
       CancelCut
+      SetUndefined
     end
 
     # Keyboard action callback: action + cursor {row, col}
     property on_key_action : Proc(CellAction, Tuple(Int32, Int32), Nil)? = nil
+
+    # App-level cell activation callback. Invoked before default handling on:
+    #   - double-click (before proxy.on_mouse_up forward)
+    #   - Enter/Space key (before proxy.on_key_down forward)
+    #   - first typed character (before proxy.on_text_input forward)
+    # Return true to indicate the activation was handled — skips the default
+    # proxy forwarding. Return false / leave unset to get default behavior.
+    # Typical use: drill-down on aggregate cells.
+    property on_cell_activate : Proc(Tuple(Int32, Int32), Bool)? = nil
 
     @drag_target_cell : Tuple(Int32, Int32)? = nil
 
@@ -694,11 +719,61 @@ module CrymbleUI
 
     # === LAYOUT ===
 
+    # When true, measure() returns the intrinsic size of all cells + rulers
+    # instead of filling the parent's constraint. For embedded VMs in a
+    # vstack / tree_node where VM shouldn't take over the whole panel.
+    property shrink_to_content : Bool = false
+    # Upper bound on VM height — pairs with shrink_to_content. When the
+    # intrinsic content height exceeds this cap, VM sizes to the cap and
+    # the vertical scrollbar becomes active.
+    property max_height : Float64? = nil
+
+    # When false, VM does NOT intercept cell-level mouse events: clicks
+    # flow directly to child cell widgets (Checkbox, Button, etc.), and
+    # no cursor-highlight overlay is drawn. Use for embedded summary /
+    # listing tables where navigation and cell-cursor semantics aren't
+    # wanted. Default true preserves the normal spreadsheet-style UX.
+    property interactive_cells : Bool = true
+
     def measure(constraints : BoxConstraints) : Size
-      # Fill available space
-      width = constraints.max_width.finite? ? constraints.max_width : 400.0
-      height = constraints.max_height.finite? ? constraints.max_height : 300.0
-      Size.new(width, height)
+      if @shrink_to_content
+        # Intrinsic size matches VM's own total_content_{width,height} so
+        # the internal scroll_view's content_size equals the viewport_size
+        # (no internal scrollbar needed). Mirrors col_width_pixels /
+        # row_height_pixels which add grid_spacing per cell.
+        fh = frame_height
+        gs = grid_spacing
+        intrinsic_h = ruler_row_height_pixels + @row_heights.sum { |h| gs + h * fh }
+        intrinsic_w = ruler_col_width_pixels + @col_widths.sum { |w| gs + w * fh }
+        # Reserve scrollbar-column width so the right-most cell isn't
+        # clipped by the internal ScrollView's vertical scrollbar when
+        # content overflows vertically. Cheap to always reserve it — the
+        # scrollbar layer is inert when not needed.
+        intrinsic_w += ScrollView::SCROLLBAR_WIDTH
+        # Width: clamp to available constraint; when columns would overflow,
+        # scale them down proportionally so the full matrix fits horizontally
+        # (no internal horizontal scrollbar). Caller explicitly chooses
+        # shrink_to_content; in that mode full visibility is the intent.
+        # Also invalidate dimension caches so the rescaled widths propagate
+        # through VM's internal pixel bookkeeping.
+        if constraints.max_width.finite? && intrinsic_w > constraints.max_width
+          scale = constraints.max_width / intrinsic_w
+          @col_widths = @col_widths.map { |w| w * scale }
+          invalidate_dimension_caches
+          intrinsic_w = constraints.max_width
+        end
+        width = constraints.max_width.finite? ? Math.min(intrinsic_w, constraints.max_width) : intrinsic_w
+        # Height: cap at optional max_height AND the parent's constraint.
+        max_h = @max_height
+        capped_h = max_h ? Math.min(intrinsic_h, max_h) : intrinsic_h
+        height = constraints.max_height.finite? ? Math.min(capped_h, constraints.max_height) : capped_h
+        Size.new(width, height)
+      else
+        # Fill available space (legacy default).
+        width = constraints.max_width.finite? ? constraints.max_width : 400.0
+        height = constraints.max_height.finite? ? constraints.max_height : 300.0
+        Size.new(width, height)
+      end
     end
 
     def perform_layout(constraints : BoxConstraints, position : Vec2)
@@ -714,7 +789,9 @@ module CrymbleUI
       base_z = parent_layer_z_index
 
       setup_content_layer(content_x, content_y, content_width, content_height, base_z)
-      setup_cursor_overlay_layer(content_x, content_y, content_width, content_height, base_z)
+      if @interactive_cells
+        setup_cursor_overlay_layer(content_x, content_y, content_width, content_height, base_z)
+      end
       setup_scroll_view(full_width, full_height)
       sync_scroll_offsets
       @content_layer.not_nil!.scroll_offset = @scroll_offset
@@ -1455,13 +1532,14 @@ module CrymbleUI
           @active_cells[key] = cell
           new_cells << cell  # Track for targeted rendering
 
-          # Layout the NEW cell at its FIXED content-space position
-          # Bug 2 fix: Use absolute content coordinates, NOT scroll-relative creation_col_offset.
-          # For viewport_cache layers, cells have fixed positions; buffer_origin handles viewport shift.
-          # Ruler offset: cells must start AFTER the ruler strips so they align with
-          # the sticky layer boundaries (sticky_col_width = ruler_col_w + sticky_col_w_pixels).
-          x = ruler_col_width_pixels.to_i + col_physical_cum[col]
-          y = ruler_row_height_pixels.to_i + row_physical_cum[row]
+          # Layout the NEW cell at its FIXED content-space position.
+          # Use canonical (bounding-box top-left), not the dynamic-handle key:
+          # for a merged cell, the dynamic handle migrates as scroll progresses
+          # while the cell's content-space rect is anchored to its top-left.
+          # Using key.row/col here would slide the cell off its cluster, leaving
+          # cached pixels at the wrong content y after the next scroll cycle.
+          x = ruler_col_width_pixels.to_i + col_physical_cum[canonical[1]]
+          y = ruler_row_height_pixels.to_i + row_physical_cum[canonical[0]]
           bounding = get_bounding_box(key)
 
           # Use visible compound size if available (WU3: partial scroll shrinking)
