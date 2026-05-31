@@ -1,7 +1,7 @@
 
 # CrymbleUI
 
-**Version 0.6.0**
+**Version 0.6.1**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.

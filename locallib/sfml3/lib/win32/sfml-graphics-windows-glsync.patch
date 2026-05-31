@@ -1,0 +1,87 @@
+diff --git a/src/SFML/Graphics/Font.cpp b/src/SFML/Graphics/Font.cpp
+index dcbf04ff..27fbc672 100644
+--- a/src/SFML/Graphics/Font.cpp
++++ b/src/SFML/Graphics/Font.cpp
+@@ -26,6 +26,8 @@
+ // Headers
+ ////////////////////////////////////////////////////////////
+ #include <SFML/Graphics/Font.hpp>
++#include <SFML/Graphics/GLCheck.hpp>
++#include <SFML/Graphics/GLExtensions.hpp>
+ #include <SFML/Graphics/Image.hpp>
+ #include <SFML/Graphics/Texture.hpp>
+ #ifdef SFML_SYSTEM_ANDROID
+@@ -656,6 +658,17 @@ Glyph Font::loadGlyph(char32_t codePoint, unsigned int characterSize, bool bold,
+         const auto dest       = Vector2u(glyph.textureRect.position) - Vector2u(padding, padding);
+         const auto updateSize = Vector2u(glyph.textureRect.size) + 2u * Vector2u(padding, padding);
+         page.texture.update(m_pixelBuffer.data(), updateSize, dest);
++
++        // PATCH (out-of-tree, Windows font glyph garbling fix): force the
++        // upload to complete before SF::Text samples the atlas in the same
++        // frame. Without this, on Windows GL drivers the upload may not be
++        // visible yet and the sampler reads garbage, producing random wrong
++        // glyphs. Localising the sync to the glyph upload (rather than
++        // every Texture::update call) avoids the input-lag and dropped-
++        // event regression that a global Texture::update glFinish caused.
++        // See crymble-ui/docs/WINDOWS_SFML_GL_SYNC_BUG.md for the full
++        // investigation.
++        glCheck(glFinish());
+     }
+ 
+     // Delete the FT glyph
+diff --git a/src/SFML/Graphics/Texture.cpp b/src/SFML/Graphics/Texture.cpp
+index 572f3238..1d24961f 100644
+--- a/src/SFML/Graphics/Texture.cpp
++++ b/src/SFML/Graphics/Texture.cpp
+@@ -42,6 +42,7 @@
+ #include <atomic>
+ #include <ostream>
+ #include <utility>
++#include <vector>
+ 
+ #include <cassert>
+ #include <cstring>
+@@ -325,17 +326,33 @@ bool Texture::resize(Vector2u size, bool sRgb)
+     const GLint textureWrapParam = m_isRepeated ? GL_REPEAT : GLEXT_GL_CLAMP_TO_EDGE;
+ #endif
+ 
+-    // Initialize the texture
++    // PATCH (out-of-tree, Windows font garbling fix): pass zero-filled data
++    // instead of nullptr, then glFinish() to force completion. Without this,
++    // Windows GL drivers leave the new texture's content undefined and a
++    // subsequent glTexSubImage2D upload can race with the allocation,
++    // resulting in random glyph garbling in font atlases. See
++    // crymble-ui/docs/WINDOWS_SFML_GL_SYNC_BUG.md for the full investigation.
+     glCheck(glBindTexture(GL_TEXTURE_2D, m_texture));
+-    glCheck(glTexImage2D(GL_TEXTURE_2D,
+-                         0,
+-                         (m_sRgb ? GLEXT_GL_SRGB8_ALPHA8 : GL_RGBA),
+-                         static_cast<GLsizei>(m_actualSize.x),
+-                         static_cast<GLsizei>(m_actualSize.y),
+-                         0,
+-                         GL_RGBA,
+-                         GL_UNSIGNED_BYTE,
+-                         nullptr));
++    {
++        const std::size_t zeroBytes = static_cast<std::size_t>(m_actualSize.x) *
++                                      static_cast<std::size_t>(m_actualSize.y) * 4u;
++        const std::vector<std::uint8_t> zeros(zeroBytes, 0);
++        glCheck(glTexImage2D(GL_TEXTURE_2D,
++                             0,
++                             (m_sRgb ? GLEXT_GL_SRGB8_ALPHA8 : GL_RGBA),
++                             static_cast<GLsizei>(m_actualSize.x),
++                             static_cast<GLsizei>(m_actualSize.y),
++                             0,
++                             GL_RGBA,
++                             GL_UNSIGNED_BYTE,
++                             zeros.data()));
++        // NOTE: no glFinish() here — it was needed for correctness in
++        // the original analysis but causes a ~20ms stall per texture
++        // creation. crymble-ui creates ~12 layer textures per full
++        // rebuild so the cumulative cost was 240+ms per keystroke.
++        // The Font::loadGlyph glFinish (in Font.cpp) is sufficient for
++        // glyph atlas correctness. See WINDOWS_SFML_GL_SYNC_BUG.md.
++    }
+     glCheck(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, textureWrapParam));
+     glCheck(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, textureWrapParam));
+     glCheck(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, m_isSmooth ? GL_LINEAR : GL_NEAREST));
