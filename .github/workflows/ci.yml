@@ -1,0 +1,76 @@
+name: CI
+
+# Build + test crymble-ui on Linux and Windows. SFML 3 / CSFML 3 are vendored under
+# locallib/{sfml3,csfml3}/lib/{linux,win32}/ and wired by setup.sh / setup.bat — so we do
+# NOT build SFML here. The specs run headless (TestRenderBackend / TestFont), no display
+# needed, and run in a single `crystal spec` (unlike embrace, crymble-ui has no GUI/non-GUI
+# fiber split). Slow specs (tag "slow", ~10 min) are skipped to keep CI fast — run the full
+# suite locally before a release.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.0"
+
+      - name: Install SFML 3 build + runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libopenal1 libfreetype6 \
+            libx11-6 libxrandr2 libxcursor1 libxi6 libudev1 \
+            libvorbisfile3 libflac12
+
+      - name: shards install
+        run: shards install
+
+      - name: Build a sample demo (exercises the SFML/CSFML link)
+        run: |
+          source setup.sh
+          shards build showcase_demo
+
+      - name: Specs (headless, excl. slow)
+        run: |
+          source setup.sh
+          crystal spec -- --tag '~slow'
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.0"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: shards install
+        run: shards install
+
+      # setup.bat prepends the vendored win32 static libs to LIB/INCLUDE; persist them to
+      # the job env so the following bash steps see them.
+      - name: Wire vendored SFML/CSFML (from setup.bat)
+        shell: cmd
+        run: |
+          call setup.bat
+          echo LIB=%LIB%>> %GITHUB_ENV%
+          echo INCLUDE=%INCLUDE%>> %GITHUB_ENV%
+          echo CSFML_INCLUDE_DIR=%CSFML_INCLUDE_DIR%>> %GITHUB_ENV%
+
+      - name: Build a sample demo (exercises the SFML/CSFML link)
+        shell: bash
+        run: shards build showcase_demo
+
+      - name: Specs (headless, excl. slow)
+        shell: bash
+        run: crystal spec -- --tag '~slow'

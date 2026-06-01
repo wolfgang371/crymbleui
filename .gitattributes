@@ -1,0 +1,19 @@
+# Line endings for cross-platform (esp. Windows) checkouts.
+# Text/source defaults to LF — Windows otherwise checks out CRLF, which adds \r to
+# the heredoc-based spec fixtures (spec/table/*) and fails the suite.
+* text=auto eol=lf
+# Batch files MUST stay CRLF — cmd.exe mis-parses LF-only .bat/.cmd (breaks
+# setup.bat / tools/win-build.bat: REM lines run as commands, if/else falls through).
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Binary assets: never normalize. Covers embrace's icons/fonts AND crymble-ui's
+# vendored SFML/CSFML libs, so this one injected file is safe for both repos.
+*.png binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.so  binary
+*.dll binary
+*.lib binary
+*.a   binary
+*.dylib binary

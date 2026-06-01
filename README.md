@@ -1,7 +1,9 @@
 
 # CrymbleUI
 
-**Version 0.6.1**
+[![CI](https://github.com/wolfgang371/crymbleui/actions/workflows/ci.yml/badge.svg)](https://github.com/wolfgang371/crymbleui/actions/workflows/ci.yml)
+
+**Version 0.6.2**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
