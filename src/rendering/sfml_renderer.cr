@@ -10,6 +10,7 @@ require "../widgets/window_panel"
 require "../widgets/popup"
 require "./sfml_paint_context"
 require "./sfml_font"
+require "./sfml_clipboard"
 require "./draw_primitive"
 require "./layer_renderer"
 require "./crsfml_backend"
@@ -163,6 +164,9 @@ module CrymbleUI
 
       # Set global font for text measurement (wrap in SFMLFont)
       Widget.font = SFMLFont.new(@default_font)
+
+      # Set global clipboard to the platform (SFML) clipboard
+      Widget.clipboard = SFMLClipboard.new
 
       # Initialize cursors
       @cursor_arrow = SF::Cursor.new

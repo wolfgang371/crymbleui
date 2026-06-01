@@ -906,15 +906,15 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)  # Select all
                 input.on_key_down(SF::Keyboard::Key::C, true, false)  # Copy
 
-                SF::Clipboard.string.should eq("hello")
+                CrymbleUI::Widget.clipboard.string.should eq("hello")
             end
 
             it "does nothing without selection" do
-                SF::Clipboard.string = "original"
+                CrymbleUI::Widget.clipboard.string = "original"
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::C, true, false)
 
-                SF::Clipboard.string.should eq("original")
+                CrymbleUI::Widget.clipboard.string.should eq("original")
             end
         end
 
@@ -927,14 +927,14 @@ describe CrymbleUI::TextInput do
                 # Selected "he"
                 input.on_key_down(SF::Keyboard::Key::X, true, false)
 
-                SF::Clipboard.string.should eq("he")
+                CrymbleUI::Widget.clipboard.string.should eq("he")
                 input.value.should eq("llo")
             end
         end
 
         describe "Ctrl+V paste" do
             it "pastes clipboard at cursor" do
-                SF::Clipboard.string = "world"
+                CrymbleUI::Widget.clipboard.string = "world"
                 input = CrymbleUI::TextInput.new(value: "hello ")
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
 
@@ -942,7 +942,7 @@ describe CrymbleUI::TextInput do
             end
 
             it "replaces selection with pasted text" do
-                SF::Clipboard.string = "world"
+                CrymbleUI::Widget.clipboard.string = "world"
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::A, true, false)  # Select all
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
@@ -951,7 +951,7 @@ describe CrymbleUI::TextInput do
             end
 
             it "does nothing with empty clipboard" do
-                SF::Clipboard.string = ""
+                CrymbleUI::Widget.clipboard.string = ""
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
 
@@ -965,13 +965,13 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)
                 input.on_key_down(SF::Keyboard::Key::Insert, true, false)
 
-                SF::Clipboard.string.should eq("test")
+                CrymbleUI::Widget.clipboard.string.should eq("test")
             end
         end
 
         describe "Shift+Insert paste (alternative)" do
             it "pastes clipboard" do
-                SF::Clipboard.string = "pasted"
+                CrymbleUI::Widget.clipboard.string = "pasted"
                 input = CrymbleUI::TextInput.new(value: "")
                 input.on_key_down(SF::Keyboard::Key::Insert, false, true)
 
@@ -985,7 +985,7 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)
                 input.on_key_down(SF::Keyboard::Key::Delete, false, true)
 
-                SF::Clipboard.string.should eq("cut me")
+                CrymbleUI::Widget.clipboard.string.should eq("cut me")
                 input.value.should eq("")
             end
         end

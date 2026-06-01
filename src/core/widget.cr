@@ -2,6 +2,7 @@ require "./types"
 require "./scheduler"
 require "./cache_policy"
 require "./font"
+require "./clipboard"
 require "../rendering/draw_primitive"
 require "../input/shortcut_manager"
 require "../input/focus_manager"
@@ -67,6 +68,9 @@ module CrymbleUI
 
         # Global font for text measurement (set by renderer)
         @@font : Font?
+
+        # Global clipboard (set by renderer; in-memory stub in specs)
+        @@clipboard : Clipboard?
 
         # Render count instrumentation (for testing optimization)
         @@render_count : Int32 = 0
@@ -135,6 +139,16 @@ module CrymbleUI
         # Get the global font
         def self.font : Font?
             @@font
+        end
+
+        # Set the global clipboard (called by renderer)
+        def self.clipboard=(clipboard : Clipboard)
+            @@clipboard = clipboard
+        end
+
+        # Get the global clipboard
+        def self.clipboard : Clipboard
+            @@clipboard || raise "Clipboard not initialized"
         end
 
         # Enable/disable warnings (duplicate IDs, shortcut conflicts, etc.)

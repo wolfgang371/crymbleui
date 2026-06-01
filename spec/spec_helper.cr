@@ -12,6 +12,7 @@ require "../src/layout/vstack"
 require "../src/layout/hstack"
 require "../src/testing/widget_tester"
 require "../src/testing/test_font"
+require "../src/testing/test_clipboard"
 require "../src/testing/gui_test_helpers"
 require "../src/input/focus_manager"
 require "../src/widgets/virtual_matrix/adapter"
@@ -21,6 +22,9 @@ include CrymbleUI::Testing::GUITestHelpers
 
 # Setup headless font for text measurement (no SFML required)
 CrymbleUI::Widget.font = CrymbleUI::Testing::TestFont.new
+
+# Setup in-memory clipboard (no SFML/display required)
+CrymbleUI::Widget.clipboard = CrymbleUI::Testing::TestClipboard.new
 
 # Setup scheduler for timer-based tests (cursor blink, animations)
 CrymbleUI::Widget.scheduler = CrymbleUI::Scheduler.new

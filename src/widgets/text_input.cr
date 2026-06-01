@@ -721,13 +721,13 @@ module CrymbleUI
     # Copy selected text to clipboard
     private def copy_selection
       return unless has_selection?
-      SF::Clipboard.string = selected_text
+      Widget.clipboard.string = selected_text
     end
 
     # Cut selected text to clipboard
     private def cut_selection
       return unless has_selection?
-      SF::Clipboard.string = selected_text
+      Widget.clipboard.string = selected_text
       delete_selection
       reset_cursor_blink
       mark_needs_render
@@ -735,7 +735,7 @@ module CrymbleUI
 
     # Paste from clipboard at cursor position
     private def paste_clipboard
-      text = SF::Clipboard.string
+      text = Widget.clipboard.string
       return if text.empty?
 
       # Delete selection first if any
