@@ -22,12 +22,14 @@ end
 describe "Keyboard Shortcut Integration" do
     it "triggers state change when shortcut is pressed" do
         app = ShortcutTestApp.new
-        renderer = CrymbleUI::SFMLRenderer.new(
-            width: 400,
-            height: 300,
-            title: "Test",
-            headless: true
-        )
+        # Headless: drive a real ShortcutManager directly instead of opening an
+        # SFMLRenderer. SFMLRenderer.new would open a real window (X11 on Linux) and
+        # replace the global Widget.font with an SFML font — the latter skews every
+        # headless layout spec that runs afterward. This mirrors what
+        # SFMLRenderer#initialize does for shortcuts: set the global manager, then
+        # build so the DSL registers the button's "^I" into it.
+        shortcut_manager = CrymbleUI::ShortcutManager.new
+        CrymbleUI::Widget.shortcut_manager = shortcut_manager
 
         # Set up app
         CrymbleUI::Widget.app = app
@@ -50,7 +52,7 @@ describe "Keyboard Shortcut Integration" do
         event.code = SF::Keyboard::I
 
         # Handle the shortcut
-        handled = renderer.shortcut_manager.handle_key_event(event, nil)
+        handled = shortcut_manager.handle_key_event(event, nil)
 
         # Verify shortcut was handled
         handled.should be_true

@@ -415,14 +415,6 @@ describe CrymbleUI::VirtualMatrix do
                 "cell_bounds=#{cell_19.bounds} buf_origin=#{buf_origin} " \
                 "has_backend=#{!cell_19.widget_backend.nil?}"
           failures << msg
-
-          # Save PPM screenshots for first 3 failures
-          if failures.size <= 3
-            win_backend.as(CrymbleUI::Testing::TestRenderBackend).save_ppm("/tmp/bugd_win_step#{step}.ppm")
-            if lb = content_layer.try(&.backend)
-              lb.as(CrymbleUI::Testing::TestRenderBackend).save_ppm("/tmp/bugd_buf_step#{step}.ppm")
-            end
-          end
         end
       end
 
@@ -499,12 +491,6 @@ describe CrymbleUI::VirtualMatrix do
                 "cell_bounds=#{cell_19.bounds} buf_origin=#{buf_origin} " \
                 "has_backend=#{!cell_19.widget_backend.nil?}"
           failures << msg
-          if failures.size <= 3
-            win_backend.as(CrymbleUI::Testing::TestRenderBackend).save_ppm("/tmp/bugd_rt_win_step#{step}.ppm")
-            if lb = content_layer.try(&.backend)
-              lb.as(CrymbleUI::Testing::TestRenderBackend).save_ppm("/tmp/bugd_rt_buf_step#{step}.ppm")
-            end
-          end
         end
       end
 

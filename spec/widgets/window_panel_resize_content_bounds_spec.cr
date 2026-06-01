@@ -267,41 +267,9 @@ describe "WindowPanel resize content bounds" do
     panel = app.find("panel").as(CrymbleUI::WindowPanel)
     scroll = app.find("scroll").as(CrymbleUI::ScrollView)
 
-    # INSTRUMENTATION: Log layer bounds to understand the issue
-    panel_layer = panel.layer.not_nil!
-    File.open("/tmp/resize_debug.log", "w") do |f|
-      f.puts "=== RESIZE DEBUG ==="
-      f.puts "Panel bounds: #{panel.bounds}"
-      f.puts "Panel absolute_bounds: #{panel.absolute_bounds}"
-      f.puts "Panel layer bounds: #{panel_layer.bounds}"
-      f.puts ""
-      f.puts "ScrollView bounds: #{scroll.bounds}"
-      f.puts "ScrollView absolute_bounds: #{scroll.absolute_bounds}"
-      if content_layer = scroll.content_layer
-        f.puts "ScrollView content_layer bounds: #{content_layer.bounds}"
-      else
-        f.puts "ScrollView content_layer: NIL"
-      end
-      if scrollbar_layer = scroll.scrollbar_layer
-        f.puts "ScrollView scrollbar_layer bounds: #{scrollbar_layer.bounds}"
-      end
-      f.puts ""
-      f.puts "Initial panel layer bounds: #{initial_panel_layer_bounds}"
-      f.puts "Initial scroll layer bounds: #{initial_scroll_layer_bounds}"
-      f.puts ""
-
-      # Check if layer bounds changed appropriately
-      f.puts "Panel layer width change: #{panel_layer.bounds.width - initial_panel_layer_bounds.width}"
-      f.puts "Panel layer height change: #{panel_layer.bounds.height - initial_panel_layer_bounds.height}"
-    end
-
     # ScrollView has its own layer - check ScrollView content_layer backend
     content_layer = scroll.content_layer.not_nil!
     scroll_backend = content_layer.backend.as(CrymbleUI::Testing::TestRenderBackend)
-
-    File.open("/tmp/resize_debug.log", "a") do |f|
-      f.puts "ScrollView backend size: #{scroll_backend.width}x#{scroll_backend.height}"
-    end
 
     # Content should render in ScrollView's layer
     # Sample pixels in ScrollView layer (layer-local coordinates start at 0,0)
@@ -329,20 +297,8 @@ describe "WindowPanel resize content bounds" do
       end
     end
 
-    File.open("/tmp/resize_debug.log", "a") do |f|
-      f.puts "Found #{content_pixels.size} content pixels in ScrollView layer"
-      content_pixels.first(10).each { |p| f.puts "  #{p}" }
-
-      # Also check: does the layer bounds match widget absolute_bounds?
-      f.puts ""
-      f.puts "=== COORDINATE CHECK ==="
-      f.puts "ScrollView layer position: (#{content_layer.bounds.x}, #{content_layer.bounds.y})"
-      f.puts "ScrollView absolute_bounds: (#{scroll.absolute_bounds.x}, #{scroll.absolute_bounds.y})"
-      f.puts "MISMATCH?" if content_layer.bounds.x != scroll.absolute_bounds.x || content_layer.bounds.y != scroll.absolute_bounds.y
-    end
-
     found_content.should be_true,
-      "No content pixels found in ScrollView layer - content may be rendering at wrong offset. See /tmp/resize_debug.log"
+      "No content pixels found in ScrollView layer - content may be rendering at wrong offset."
 
     app.handle_mouse_up(CrymbleUI::Vec2.new(new_resize_x, new_resize_y))
   end

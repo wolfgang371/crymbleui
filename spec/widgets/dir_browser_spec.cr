@@ -5,13 +5,13 @@ require "../../src/rendering/layer_renderer"
 
 # Stub File::Info — the adapter only reads `directory?`, and File::Info
 # can't be constructed directly outside the stdlib. We wrap a real File.info
-# on /tmp (a directory) and /etc/hostname (a file) as cheap stand-ins.
+# on Dir.tempdir (a directory) and __FILE__ (a file) as cross-platform stand-ins.
 private def dir_info : File::Info
-    File.info("/tmp")
+    File.info(Dir.tempdir)
 end
 
 private def file_info : File::Info
-    File.info("/etc/hostname")
+    File.info(__FILE__)
 end
 
 describe "VirtualMatrix non-interactive mode (DirBrowser use case)" do
@@ -25,8 +25,8 @@ describe "VirtualMatrix non-interactive mode (DirBrowser use case)" do
         # a clickable cell widget is rendered at (1, 0) — the same shape
         # the dialog uses.
         adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
-        # Use /tmp (a directory) so the row renders as a navigable entry.
-        adapter.items = [{"only/", "", "", File.info("/tmp")}]
+        # Use a directory (Dir.tempdir) so the row renders as a navigable entry.
+        adapter.items = [{"only/", "", "", File.info(Dir.tempdir)}]
 
         matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "nim")
         matrix.interactive_cells = false
@@ -55,7 +55,7 @@ describe "VirtualMatrix non-interactive mode (DirBrowser use case)" do
     it "hit_test respects scroll offset (highlights line up with mouse after scroll)" do
         adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
         # Many rows so scrolling actually moves things.
-        adapter.items = (0...50).map { |i| {"f#{i}/", "", "", File.info("/tmp")} }
+        adapter.items = (0...50).map { |i| {"f#{i}/", "", "", File.info(Dir.tempdir)} }
 
         matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "scroll")
         matrix.interactive_cells = false

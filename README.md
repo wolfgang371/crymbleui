@@ -3,7 +3,7 @@
 
 [![CI](https://github.com/wolfgang371/crymbleui/actions/workflows/ci.yml/badge.svg)](https://github.com/wolfgang371/crymbleui/actions/workflows/ci.yml)
 
-**Version 0.6.2**
+**Version 0.6.3**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -19,7 +19,7 @@ Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
 - src/: ~29669 LOC
-- spec/: ~50298 LOC
+- spec/: ~50242 LOC
 
 ## Features
 
