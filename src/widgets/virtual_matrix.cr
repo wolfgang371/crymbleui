@@ -69,10 +69,10 @@ module CrymbleUI
     property drag_source_cell : Tuple(Int32, Int32)? = nil
     property drag_source_was_preexisting : Bool = false
 
-    # Callback after cell drop completes (for app-level updates like shape.update + rebuild)
+    # Callback after cell drop completes (for app-level updates like a data refresh + rebuild)
     property on_cell_drop_handler : Proc(Nil)? = nil
 
-    # Identity of the shape/owner this matrix belongs to. Stamped into the
+    # Identity of the owner this matrix belongs to. Stamped into the
     # drag data (get_drag_data) so a drop on a *different* matrix can tell
     # the payload is cross-owner and route it differently.
     property drag_owner_key : String? = nil
@@ -80,21 +80,8 @@ module CrymbleUI
     # Handler for a cross-owner cell drop (payload whose owner_key differs
     # from this matrix's drag_owner_key). When set, such a drop is delegated
     # here with (data, target_row, target_col) INSTEAD of the native
-    # intra-shape cell_move. Same-owner / untagged drops are unaffected.
+    # intra-owner cell_move. Same-owner / untagged drops are unaffected.
     property cross_drop_handler : Proc(CellDragData, Int32, Int32, Nil)? = nil
-
-    # Cell keyboard actions dispatched via on_key_action callback
-    enum CellAction
-      Cut
-      Paste
-      Insert
-      Delete
-      CancelCut
-      SetUndefined
-    end
-
-    # Keyboard action callback: action + cursor {row, col}
-    property on_key_action : Proc(CellAction, Tuple(Int32, Int32), Nil)? = nil
 
     # App-level cell activation callback. Invoked before default handling on:
     #   - double-click (before proxy.on_mouse_up forward)
@@ -118,7 +105,7 @@ module CrymbleUI
     @pending_cell_invalidations : Set(Tuple(Int32, Int32)) = Set(Tuple(Int32, Int32)).new
     @pending_invalidate_all : Bool = false
 
-    # Cell sizing (in frame_height multiples, like ImGui)
+    # Cell sizing (in frame_height multiples)
     GRID_SPACING_BASE = 3.0  # Pixels between grid cells at zoom 1.0 (balances readability vs density)
     GRID_SPACING      = 3    # Integer alias at zoom 1.0 (for spec backwards compat)
     # Backward-compat aliases (canonical location: MatrixAdapter)
@@ -448,7 +435,7 @@ module CrymbleUI
     # Derive sticky count from scroll_order tail.
     # Elements at the end of scroll_order that form a contiguous set {0, 1, ..., N-1}
     # are considered sticky (they scroll out last and render at fixed positions).
-    # This matches the original imgui design where scroll_order is the sole mechanism.
+    # scroll_order is the sole mechanism for stickiness — there is no separate sticky flag.
     private def derive_sticky_count(scroll_order : Array(Int32)) : Int32
       count = 0
       sticky_set = Set(Int32).new
@@ -2066,7 +2053,7 @@ module CrymbleUI
           @scroll_offset.y.clamp(0.0, max_content_scroll_y)
         )
 
-        # Transfer pending invalidation (e.g. from cross-shape data change that
+        # Transfer pending invalidation (e.g. from a cross-owner data change that
         # fired on the old widget before reconciliation rebound the adapter callbacks).
         # Without this, flush_invalidate_all never runs → layers keep stale pixels.
         @pending_invalidate_all = true if old.@pending_invalidate_all

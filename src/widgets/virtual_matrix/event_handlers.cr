@@ -457,47 +457,15 @@ module CrymbleUI
         snap_to_cursor(for_edit: true)
       end
 
-      # Cell operations BEFORE proxy forwarding (Ctrl+X/V, Insert, Delete)
-      # Must be first — otherwise proxy (TextInput) intercepts Ctrl+V as clipboard paste.
-      # Require unmodified Ctrl (no Shift/Alt) so combined shortcuts like Ctrl+Shift+X
-      # pass through to the shortcut manager — those address shape/app-level actions
-      # distinct from the cell-level Cut/Paste/SetUndefined this branch covers.
-      if handler = @on_key_action
-        rc = @cursor_rc
-        case key
-        when SF::Keyboard::Key::X
-          if control && !shift && !alt
-            handler.call(CellAction::Cut, rc)
-            return true
-          end
-        when SF::Keyboard::Key::V
-          if control && !shift && !alt
-            handler.call(CellAction::Paste, rc)
-            return true
-          end
-        when SF::Keyboard::Key::Insert
-          handler.call(CellAction::Insert, rc)
-          return true
-        when SF::Keyboard::Key::Delete
-          handler.call(CellAction::Delete, rc)
-          return true
-        when SF::Keyboard::Key::U
-          if control && !shift && !alt
-            handler.call(CellAction::SetUndefined, rc)
-            return true
-          end
-        end
-      end
-
-      # Escape: proxy gets first shot (TextInput: undo edit, ComboBox: close popup),
-      # then always dispatch cancel_cut (clears cut highlight + dismisses context menu).
-      # Panel-scoped Escape shortcuts (dialog close) are handled BEFORE focus dispatch
-      # in the SFML renderer, so this only runs for panels without an Escape shortcut.
+      # Escape: the proxy gets first shot (TextInput: undo edit, ComboBox:
+      # close popup). Panel-scoped Escape shortcuts (dialog close) are handled
+      # BEFORE focus dispatch in the SFML renderer. Cancelling a pending cell
+      # cut is an app-level concern (the owner's handle_escape) — the matrix no
+      # longer carries cell-op vocabulary (T-006).
       if key == SF::Keyboard::Key::Escape
         if proxy = @proxy_focused_widget
           proxy.on_key_down(key, control, shift)
         end
-        @on_key_action.try &.call(CellAction::CancelCut, @cursor_rc)
         return true
       end
 
@@ -523,8 +491,15 @@ module CrymbleUI
           if proxy.on_key_down(key, control, shift)
             return true
           end
-          if key == SF::Keyboard::Key::Enter && proxy.is_a?(TextInput)
-            clear_proxy_focus
+          if proxy.is_a?(TextInput)
+            # A focused text editor: Enter commits + exits edit; Space is
+            # TEXT (it arrives as a separate TextEntered and is forwarded
+            # by on_text_input). Neither activates — trigger_click here
+            # would re-focus the input (on_click -> request_focus -> re-arm
+            # QuickEntry's replace-on-first-key), wiping what was typed
+            # before the space ("A B" -> " B"). Consume the keypress either
+            # way so it never falls through to grid activation.
+            clear_proxy_focus if key == SF::Keyboard::Key::Enter
             return true
           end
           proxy.trigger_click
@@ -612,7 +587,7 @@ module CrymbleUI
 
     # === CELL DRAG-AND-DROP ===
 
-    # Draggable: ghost bounds = drag bounding box (spans full record region)
+    # Draggable: ghost bounds = drag bounding box (spans the full multi-cell region)
     def drag_ghost_bounds : Rect?
       if src = @drag_source_cell
         if adapter = @adapter

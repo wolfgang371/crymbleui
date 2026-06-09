@@ -234,8 +234,14 @@ module CrymbleUI
         end
         clip_w = layer.bounds.width.ceil.to_i
         clip_h = layer.bounds.height.ceil.to_i
-        sprite = SF::Sprite.new(backend.as(CrSFMLBackend).texture)
-        sprite.texture_rect = SF.int_rect(0, 0, clip_w, clip_h)
+        sfml_backend = backend.as(CrSFMLBackend)
+        sprite = SF::Sprite.new(sfml_backend.texture)
+        # Viewport-cache layers paint at +cache-margin inside their
+        # oversized buffer — sample like the live compositor does
+        # (Layer#viewport_sample_origin), or the capture shifts their
+        # content by the cache margin.
+        src_x, src_y = layer.viewport_cache ? layer.viewport_sample_origin(sfml_backend.width, sfml_backend.height, clip_w, clip_h) : {0, 0}
+        sprite.texture_rect = SF.int_rect(src_x, src_y, clip_w, clip_h)
         sprite.position = SF.vector2f(layer.bounds.x.round(:ties_away).to_f32, layer.bounds.y.round(:ties_away).to_f32)
         rt.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
       end
@@ -432,15 +438,8 @@ module CrymbleUI
                        SF::Color::White
                      end
 
-      # Viewport position within buffer = scroll_offset - buffer_origin
-      viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
-      viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
-
-      # Clamp to valid buffer region
-      buffer_width = backend.width
-      buffer_height = backend.height
-      viewport_x = viewport_x.clamp(0, [buffer_width - viewport_width, 0].max)
-      viewport_y = viewport_y.clamp(0, [buffer_height - viewport_height, 0].max)
+      # Viewport position within buffer — shared math (Layer#viewport_sample_origin)
+      viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_width, viewport_height)
 
       # TRACE: Log viewport cache compositor details with calculated sample position
       if ENV["CRYMBLE_TRACE"]? == "1"
@@ -963,10 +962,10 @@ module CrymbleUI
       return unless window = @window # Headless mode - no window to render to
       return unless root = app.root
 
-      # Sync background color from app (license-based coloring, etc.)
+      # Sync background color from app (app may override; nil = theme default).
       @background_color = app.app_background_color || Theme.current.app_background
 
-      # Sync window title from root widget (e.g. "H3O Embrace (license summary)")
+      # Sync window title from root widget (e.g. "MyApp — document.txt")
       if root.is_a?(Window)
         new_title = root.as(Window).title
         if new_title != @current_title

@@ -9,13 +9,12 @@ module CrymbleUI
   # Usage via the `matrix` DSL helper:
   # ```
   # matrix(max_height: 200.0, sticky_row_count: 1, id: "summary") do |m|
-  #   m.header "Table", "+Rec", "+Fld", "Cells"
+  #   m.header "Name", "Size", "Modified"
   #   rows.each do |entry|
   #     m.row do |r|
   #       r << text(entry.name)
-  #       r << text(entry.records.to_s)
-  #       r << text(entry.fields.to_s)
-  #       r << text(entry.cells.to_s)
+  #       r << text(entry.size.to_s)
+  #       r << text(entry.modified.to_s)
   #     end
   #   end
   # end

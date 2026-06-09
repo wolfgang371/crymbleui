@@ -58,7 +58,7 @@ module CrymbleUI
 
     # Collapsed-cell background override. When nil, the collapsed ComboBox
     # uses Theme.current.combo_background; when set, it uses this color.
-    # Used e.g. by diff-highlighted cells in embrace.
+    # Used e.g. to tint a highlighted cell (such as a changed/diff cell).
     render_property background_color : Color?
 
     # Selection callback
@@ -200,8 +200,8 @@ module CrymbleUI
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
       primitives do
-        # Background — override-able so callers (e.g. embrace's diff-Shape
-        # highlight) can tint the cell without losing the combo widget.
+        # Background — override-able so callers can tint the cell (e.g. to
+        # highlight a changed cell) without losing the combo widget.
         fill_rect(local_bounds, @background_color || Theme.current.combo_background)
         # Border
         draw_rect(local_bounds, Theme.current.combo_border)

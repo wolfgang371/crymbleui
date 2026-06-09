@@ -120,6 +120,26 @@ describe "VirtualMatrix TextInput proxy focus" do
       cell.value.should eq "AB"
     end
 
+    it "typing a SPACE inserts it, not wiping the cell (full keypress+text flow)" do
+      # The real app delivers a space as BOTH a KeyPressed(Space) and a
+      # separate TextEntered(' '). The matrix must treat Space on a
+      # TextInput proxy as text, not activation — trigger_click would
+      # re-focus the input and re-arm QuickEntry's replace-on-first-key,
+      # wiping whatever preceded the space. Regression: "A B" became " B".
+      matrix = make_ti_matrix
+      setup_ti_matrix(matrix)
+      fm = CrymbleUI::Widget.focus_manager
+      fm.focus(matrix)
+      cell = matrix.active_cells[{0, 0}]?.as(CrymbleUI::TextInput)
+
+      fm.handle_text_input('A')
+      matrix.on_key_down(SF::Keyboard::Key::Space, false, false) # the KeyPressed
+      fm.handle_text_input(' ')                                  # the TextEntered
+      fm.handle_text_input('B')
+
+      cell.value.should eq "A B"
+    end
+
     it "characters append even when adapter callback triggers invalidate_cell!" do
       adapter = CallbackTextInputTestAdapter.new(5, 3)
       matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "ti_callback_matrix")

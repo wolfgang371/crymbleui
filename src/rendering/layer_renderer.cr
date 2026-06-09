@@ -378,7 +378,7 @@ module CrymbleUI
           # Pair with compute_sticky_blit_plans trace to see, per frame,
           # which cells were routed to blit vs render_list vs skipped.
           if layer.id.starts_with?("sticky_col")
-            File.open("/tmp/embrace_cv_trace.log", "a") do |f|
+            File.open("/tmp/crymble_cv_trace.log", "a") do |f|
               f.puts "  [blit-plan executed] frame=#{CacheValidation.frame_counter} layer=#{layer.id} entries=#{plan.size} render_widgets=#{render_widgets_count} buffer=#{backend.width}x#{backend.height}"
             end
           end

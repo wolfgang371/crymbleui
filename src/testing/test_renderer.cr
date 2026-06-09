@@ -139,7 +139,7 @@ module CrymbleUI
         @render_frame_count += 1
         @app = app  # Store for event simulation methods
 
-        # Sync background color from app (license-based coloring, etc.)
+        # Sync background color from app (app may override; nil = white default).
         @background_color = app.app_background_color || Color.new(255, 255, 255, 255)
 
         # Clear widget backends before each frame

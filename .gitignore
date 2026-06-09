@@ -23,3 +23,7 @@ Thumbs.db
 # Claude Code machine-local settings (the memory/ subdir IS tracked, but stays
 # private via `.claude export-ignore` in .gitattributes — never published)
 .claude/settings.local.json
+
+# Claude memory now lives in the embrace-claude-memory repo, not here
+.claude/
+shard.lock

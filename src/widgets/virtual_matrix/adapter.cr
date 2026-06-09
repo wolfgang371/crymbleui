@@ -61,7 +61,7 @@ module CrymbleUI::Widgets::VirtualMatrix
     end
 
     # Normalize a persisted custom-size array to EXACTLY `count` entries. The row/column structure
-    # can change (commits added/removed, fields added) AFTER custom_row_heights/custom_col_widths
+    # can change (rows/columns added or removed) AFTER custom_row_heights/custom_col_widths
     # were persisted on a drag-resize, leaving them the wrong length. Returning a mismatched array
     # desyncs VirtualMatrix's @col_widths from @cols: the ruler iterates 0...@cols while the data
     # extent uses @col_widths, so they disagree (only the ruler scrolls), and get_col_width(col)
@@ -100,7 +100,7 @@ module CrymbleUI::Widgets::VirtualMatrix
     end
 
     # Bounding box for drag/cut operations (may span more cells than painting bounds)
-    # Default: same as cell_get_bounding_box. Override for real record-level bounds.
+    # Default: same as cell_get_bounding_box. Override for real multi-cell bounds (e.g. a whole row).
     def cell_get_drag_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
       cell_get_bounding_box(row, col)
     end

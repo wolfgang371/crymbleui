@@ -509,12 +509,19 @@ module CrymbleUI
 
       # Ctrl+X or Shift+Delete = Cut
       if (control && key == SF::Keyboard::Key::X) || (shift && key == SF::Keyboard::Key::Delete)
+        # QuickEntry: the cell owner cuts the whole cell — decline so Ctrl+X
+        # bubbles to its panel shortcut. Shift+Delete (no cell-op) stays
+        # editor-handled.
+        return false if @edit_mode == TextInputMode::QuickEntry && control
         cut_selection
         return true
       end
 
       # Ctrl+V or Shift+Insert = Paste
       if (control && key == SF::Keyboard::Key::V) || (shift && key == SF::Keyboard::Key::Insert)
+        # QuickEntry: the cell owner pastes the cell — decline so Ctrl+V
+        # bubbles. Shift+Insert (no cell-op) stays editor-handled.
+        return false if @edit_mode == TextInputMode::QuickEntry && control
         paste_clipboard
         return true
       end
@@ -556,6 +563,10 @@ module CrymbleUI
         @pending_replace = false # Any editing clears pending replace
         true
       when SF::Keyboard::Key::Delete
+        # QuickEntry: the host owns bare Delete (e.g. a delete shortcut) — decline
+        # so it bubbles to the host. Without this the proxy consumes it and the
+        # host's delete shortcut would be dead.
+        return false if @edit_mode == TextInputMode::QuickEntry
         if has_selection?
           delete_selection
           reset_cursor_blink

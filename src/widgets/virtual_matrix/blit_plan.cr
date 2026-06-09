@@ -138,7 +138,7 @@ module CrymbleUI
         # Non-compound: always recompute the scroll-adjusted position
         # BEFORE deciding blit vs render. If a newly-visible cell (wb=NIL)
         # carried a stale position from a prior scroll state, render_single_widget
-        # would otherwise paint it off-screen — that's the Amanita-rank-blank bug.
+        # would otherwise paint it off-screen — the "newly-visible sticky cell renders blank" bug.
         # Screen-space position = content position − live scroll. (The removed
         # @viewport_col_positions/@viewport_row_positions branch reused the content layer's CACHED
         # StickyMath positions, which drop the sub-column scroll → froze sticky cells for any scroll
@@ -281,7 +281,7 @@ module CrymbleUI
 
       # Log every frame (trace) plus register a cv failure when violations
       # exist — the latter makes the failure visible to test assertions.
-      File.open("/tmp/embrace_cv_trace.log", "a") do |f|
+      File.open("/tmp/crymble_cv_trace.log", "a") do |f|
         f.puts "--- compute_sticky_blit_plans frame=#{CacheValidation.frame_counter} scroll=(#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) active=#{@active_cells.size} violations=#{violations.size}"
         violations.each { |v| f.puts "    !!! BOUNDS-STALE #{v}" }
       end

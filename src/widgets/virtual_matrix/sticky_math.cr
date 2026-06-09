@@ -1,6 +1,5 @@
 module CrymbleUI::Widgets::VirtualMatrix
   # Pure math functions for sticky header behavior.
-  # Ported from ImGui implementation.
   module StickyMath
     # Returns the min scroll position (in pixels) such that element `index` is barely fully visible.
     # The left/upper border of the element is on the left/upper side of the window.
@@ -215,7 +214,7 @@ module CrymbleUI::Widgets::VirtualMatrix
   end
 end
 
-# Extension to Array for cumulative operations (like ImGui's accumulate)
+# Extension to Array for cumulative (running-sum) operations.
 class Array(T)
   # Cumulative fold: returns array where each element is the running aggregate.
   # [1,2,3].accumulate { |a,b| a+b } => [1, 3, 6]

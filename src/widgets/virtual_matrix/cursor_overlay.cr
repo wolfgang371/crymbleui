@@ -101,7 +101,7 @@ module CrymbleUI
         row_band_x = is_sticky_row ? sticky_w : 0.0
         row_band_w = {data_right - row_band_x, 0.0}.max
 
-        # Drag highlight color (reddish, matching ImGui's CellDragDropColor)
+        # Drag highlight color (reddish)
         drag_color = Color.new(204_u8, 102_u8, 102_u8, 128_u8)
 
         primitives do

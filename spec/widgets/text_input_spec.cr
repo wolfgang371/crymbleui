@@ -1189,4 +1189,44 @@ describe CrymbleUI::TextInput do
             right_pixel.should eq(border_color), "Right border missing at (#{right_x}, #{right_y})"
         end
     end
+
+    # T-006: cell-keyboard ops live in embrace, registered as cursor-scoped
+    # panel shortcuts. TextInput gates ONLY the keys with a competing cell-op
+    # (Ctrl+X cut, Ctrl+V paste, bare Delete delete-record) to FullEdit, so in
+    # QuickEntry they bubble (return false) to the owner. Keys with no cell-op
+    # counterpart (Ctrl+C, Backspace, Ctrl+A) stay editor-handled in both modes.
+    describe "CNP mode gating (T-006)" do
+        it "QuickEntry Ctrl+X is not consumed — bubbles to the cell-cut shortcut" do
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_key_down(SF::Keyboard::Key::X, true, false).should be_false
+            input.value.should eq("abc")
+        end
+
+        it "QuickEntry Ctrl+V is not consumed — bubbles to the cell-paste shortcut" do
+            CrymbleUI::Widget.clipboard.string = "xyz"
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_key_down(SF::Keyboard::Key::V, true, false).should be_false
+            input.value.should eq("abc")
+        end
+
+        it "QuickEntry bare Delete is not consumed — bubbles to the delete-record shortcut" do
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_key_down(SF::Keyboard::Key::Delete, false, false).should be_false
+            input.value.should eq("abc")
+        end
+
+        it "QuickEntry Ctrl+C stays editor-handled (no cell-copy op exists)" do
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_key_down(SF::Keyboard::Key::C, true, false).should be_true
+        end
+
+        it "FullEdit Ctrl+X cuts the selected text only — the screenshot-bug fix" do
+            input = CrymbleUI::TextInput.new(value: "abcde", mode: CrymbleUI::TextInputMode::FullEdit)
+            input.on_key_down(SF::Keyboard::Key::Home, false, false)
+            3.times { input.on_key_down(SF::Keyboard::Key::Right, false, true) } # select "abc"
+            input.has_selection?.should be_true
+            input.on_key_down(SF::Keyboard::Key::X, true, false).should be_true
+            input.value.should eq("de")
+        end
+    end
 end

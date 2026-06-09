@@ -285,7 +285,7 @@ module CrymbleUI
                     fill_rect(local_bounds, @hover_color)
                 end
 
-                # Draw checkmark if checked (geometric, like ImGui)
+                # Draw checkmark if checked (geometric)
                 if @checked
                     # Draw a checkmark as two line segments forming a "✓" shape
                     check_center_x = 0.0 + @padding + check_width / 2.0  # Center in check area

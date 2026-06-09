@@ -241,7 +241,7 @@ module CrymbleUI
         fill_rect(Rect.new(box_x, box_y, 1.0, box), actual_box_color)             # Left edge
         fill_rect(Rect.new(box_x + box - 1.0, box_y, 1.0, box), actual_box_color) # Right edge
 
-        # Draw check mark based on state (geometric, like ImGui)
+        # Draw check mark based on state (geometric)
         case actual_state
         when CheckState::Checked
           # Draw checkmark as two line segments forming a "✓" shape

@@ -130,6 +130,19 @@ module CrymbleUI
     property viewport_cache : Bool = false
     property cache_extent : Float64 = 0.0     # Extra pixels to pre-render beyond viewport
     property buffer_origin : Vec2 = Vec2.zero # Content coord at buffer position (0,0)
+
+    # Where inside the (oversized) buffer the visible viewport starts —
+    # THE single source of truth for viewport-cache sampling, used by
+    # the live compositor AND capture_composited_frame so they cannot
+    # diverge (2026-06-05: the capture plain-blitted from (0,0) and
+    # shifted every captured PNG of a viewport-cache layer by the cache
+    # margin — the instrument was the bug, not the renderer).
+    def viewport_sample_origin(buffer_width : Int32, buffer_height : Int32,
+                               viewport_width : Int32, viewport_height : Int32) : {Int32, Int32}
+      x = (@scroll_offset.x - @buffer_origin.x).to_i.clamp(0, {buffer_width - viewport_width, 0}.max)
+      y = (@scroll_offset.y - @buffer_origin.y).to_i.clamp(0, {buffer_height - viewport_height, 0}.max)
+      {x, y}
+    end
     # Flag set during buffer recenter - widgets should fill with bg color, not capture from stale texture
     property buffer_just_cleared : Bool = false
     # Flag to force buffer clear on next render without NeedsLayout semantics.
