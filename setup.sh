@@ -16,7 +16,9 @@ GUI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SFML3=$GUI_DIR/locallib/sfml3
 CSFML3=$GUI_DIR/locallib/csfml3
 
-export LD_LIBRARY_PATH=$SFML3/lib/linux:$CSFML3/lib/linux:$LD_LIBRARY_PATH
-export LIBRARY_PATH=$SFML3/lib/linux:$CSFML3/lib/linux:$LIBRARY_PATH
+# Guard the RHS refs (${VAR:-}) so sourcing under `set -u` (e.g. tools/build-appimage.sh)
+# doesn't abort with "unbound variable" when these are unset on a fresh machine/runner.
+export LD_LIBRARY_PATH=$SFML3/lib/linux:$CSFML3/lib/linux:${LD_LIBRARY_PATH:-}
+export LIBRARY_PATH=$SFML3/lib/linux:$CSFML3/lib/linux:${LIBRARY_PATH:-}
 export CSFML_INCLUDE_DIR=$CSFML3/include
-export PKG_CONFIG_PATH=$CSFML3/lib/linux/pkgconfig:$PKG_CONFIG_PATH
+export PKG_CONFIG_PATH=$CSFML3/lib/linux/pkgconfig:${PKG_CONFIG_PATH:-}
