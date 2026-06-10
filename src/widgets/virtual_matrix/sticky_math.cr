@@ -121,6 +121,10 @@ module CrymbleUI::Widgets::VirtualMatrix
     ) : {Int32, Hash(Int32, Int32), Int32, Array(Int32), Array(Int32)}
       n = sizes_pixel.size
 
+      # Degenerate axis (0 rows or 0 columns): nothing to place, nothing sticky.
+      # Without this guard `scroll_order.last` (below) raises on the empty array.
+      return {0, Hash(Int32, Int32).new, 0, [] of Int32, [] of Int32} if scroll_order.empty?
+
       # offset — O(1) from pre-computed cumulative
       offset = num_shifted > 0 ? cumulative[num_shifted - 1] : 0
 

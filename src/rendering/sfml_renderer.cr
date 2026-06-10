@@ -761,10 +761,12 @@ module CrymbleUI
           end
         end
 
-        # Tab/Shift+Tab for focus cycling (before focused widget gets it)
+        # Tab/Shift+Tab: the focused widget gets first dibs (a focus scope like
+        # VirtualMatrix round-robins its cell cursor and stays focused); only
+        # if it declines do we cycle focus to the next/previous widget.
         if key.code == SF::Keyboard::Tab
           if root = app.root
-            @focus_manager.cycle_focus(forward: !key.shift, root: root)
+            @focus_manager.handle_tab_key(key.shift, root)
           end
           return true
         end

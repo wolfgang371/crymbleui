@@ -60,6 +60,8 @@ module CrymbleUI
         end
       when :tab
         # Tab wraps to next row, Shift+Tab wraps to previous row
+        total_cells = @rows * @cols
+        return if total_cells == 0 # degenerate grid: nothing to move to (avoid % 0)
         flat_index = row * @cols + col
         if shift
           flat_index -= 1
@@ -67,7 +69,6 @@ module CrymbleUI
           flat_index += 1
         end
         # Wrap around
-        total_cells = @rows * @cols
         flat_index = flat_index % total_cells
         flat_index = total_cells + flat_index if flat_index < 0
         row = flat_index // @cols
@@ -258,6 +259,7 @@ module CrymbleUI
         _snap_start = Time.monotonic
       {% end %}
       return unless @content_layer
+      return if @rows == 0 || @cols == 0 # degenerate grid: no cell to scroll into view
 
       row, col = @cursor_rc
       viewport_width = @content_layer.try(&.bounds.width) || @bounds.width

@@ -1177,7 +1177,11 @@ module CrymbleUI
         # **Event forwarding rules (in VirtualMatrix):**
         # - Enter, Escape, Backspace, Delete, Home, End → always forwarded
         # - Arrow keys → forwarded only if `wants_arrow_keys?` returns true
-        # - Tab → never forwarded (falls through to FocusManager)
+        # - Tab → not forwarded; the matrix consumes it to round-robin its cell
+        #   cursor (spreadsheet semantics) and stays focused. A focus-scope grid
+        #   that consumes Tab is a keyboard focus trap BY DESIGN — Ctrl+Tab
+        #   (panel cycling) is the intended escape hatch, so don't "fix" the
+        #   missing Tab-order leak.
         # - Text input → always forwarded
         #
         # **Default behavior:** The base Widget implementation works for simple

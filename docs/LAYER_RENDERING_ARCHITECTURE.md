@@ -1699,12 +1699,15 @@ VirtualMatrix's `on_key_down` dispatches events in two phases:
 
 1. **Proxy forwarding** (if `@proxy_focused_widget` exists):
    - Arrow keys → forwarded only if `wants_arrow_keys?` (TextInput FullEdit mode)
-   - Tab → never forwarded (falls through to FocusManager)
+   - Tab → not forwarded; falls through to grid navigation below
    - Everything else (Enter, Escape, Backspace, Delete, etc.) → forwarded to cell
 
 2. **Grid navigation** (runs if proxy didn't consume the event):
    - Arrow keys → `move_cursor` + `snap_to_cursor`
-   - Tab → returns false (FocusManager handles it)
+   - Tab/Shift+Tab → `move_cursor(:tab)` round-robin + `snap_to_cursor`; the
+     matrix consumes Tab and stays focused (spreadsheet semantics). Tab dispatch
+     is owned by `FocusManager#handle_tab_key`: the focused widget gets first
+     dibs, and only widgets that decline cause focus to cycle.
 
 Text input (`on_text_input`) is always forwarded to the proxy widget if one exists.
 

@@ -900,10 +900,10 @@ describe CrymbleUI::ComboBox do
       countries_combo.popup_open?.should be_true
       window.overlays.size.should eq 1
 
-      # Press Tab - should close the popup
-      # Tab is handled by cycle_focus, not handle_key_down (renderer intercepts Tab)
-      fm = CrymbleUI::Widget.focus_manager.not_nil!
-      fm.cycle_focus(forward: true, root: app.root.not_nil!)
+      # Press Tab - should close the popup. Routes through the real Tab dispatch
+      # (FocusManager#handle_tab_key): the ComboBox declines Tab, so focus cycles
+      # away and the popup closes on blur.
+      press_tab(app)
       renderer.render_frame(app)
 
       # Re-fetch after Tab (DSL apps create new instances on rebuild)

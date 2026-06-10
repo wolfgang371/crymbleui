@@ -191,6 +191,23 @@ describe CrymbleUI::VirtualMatrix do
       matrix.cursor_rc.should eq({0, 9})
     end
 
+    it "Tab on the last cell round-robins to {0,0}, Shift+Tab back to the last cell" do
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 10, id: "tab_full_wrap")
+
+      matrix.cursor_rc = {9, 9} # last cell
+      matrix.move_cursor(:tab)
+      matrix.cursor_rc.should eq({0, 0})
+
+      matrix.move_cursor(:tab, shift: true)
+      matrix.cursor_rc.should eq({9, 9})
+    end
+
+    it "Tab on an empty matrix is a no-op (no division by zero)" do
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 0, cols: 3, id: "tab_empty")
+      matrix.move_cursor(:tab)          # total_cells == 0 → guarded, must not raise
+      matrix.cursor_rc.should eq({0, 0})
+    end
+
     it "snap_to_cursor scrolls to show cursor" do
       matrix = CrymbleUI::VirtualMatrix.new(rows: 100, cols: 50, id: "snap")
       matrix.cursor_rc = {0, 0}

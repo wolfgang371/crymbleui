@@ -1,0 +1,109 @@
+name: Release
+
+# Builds the downloadable showcase_demo binaries and attaches them to the GitHub
+# Release whenever a version tag (v*) is pushed. scripts/publish.sh pushes such a
+# tag to GitHub, so a release is cut automatically; it can also be run manually
+# for an existing tag (workflow_dispatch).
+#
+#   Linux   -> crymbleui-showcase-linux-x86_64.AppImage
+#              (portable AppImage: the binary + its vendored SFML/CSFML closure,
+#               assembled by tools/build-appimage.sh via linuxdeploy. Host libs
+#               like libGL/libX11 are intentionally NOT bundled, per the AppImage
+#               excludelist. Needs libfuse2 at runtime, or run with
+#               --appimage-extract-and-run.)
+#   Windows -> crymbleui-showcase-windows-x64.exe
+#              (static, self-contained; built via tools/win-build.bat)
+#
+# Both jobs delegate to a committed, locally-runnable build script — the workflow
+# just calls it. No branded icon: the AppImage carries a generated placeholder
+# (AppImage tooling requires *some* icon); the .exe has none. Font + themes are
+# compiled into the binary (read_file), so the binaries need no runtime resources.
+#
+# Asset names are stable and version-less so a download page can link
+# /releases/latest/download/<asset>; the version stays in the GitHub Release title.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.6.6)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.0"
+
+      - name: Install SFML runtime + AppImage tooling
+        run: |
+          sudo apt-get update
+          # SFML 3 runtime libs (linking + ldd resolution) plus the AppImage
+          # toolchain's helpers (placeholder icon, ELF patching, file typing).
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libopenal1 libfreetype6 \
+            libx11-6 libxrandr2 libxcursor1 libxi6 libudev1 \
+            libvorbisfile3 libflac12 \
+            imagemagick patchelf file
+
+      - name: shards install
+        run: shards install
+
+      - name: Build AppImage
+        run: bash tools/build-appimage.sh
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: temp/crymbleui-showcase-linux-x86_64.AppImage
+          fail_on_unmatched_files: true
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.0"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: shards install
+        run: shards install
+
+      # win-build.bat calls setup.bat (vendored static SFML/CSFML libs) and links
+      # a self-contained bin\showcase_demo.exe.
+      - name: Build release .exe
+        shell: cmd
+        run: call tools\win-build.bat
+
+      - name: Name the asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stable, version-less name so a download page can link
+          # /releases/latest/download/crymbleui-showcase-windows-x64.exe.
+          cp bin/showcase_demo.exe "crymbleui-showcase-windows-x64.exe"
+          echo "ASSET=crymbleui-showcase-windows-x64.exe" >> "$GITHUB_ENV"
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true

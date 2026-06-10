@@ -84,6 +84,21 @@ module CrymbleUI
       focus(next_widget) if next_widget
     end
 
+    # Tab / Shift+Tab dispatch. The focused widget gets first dibs: a focus
+    # scope that owns its own tab semantics (e.g. VirtualMatrix round-robins
+    # its cell cursor) consumes Tab and stays focused. Only if the widget
+    # declines do we cycle focus to the next/previous widget in tab order.
+    # This mirrors the arrow-key dispatch (focused widget first, then a
+    # fallback) and is the single source of truth for Tab — both the SFML
+    # renderer and the headless tester route Tab through here.
+    def handle_tab_key(shift : Bool, root : Widget) : Bool
+      if (w = @focused_widget) && w.on_key_down(SF::Keyboard::Key::Tab, false, shift)
+        return true
+      end
+      cycle_focus(forward: !shift, root: root)
+      true
+    end
+
     # === SPATIAL NAVIGATION (Arrow keys) ===
 
     # Navigate focus in spatial direction

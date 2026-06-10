@@ -411,11 +411,12 @@ Event dispatch (on_key_down):
   1. For non-nav keys: snap_to_cursor(for_edit: true) first
   2. If proxy exists:
      - Arrow keys -> forward only if proxy.wants_arrow_keys? (FullEdit mode)
-     - Tab -> never forward (FocusManager handles)
+     - Tab -> don't forward; fall through to grid nav below
      - Everything else -> forward to proxy
   3. Grid navigation (if proxy didn't consume):
      - Arrow keys -> move_cursor + snap_to_cursor
-     - Tab -> return false (FocusManager)
+     - Tab/Shift+Tab -> move_cursor(:tab) round-robin + snap_to_cursor;
+       matrix consumes Tab and stays focused (never cycles focus out)
 
 Text input (on_text_input):
   1. snap_to_cursor(for_edit: true)

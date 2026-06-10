@@ -480,7 +480,8 @@ module CrymbleUI
           end
           clear_proxy_focus
         when SF::Keyboard::Key::Tab
-          # Don't forward Tab — let VirtualMatrix handle it
+          # Don't forward Tab to the proxy — fall through (no return) to the
+          # grid-nav Tab case below, which round-robins the cell cursor.
         when SF::Keyboard::Key::Enter, SF::Keyboard::Key::Space
           # App-level activation (e.g. drill-down) gets priority over the
           # proxy's default Enter/Space handler. If on_cell_activate returns
@@ -512,7 +513,16 @@ module CrymbleUI
       # Grid navigation
       case key
       when SF::Keyboard::Key::Tab
-        false  # Fall through to FocusManager
+        # Spreadsheet round-robin: Tab advances the cell cursor (wrapping
+        # end-of-row to the next row, last cell back to {0,0}), Shift+Tab
+        # reverses. The matrix consumes Tab and stays focused — it never
+        # cycles focus out (FocusManager#handle_tab_key only cycles when the
+        # focused widget declines).
+        move_cursor(:tab, shift: shift)
+        snap_to_cursor
+        update_cell_states
+        mark_needs_render
+        true
       when SF::Keyboard::Key::Up
         move_cursor(:up, control, shift)
         snap_to_cursor
