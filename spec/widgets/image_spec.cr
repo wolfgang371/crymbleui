@@ -59,3 +59,41 @@ describe CrymbleUI::Image do
         size.height.should eq(80.0)
     end
 end
+
+describe CrymbleUI::ImageSource do
+    it "a disk-path source carries no embedded bytes (loads from disk at render)" do
+        src = CrymbleUI::ImageSource.new("logo.png")
+        src.key.should eq("logo.png")
+        src.bytes.should be_nil
+    end
+
+    it "carries embedded bytes when given" do
+        src = CrymbleUI::ImageSource.new("k", Bytes[1, 2, 3])
+        src.bytes.should eq(Bytes[1, 2, 3])
+    end
+end
+
+describe "embed_image macro" do
+    it "embeds a real file's bytes at compile time, keyed by its path" do
+        src = embed_image("tutorials/crystal_logo.png")
+        src.key.should eq("tutorials/crystal_logo.png")
+        bytes = src.bytes.should_not be_nil
+        bytes.size.should be > 0
+        bytes[0, 4].should eq(Bytes[0x89, 0x50, 0x4E, 0x47]) # PNG signature
+    end
+end
+
+describe "DrawImage / Image with an embedded source" do
+    it "DrawImage carries the source; #path returns its key" do
+        src = CrymbleUI::ImageSource.new("embedded-key", Bytes[1, 2, 3])
+        img = CrymbleUI::DrawImage.new(src, CrymbleUI::Rect.new(0, 0, 10, 10))
+        img.source.should eq(src)
+        img.path.should eq("embedded-key")
+    end
+
+    it "Image.new(source) emits a DrawImage carrying the embedded bytes" do
+        widget = CrymbleUI::Image.new(embed_image("tutorials/crystal_logo.png"))
+        prims = widget.to_primitives(CrymbleUI::Rect.new(0, 0, 40, 40))
+        prims[0].as(CrymbleUI::DrawImage).source.bytes.should_not be_nil
+    end
+end

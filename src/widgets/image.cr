@@ -2,19 +2,26 @@ require "../core/widget"
 require "../rendering/draw_primitive"
 
 module CrymbleUI
-  # Simple image widget that renders an image file
-  # Uses DrawImage primitive — renderer handles texture loading/caching
+  # Simple image widget. The image is either compile-time-embedded (pass an
+  # `ImageSource` from `embed_image`) or loaded from a disk path at render time
+  # (pass a String). Uses the DrawImage primitive — the renderer loads/caches.
   class Image < Widget
-    property path : String
+    property source : ImageSource
     property tint : Color
     @explicit_width : Float64?
     @explicit_height : Float64?
 
-    def initialize(@path : String, id : String? = nil, @tint : Color = Color.white,
+    def initialize(@source : ImageSource, id : String? = nil, @tint : Color = Color.white,
                    width : Float64? = nil, height : Float64? = nil)
       super(id: id)
       @explicit_width = width
       @explicit_height = height
+    end
+
+    # Convenience: a plain disk path (loaded at render time, relative to CWD).
+    def initialize(path : String, id : String? = nil, tint : Color = Color.white,
+                   width : Float64? = nil, height : Float64? = nil)
+      initialize(ImageSource.new(path), id: id, tint: tint, width: width, height: height)
     end
 
     def measure(constraints : BoxConstraints) : Size
@@ -31,7 +38,7 @@ module CrymbleUI
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       # Use widget-local coordinates (0,0 origin), not parent-relative bounds
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
-      [DrawImage.new(@path, local_bounds, @tint).as(DrawPrimitive)]
+      [DrawImage.new(@source, local_bounds, @tint).as(DrawPrimitive)]
     end
 
     def label : String

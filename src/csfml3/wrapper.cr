@@ -405,14 +405,22 @@ module SF
     end
   end
 
-  # Window styles (flags)
+  # Window styles (flags). NOTE: SFML/CSFML 3.0 removed Fullscreen from the style
+  # flags — fullscreen moved to the separate `sfWindowState` argument (see WindowState).
   module Style
-    None       = 0_u32
-    Titlebar   = 1_u32
-    Resize     = 2_u32
-    Close      = 4_u32
-    Fullscreen = 8_u32
-    Default    = Titlebar | Resize | Close
+    None     = 0_u32
+    Titlebar = 1_u32
+    Resize   = 2_u32
+    Close    = 4_u32
+    Default  = Titlebar | Resize | Close
+  end
+
+  # Window state (CSFML 3.0 `sfWindowState`): windowed vs fullscreen. New in SFML 3 —
+  # `sfRenderWindow_create` takes this between `style` and `settings`. crymbleui only
+  # creates windowed windows.
+  module WindowState
+    Windowed   = 0_u32
+    Fullscreen = 1_u32
   end
 
   # ============================================================
@@ -1018,7 +1026,7 @@ module SF
 
     def initialize(mode : VideoMode, title : String, style : UInt32 = Style::Default, settings : ContextSettings? = nil)
       csfml_settings = settings ? settings.to_csfml : ContextSettings.new.to_csfml
-      @handle = LibCSFML.sfRenderWindow_create(mode.to_csfml, title, style, pointerof(csfml_settings))
+      @handle = LibCSFML.sfRenderWindow_create(mode.to_csfml, title, style, WindowState::Windowed, pointerof(csfml_settings))
       raise "Failed to create RenderWindow" if @handle.null?
     end
 

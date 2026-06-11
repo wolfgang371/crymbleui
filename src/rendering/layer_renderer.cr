@@ -1374,7 +1374,7 @@ module CrymbleUI
       when FillTriangle
         backend.fill_triangle(primitive.p1, primitive.p2, primitive.p3, primitive.color)
       when DrawImage
-        backend.draw_image(primitive.path, primitive.bounds, primitive.color)
+        backend.draw_image(primitive.source, primitive.bounds, primitive.color)
       end
     end
 
@@ -1455,7 +1455,7 @@ module CrymbleUI
           primitive.bounds.width,
           primitive.bounds.height
         )
-        backend.draw_image(primitive.path, offset_bounds, primitive.color)
+        backend.draw_image(primitive.source, offset_bounds, primitive.color)
       end
     end
 

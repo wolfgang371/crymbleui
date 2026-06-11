@@ -27,8 +27,10 @@ REM    link its C deps (iconv, pcre2, xml2, z, gc) statically too — without it
 REM    link dynamically and a clean Windows box errors with "iconv-2.dll not found".
 REM    The vendored SFML/CSFML win32 libs are already static, so the result needs
 REM    no runtime DLLs.
-shards build showcase_demo --release --no-debug --static || (echo build failed & exit /b 1)
+REM    -Dgui: build as a true windowed app (Windows GUI subsystem, no console window)
+REM    for the shipped binary. Drop -Dgui for a dev build that keeps a console.
+shards build showcase_demo --release --no-debug --static -Dgui || (echo build failed & exit /b 1)
 
 echo.
-echo OK: bin\showcase_demo.exe built (static, self-contained).
+echo OK: bin\showcase_demo.exe built (static, self-contained, GUI subsystem).
 endlocal

@@ -33,9 +33,9 @@ module CrymbleUI
     # Draw text at position (tracking only, actual rendering backend-specific)
     abstract def draw_text(text : String, position : Vec2, color : Color, size : Float64)
 
-    # Draw an image from file path at the given bounds with tint/alpha
-    # Default noop — only SFML backend renders images (test backend skips)
-    def draw_image(path : String, bounds : Rect, color : Color)
+    # Draw an image (embedded or disk-loaded) at the given bounds with tint/alpha.
+    # Default noop — only the SFML backend renders images (test backend skips).
+    def draw_image(source : ImageSource, bounds : Rect, color : Color)
     end
 
     # Finalize rendering (for SFML display(), no-op for test)

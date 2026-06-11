@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 0.6.7**
+**Version 0.6.8**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~29765 LOC
-- spec/: ~50821 LOC
+- src/: ~29849 LOC
+- spec/: ~50859 LOC
 
 ## Features
 
@@ -180,7 +180,7 @@ require "../src/crymble-ui"
 include CrymbleUI
 
 class Tutorial24App < CrymbleUI::App
-  LOGO = "tutorials/crystal_logo.png"
+  LOGO = embed_image("tutorials/crystal_logo.png")
 
   def build : CrymbleUI::Widget
     window("Tutorial 24: Image Widget", 600, 400) do
@@ -1801,7 +1801,7 @@ require "../src/crymble-ui"
 include CrymbleUI
 
 class Tutorial24App < CrymbleUI::App
-  LOGO = "tutorials/crystal_logo.png"
+  LOGO = embed_image("tutorials/crystal_logo.png")
 
   def build : CrymbleUI::Widget
     window("Tutorial 24: Image Widget", 600, 400) do

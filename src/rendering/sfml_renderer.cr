@@ -1146,7 +1146,7 @@ module CrymbleUI
         shape.fill_color = to_sf_color(primitive.color)
         target.draw(shape)
       when DrawImage
-        texture = load_cached_texture(primitive.path)
+        texture = load_cached_texture(primitive.source)
         if texture
           sprite = SF::Sprite.new(texture)
           sprite.position = SF.vector2f(primitive.bounds.x.to_f32, primitive.bounds.y.to_f32)
@@ -1165,22 +1165,20 @@ module CrymbleUI
 
     # === END PRIMITIVE-BASED RENDERING ===
 
-    # Load texture, caching for reuse. Prefers compile-time-embedded bytes
-    # registered via CrSFMLBackend.register_embedded_image so behaviour is
-    # independent of the current working directory; only falls back to
-    # SF::Texture.from_file when no embedded data is registered for the path.
-    private def load_cached_texture(path : String) : SF::Texture?
-      @texture_cache[path]? || begin
-        texture = if data = CrSFMLBackend.embedded_image_bytes(path)
+    # Load texture, caching for reuse by ImageSource#key. Uses compile-time-embedded
+    # bytes when present (CWD-independent); otherwise reads the key as a disk path.
+    private def load_cached_texture(source : ImageSource) : SF::Texture?
+      @texture_cache[source.key]? || begin
+        texture = if data = source.bytes
                     SF::Texture.from_memory(data)
                   else
-                    SF::Texture.from_file(path)
+                    SF::Texture.from_file(source.key)
                   end
         texture.smooth = true
-        @texture_cache[path] = texture
+        @texture_cache[source.key] = texture
         texture
       rescue ex
-        STDERR.puts "Failed to load texture '#{path}': #{ex.message}"
+        STDERR.puts "Failed to load texture '#{source.key}': #{ex.message}"
         nil
       end
     end

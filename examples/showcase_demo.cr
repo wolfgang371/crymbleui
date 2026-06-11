@@ -119,6 +119,9 @@ class ShowcaseDemo < CrymbleUI::App
 
   THEMES = ["Light", "Dark"]
 
+  # Embed the logo at compile time → the standalone binary needs no external files.
+  LOGO = embed_image("tutorials/crystal_logo.png")
+
   def build : CrymbleUI::Widget
     window("CrymbleUI Showcase", 950, 780) do
       # MenuBar
@@ -320,10 +323,10 @@ class ShowcaseDemo < CrymbleUI::App
 
           text("Image widget:", font_scale: -1)
           hstack(spacing: 10.0) do
-            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0)
-            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0,
+            image(LOGO, width: 40.0, height: 40.0)
+            image(LOGO, width: 40.0, height: 40.0,
                   tint: CrymbleUI::Color.new(255, 100, 100, 255))
-            image("tutorials/crystal_logo.png", width: 40.0, height: 40.0,
+            image(LOGO, width: 40.0, height: 40.0,
                   tint: CrymbleUI::Color.new(100, 100, 255, 255))
           end
 

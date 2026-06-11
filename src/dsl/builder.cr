@@ -446,10 +446,16 @@ module CrymbleUI
                 widget
             end
 
-            # Create an image widget from a file path
+            # Image from a disk path (loaded at render time, relative to CWD).
             def image(path : String, id : String? = nil, tint : Color = Color.white,
                       width : Float64? = nil, height : Float64? = nil)
-                widget = Image.new(path, id: id, tint: tint, width: width, height: height)
+                image(ImageSource.new(path), id: id, tint: tint, width: width, height: height)
+            end
+
+            # Image from a compile-time-embedded source (`embed_image`) — CWD-independent.
+            def image(source : ImageSource, id : String? = nil, tint : Color = Color.white,
+                      width : Float64? = nil, height : Float64? = nil)
+                widget = Image.new(source, id: id, tint: tint, width: width, height: height)
                 current_container.add_child(widget)
                 widget
             end

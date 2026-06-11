@@ -1,6 +1,10 @@
 # CrymbleUI - Declarative GUI framework for Crystal
 # Main entry point - require this file to use CrymbleUI
 
+# Windows GUI-subsystem shim (opt-in via -Dgui). MUST be first: it redirects the
+# std streams before anything else can write to a (non-existent) GUI console.
+require "./platform/windows_gui"
+
 # Core types and foundation
 require "./core/types"
 require "./core/theme"

@@ -141,46 +141,22 @@ module CrymbleUI
       @texture.draw(sf_text)
     end
 
-    # Class-level texture cache shared across all backends
+    # Class-level texture cache shared across all backends, keyed by ImageSource#key
     @@image_cache = Hash(String, SF::Texture).new
 
-    # Registry of compile-time-embedded image bytes, keyed by the same path
-    # that draw_image will be called with. The texture is created LAZILY on
-    # the first draw_image call (when an OpenGL context is guaranteed to
-    # exist), so registration itself is GL-free and safe to do at app
-    # construction time, well before the window is created.
-    @@embedded_image_data = Hash(String, Slice(UInt8)).new
-
-    # Register compile-time-embedded image bytes under a virtual path. The
-    # bytes are kept in a class-level registry; the GPU texture is created
-    # on first use by draw_image. Call this once at app construction time
-    # for every image that should be served from the embedded data instead
-    # of from disk (avoiding any CWD dependency).
-    def self.register_embedded_image(path : String, data : Slice(UInt8)) : Nil
-      @@embedded_image_data[path] = data
-    end
-
-    # Read-only accessor used by other rendering subsystems (e.g.
-    # SfmlRenderer.load_cached_texture, which has its own per-renderer
-    # texture cache but should still honour the shared embedded-bytes
-    # registry).
-    def self.embedded_image_bytes(path : String) : Slice(UInt8)?
-      @@embedded_image_data[path]?
-    end
-
-    def draw_image(path : String, bounds : Rect, color : Color)
+    def draw_image(source : ImageSource, bounds : Rect, color : Color)
       @texture.active = true
-      texture = @@image_cache[path]? || begin
-        # Cache miss. Prefer registered embedded bytes over a disk read so
-        # behaviour is independent of the current working directory and we
-        # don't need any external files at runtime.
-        if data = @@embedded_image_data[path]?
-          t = SF::Texture.from_memory(data)
-        else
-          t = SF::Texture.from_file(path)
-        end
+      texture = @@image_cache[source.key]? || begin
+        # Cache miss. Embedded bytes (compile-time, CWD-independent) take priority;
+        # otherwise read the key as a disk path. Texture creation is lazy here, where
+        # an OpenGL context is guaranteed to exist.
+        t = if data = source.bytes
+              SF::Texture.from_memory(data)
+            else
+              SF::Texture.from_file(source.key)
+            end
         t.smooth = true
-        @@image_cache[path] = t
+        @@image_cache[source.key] = t
         t
       rescue
         return

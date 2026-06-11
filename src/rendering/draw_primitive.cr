@@ -88,15 +88,48 @@ module CrymbleUI
     end
   end
 
-  # Draw an image from a file path at the given bounds
-  # The renderer handles texture loading/caching internally
-  # Color is used for tinting/alpha (White = no tint)
+  # A reference to an image: either compile-time-embedded bytes (produced by the
+  # `embed_image` macro — self-contained, CWD-independent) or a plain disk path
+  # loaded at render time. `key` is the texture-cache key (and the disk path when
+  # `bytes` is nil).
+  struct ImageSource
+    getter key : String
+    getter bytes : Bytes?
+
+    def initialize(@key : String, @bytes : Bytes? = nil)
+    end
+  end
+
+  # Draw an image at the given bounds. The renderer loads/caches the texture by
+  # `source.key` (from embedded bytes when present, else from disk).
+  # Color is used for tinting/alpha (White = no tint).
   struct DrawImage < DrawPrimitive
-    property path : String
+    getter source : ImageSource
     property bounds : Rect
     property color : Color
 
-    def initialize(@path : String, @bounds : Rect, @color : Color = Color.white)
+    def initialize(@source : ImageSource, @bounds : Rect, @color : Color = Color.white)
+    end
+
+    # Convenience: a plain disk path (loaded at render time, relative to CWD).
+    def initialize(path : String, bounds : Rect, color : Color = Color.white)
+      initialize(ImageSource.new(path), bounds, color)
+    end
+
+    # Texture-cache key — the embedded key or the disk path.
+    def path : String
+      @source.key
     end
   end
+end
+
+# Embed an image file's bytes at COMPILE TIME and return an `ImageSource` that
+# serves it from memory — so a standalone binary needs no external files. The path
+# is resolved by the compiler relative to the build root (like `read_file`), and is
+# reused as the runtime texture-cache key. Pair with `image(...)`:
+#
+#   LOGO = embed_image("tutorials/crystal_logo.png")
+#   image(LOGO, width: 40.0, height: 40.0)
+macro embed_image(path)
+  ::CrymbleUI::ImageSource.new({{ path }}, {{ read_file(path) }}.to_slice)
 end

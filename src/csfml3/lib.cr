@@ -344,8 +344,12 @@ lib LibCSFML
   # RenderWindow Functions
   # ============================================================
 
-  fun sfRenderWindow_create(mode : VideoMode, title : LibC::Char*, style : UInt32, settings : ContextSettings*) : RenderWindow
-  fun sfRenderWindow_createUnicode(mode : VideoMode, title : UInt32*, style : UInt32, settings : ContextSettings*) : RenderWindow
+  # `state` (sfWindowState: 0=windowed, 1=fullscreen) is NEW in CSFML/SFML 3.0 and sits
+  # between `style` and `settings` — see CSFML/Graphics/RenderWindow.h. Omitting it shifts
+  # `settings` into the wrong register, so the C side dereferences garbage → segfault under
+  # any optimization (-O1+). Keep this signature byte-for-byte aligned with the header.
+  fun sfRenderWindow_create(mode : VideoMode, title : LibC::Char*, style : UInt32, state : UInt32, settings : ContextSettings*) : RenderWindow
+  fun sfRenderWindow_createUnicode(mode : VideoMode, title : UInt32*, style : UInt32, state : UInt32, settings : ContextSettings*) : RenderWindow
   fun sfRenderWindow_destroy(window : RenderWindow)
   fun sfRenderWindow_close(window : RenderWindow)
   fun sfRenderWindow_isOpen(window : RenderWindow) : Bool

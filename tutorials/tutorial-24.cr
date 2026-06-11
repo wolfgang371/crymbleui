@@ -3,7 +3,9 @@
 # Displaying images with tinting and sizing options.
 #
 # Key concepts:
-# - image(path, width:, height:) displays a PNG/JPG file
+# - embed_image("path") bakes a PNG/JPG into the binary at compile time, so the
+#   standalone build needs no external files; image(source, width:, height:) shows it.
+#   (Pass a plain String path to image(...) instead to load from disk at runtime.)
 # - tint: applies a color tint (multiply blend)
 # - Images auto-size to parent constraints if no explicit size given
 #
@@ -14,7 +16,7 @@ require "../src/crymble-ui"
 include CrymbleUI
 
 class Tutorial24App < CrymbleUI::App
-  LOGO = "tutorials/crystal_logo.png"
+  LOGO = embed_image("tutorials/crystal_logo.png")
 
   def build : CrymbleUI::Widget
     window("Tutorial 24: Image Widget", 600, 400) do
