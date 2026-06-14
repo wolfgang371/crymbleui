@@ -347,6 +347,18 @@ module CrymbleUI
         update_cursor(app, point)
       end
 
+      # Faithful headless key dispatch — same routing as SFMLRenderer (focused
+      # widget first, then spatial focus navigation on a declined arrow), via the
+      # shared FocusManager#dispatch_key. Use this (not bare handle_key_down) so
+      # focus-escape bugs are observable headlessly. Renders a frame after.
+      def key_down(key : SF::Keyboard::Key, control : Bool = false, shift : Bool = false, alt : Bool = false) : Bool
+        return false unless app = @app
+        return false unless root = app.root
+        handled = Widget.focus_manager.dispatch_key(key, control, shift, alt, root)
+        render_frame(app)
+        handled
+      end
+
       # Update cursor based on what's under the mouse (test instrumentation)
       private def update_cursor(app : App, point : Vec2)
         @current_cursor = app.get_cursor_for_point(point)

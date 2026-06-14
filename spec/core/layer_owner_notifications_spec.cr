@@ -14,9 +14,9 @@ module CrymbleUI
       @internal_layer = Layer.new("test_#{id}", Rect.zero, z_index: 100, owner_widget: self)
     end
 
-    def on_ancestor_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0)
+    def on_ancestor_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0, clip_bounds : Rect? = nil)
       @resize_moves << {dw, dh, dx, dy}
-      super  # Store @resize_clip_delta via LayerOwner mixin
+      super  # Store @resize_clip_delta / @resize_clip_bounds via LayerOwner mixin
     end
 
     def on_ancestor_resize_end

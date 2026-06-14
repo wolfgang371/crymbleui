@@ -40,6 +40,12 @@ module CrymbleUI
         # Minimum visible area to keep panel accessible (prevents dragging completely off-screen)
         MIN_VISIBLE_MARGIN = 50.0
 
+        # Minimum panel width/height. Enforced both during interactive resize and
+        # when a maximized panel re-fits to a shrinking window, so a panel never
+        # collapses to a size where its content area (width - 2*CONTENT_PADDING)
+        # would go negative and feed a negative texture dimension downstream.
+        MIN_PANEL_SIZE = 100.0
+
         @title : String
         def title : String
             @title
@@ -158,6 +164,16 @@ module CrymbleUI
         # Dynamic title bar height (scales with font zoom)
         def title_bar_height : Float64
             (FontSizing.calculate_size(@title_font_scale) + 16.0).round
+        end
+
+        # The panel's content rectangle in absolute coords (below the title bar,
+        # inside the padding). Used during resize to clip descendant layers to
+        # the live content edge so they shrink only when the edge reaches them.
+        def content_clip_bounds : Rect
+            ty = title_bar_height
+            Rect.new(@x + CONTENT_PADDING, @y + ty,
+                Math.max(0.0, @width - CONTENT_PADDING * 2),
+                Math.max(0.0, @height - ty - CONTENT_PADDING))
         end
 
         # Dynamic close button size (proportional to title bar)
@@ -390,9 +406,10 @@ module CrymbleUI
             end
 
             def measure(constraints : BoxConstraints) : Size
-                # Content fills panel minus title bar and padding
-                width = panel.width - (CONTENT_PADDING * 2)
-                height = panel.height - panel.title_bar_height - (CONTENT_PADDING * 2)
+                # Content fills panel minus title bar and padding. Clamp at 0 so
+                # a degenerate panel size can never produce a negative content area.
+                width = Math.max(0.0, panel.width - (CONTENT_PADDING * 2))
+                height = Math.max(0.0, panel.height - panel.title_bar_height - (CONTENT_PADDING * 2))
                 Size.new(width, height)
             end
 
@@ -562,14 +579,19 @@ module CrymbleUI
         # Constrain panel position to stay within window bounds
         # Called when window is resized to prevent panels from being lost off-screen
         def constrain_to_window_bounds(window_bounds : Rect)
-            # If maximized, fill the new window bounds
+            # If maximized, fill the new window bounds — but never below the
+            # panel minimum (an absurdly narrow window must not yield a negative
+            # content area). The panel may then slightly overhang a sub-minimum
+            # window; that is harmless and far better than corrupt geometry.
             if @maximized
+                fit_w = Math.max(MIN_PANEL_SIZE, window_bounds.width)
+                fit_h = Math.max(MIN_PANEL_SIZE, window_bounds.height)
                 if @x != window_bounds.x || @y != window_bounds.y ||
-                   @width != window_bounds.width || @height != window_bounds.height
+                   @width != fit_w || @height != fit_h
                     @x = window_bounds.x
                     @y = window_bounds.y
-                    @width = window_bounds.width
-                    @height = window_bounds.height
+                    @width = fit_w
+                    @height = fit_h
                     @bounds = Rect.new(@x, @y, @width, @height)
                     # Re-flow children NOW. Window.perform_layout already
                     # called panel.layout earlier in this pass, using the
@@ -791,33 +813,33 @@ module CrymbleUI
                 # Update size/position based on resize edge
                 case @resize_edge
                 when ResizeEdge::Right
-                    @width = (@resize_start_bounds.width + dx).clamp(100.0, Float64::MAX)
+                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
                 when ResizeEdge::Bottom
-                    @height = (@resize_start_bounds.height + dy).clamp(100.0, Float64::MAX)
+                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                 when ResizeEdge::Left
-                    new_width = (@resize_start_bounds.width - dx).clamp(100.0, Float64::MAX)
+                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
                     @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
                     @width = new_width
                 when ResizeEdge::Top
-                    new_height = (@resize_start_bounds.height - dy).clamp(100.0, Float64::MAX)
+                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                     @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
                     @height = new_height
                 when ResizeEdge::BottomRight
-                    @width = (@resize_start_bounds.width + dx).clamp(100.0, Float64::MAX)
-                    @height = (@resize_start_bounds.height + dy).clamp(100.0, Float64::MAX)
+                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                 when ResizeEdge::BottomLeft
-                    new_width = (@resize_start_bounds.width - dx).clamp(100.0, Float64::MAX)
+                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
                     @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
                     @width = new_width
-                    @height = (@resize_start_bounds.height + dy).clamp(100.0, Float64::MAX)
+                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                 when ResizeEdge::TopRight
-                    @width = (@resize_start_bounds.width + dx).clamp(100.0, Float64::MAX)
-                    new_height = (@resize_start_bounds.height - dy).clamp(100.0, Float64::MAX)
+                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                     @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
                     @height = new_height
                 when ResizeEdge::TopLeft
-                    new_width = (@resize_start_bounds.width - dx).clamp(100.0, Float64::MAX)
-                    new_height = (@resize_start_bounds.height - dy).clamp(100.0, Float64::MAX)
+                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
                     @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
                     @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
                     @width = new_width
@@ -841,8 +863,8 @@ module CrymbleUI
                 else
                   title_bar_height + CONTENT_PADDING  # No MenuBar: add padding
                 end
-                content_width = @width - (CONTENT_PADDING * 2)
-                content_height = @height - title_bar_height - (CONTENT_PADDING * 2)
+                content_width = Math.max(0.0, @width - (CONTENT_PADDING * 2))
+                content_height = Math.max(0.0, @height - title_bar_height - (CONTENT_PADDING * 2))
                 @content.bounds = Rect.new(content_x, content_y, content_width, content_height)
 
                 # Layout MenuBar with new panel width (edge-to-edge, must extend)
@@ -854,7 +876,7 @@ module CrymbleUI
                         min_width: @width,
                         max_width: @width,
                         min_height: 0.0,
-                        max_height: @height - title_bar_height
+                        max_height: Math.max(0.0, @height - title_bar_height)
                     )
                     # Position at negative offset to account for Content padding
                     mb.layout(menubar_constraints, Vec2.new(-CONTENT_PADDING, mb.bounds.y))
@@ -865,12 +887,15 @@ module CrymbleUI
                     mb.children.each(&.mark_needs_render)
                 end
 
-                # Notify layer owners of resize (uses cumulative delta from start)
+                # Notify layer owners of resize. Pass both the cumulative delta
+                # (for panel-spanning layers) and the panel's CURRENT content
+                # rectangle (so narrow inner layers clip to the live edge instead
+                # of over-shrinking by the whole panel delta).
                 delta_width = @width - @resize_start_bounds.width
                 delta_height = @height - @resize_start_bounds.height
                 delta_x = @x - @resize_start_bounds.x
                 delta_y = @y - @resize_start_bounds.y
-                @content.notify_layer_owners_resize_move(delta_width, delta_height, delta_x, delta_y)
+                @content.notify_layer_owners_resize_move(delta_width, delta_height, delta_x, delta_y, content_clip_bounds)
             end
         end
 

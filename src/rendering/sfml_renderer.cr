@@ -780,25 +780,22 @@ module CrymbleUI
           end
         end
 
-        # Try focused widget (for navigation keys like arrows, backspace)
-        handled = @focus_manager.handle_key_down(key.code, key.control, key.shift, key.alt)
+        # Route the key through the SHARED dispatcher: focused widget first, then
+        # spatial focus navigation on a declined arrow (skipped under Alt). This is
+        # the exact same path FocusManager#dispatch_key gives the headless tester,
+        # so the two cannot drift (a drift here is what hid the ComboBox arrow
+        # focus-escape from the suite).
+        root = app.root
+        handled = if root
+                    @focus_manager.dispatch_key(key.code, key.control, key.shift, key.alt, root)
+                  else
+                    @focus_manager.handle_key_down(key.code, key.control, key.shift, key.alt)
+                  end
 
-        # If not handled by focused widget, try focus navigation
-        # Skip when Alt is pressed — Alt+arrows go to shortcuts (e.g., history navigation)
+        # Activation keys (Enter/Space) are handled here — dispatch_key only does
+        # focus movement (arrows), not activation. Skip when Alt is held.
         unless handled || key.alt
           case key.code
-          when SF::Keyboard::Up, SF::Keyboard::Down, SF::Keyboard::Left, SF::Keyboard::Right
-            if root = app.root
-              direction = case key.code
-                          when SF::Keyboard::Up    then :up
-                          when SF::Keyboard::Down  then :down
-                          when SF::Keyboard::Left  then :left
-                          when SF::Keyboard::Right then :right
-                          else                          :up # shouldn't happen
-                          end
-              @focus_manager.navigate(direction, root: root)
-              handled = true
-            end
           when SF::Keyboard::Enter, SF::Keyboard::Space
             # Activate focused widget (button click, checkbox toggle)
             key_sym = key.code == SF::Keyboard::Enter ? :enter : :space

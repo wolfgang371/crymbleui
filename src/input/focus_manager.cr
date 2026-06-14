@@ -101,6 +101,28 @@ module CrymbleUI
 
     # === SPATIAL NAVIGATION (Arrow keys) ===
 
+    # Shared key dispatch — the SINGLE source of truth for how an arrow key is
+    # routed, so the SFML renderer and the headless tester can't drift (the
+    # ComboBox arrow focus-escape was invisible to specs precisely because the
+    # headless path skipped the navigate-on-decline step the renderer does).
+    # Sends the key to the focused widget; if it declines an arrow (and Alt is
+    # not held), falls back to spatial focus navigation. Returns whether handled.
+    def dispatch_key(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool, root : Widget) : Bool
+      handled = handle_key_down(key, control, shift, alt)
+      return handled if handled || alt
+      dir = case key
+            when SF::Keyboard::Key::Up    then :up
+            when SF::Keyboard::Key::Down  then :down
+            when SF::Keyboard::Key::Left  then :left
+            when SF::Keyboard::Key::Right then :right
+            end
+      if dir
+        navigate(dir, root)
+        return true
+      end
+      false
+    end
+
     # Navigate focus in spatial direction
     def navigate(direction : Symbol, root : Widget)
       return unless current = @focused_widget

@@ -38,6 +38,13 @@ module CrymbleUI
       @scissor_suspended : Bool = false
 
       def initialize(@width : Int32, @height : Int32, background : Color = Color.new(255, 255, 255, 255))
+        # Strict: a render backend dimension is non-negative by definition. SFML's
+        # RenderTexture.new(.to_u32) turns a negative Int into a huge UInt ("Arithmetic
+        # overflow"); the lenient pixel buffer used to silently mask that. Fail loudly so
+        # a layout bug that produces a negative size is caught headlessly, not in prod.
+        if @width < 0 || @height < 0
+          raise ArgumentError.new("TestRenderBackend: negative dimensions #{@width}x#{@height} — a layout bug produced a negative size")
+        end
         @pixels = Array(Color).new(@width * @height, background)
       end
 

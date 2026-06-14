@@ -136,19 +136,22 @@ module CrymbleUI
     @on_event : Proc(String, TextInputEvent, Nil)?
 
     # Horizontal arrow intercept: called before Left/Right is processed.
-    # Bool param: true=Right, false=Left. Return true to consume (TextInput won't process).
+    # Bool param: true=Right, false=Left. Return true to consume: TextInput skips
+    # its own processing AND on_key_down reports the key handled, so the renderer's
+    # spatial-navigate fallback (FocusManager#navigate on an *unhandled* arrow) is
+    # NOT triggered. The intercept owns any resulting movement (e.g. a ComboBox
+    # commits the highlight and re-dispatches the arrow to its owning grid).
     property on_horizontal_arrow : Proc(Bool, Bool)?
 
     # Vertical arrow intercept: called before Up/Down is processed.
-    # Bool param: true=Down, false=Up. Return true to consume (TextInput won't process).
+    # Bool param: true=Down, false=Up. Return true to consume (same contract as
+    # on_horizontal_arrow above).
     property on_vertical_arrow : Proc(Bool, Bool)?
 
     # Tab intercept: called before Tab/Shift+Tab would cycle focus. Bool param: shift.
     # Return true to consume so FocusManager keeps focus here instead of cycling out
     # (e.g. a ComboBox popup commits the highlight and re-dispatches Tab to its owning
-    # focus-scope). NB the polarity is the REVERSE of the arrow intercepts above: those
-    # return false-on-consume because handle_key_down discards the return, whereas
-    # handle_tab_key only skips focus-cycling when on_key_down(Tab) returns true.
+    # focus-scope). Same true-on-consume contract as the arrow intercepts above.
     property on_tab : Proc(Bool, Bool)?
 
     # Setter for on_event (allows parent widgets like ComboBox to set it)
@@ -588,9 +591,10 @@ module CrymbleUI
         @pending_replace = false # Any editing clears pending replace
         true
       when SF::Keyboard::Key::Left
-        # Let parent intercept (e.g., ComboBoxPopup closes on Left/Right)
+        # Parent intercept consumed it (re-dispatches to the grid). Return true so
+        # the renderer does NOT then spatially navigate focus out of the matrix.
         if @on_horizontal_arrow.try(&.call(false))
-          return false
+          return true
         end
         # In QuickEntry mode, let FocusManager handle arrow navigation
         return false if @edit_mode == TextInputMode::QuickEntry && !shift
@@ -618,9 +622,10 @@ module CrymbleUI
         end
         true
       when SF::Keyboard::Key::Right
-        # Let parent intercept (e.g., ComboBoxPopup closes on Left/Right)
+        # Parent intercept consumed it (re-dispatches to the grid). Return true so
+        # the renderer does NOT then spatially navigate focus out of the matrix.
         if @on_horizontal_arrow.try(&.call(true))
-          return false
+          return true
         end
         # In QuickEntry mode, let FocusManager handle arrow navigation
         return false if @edit_mode == TextInputMode::QuickEntry && !shift
@@ -648,9 +653,10 @@ module CrymbleUI
         end
         true
       when SF::Keyboard::Key::Up
-        # Let parent intercept (e.g., type-to-filter ComboBox closes on Up/Down)
+        # Parent intercept consumed it (commit + re-dispatch to the grid). Return
+        # true so the renderer does NOT then spatially navigate focus out of the matrix.
         if @on_vertical_arrow.try(&.call(false))
-          return false
+          return true
         end
         # Always fire ArrowUp event for parent widgets (e.g., ComboBoxPopup item navigation)
         notify_arrow_up
@@ -665,9 +671,10 @@ module CrymbleUI
         mark_needs_render
         true
       when SF::Keyboard::Key::Down
-        # Let parent intercept (e.g., type-to-filter ComboBox closes on Up/Down)
+        # Parent intercept consumed it (commit + re-dispatch to the grid). Return
+        # true so the renderer does NOT then spatially navigate focus out of the matrix.
         if @on_vertical_arrow.try(&.call(true))
-          return false
+          return true
         end
         # Always fire ArrowDown event for parent widgets (e.g., ComboBoxPopup item navigation)
         notify_arrow_down

@@ -11,6 +11,10 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
+  # awesome-crystal requires periodical builds against latest stable Crystal so
+  # list entries don't silently rot. Weekly, Monday 06:00 UTC.
+  schedule:
+    - cron: '0 6 * * 1'
 
 jobs:
   linux:
@@ -20,7 +24,7 @@ jobs:
 
       - uses: crystal-lang/install-crystal@v1
         with:
-          crystal: "1.20.0"
+          crystal: latest
 
       - name: Install SFML 3 build + runtime libraries
         run: |
@@ -50,7 +54,7 @@ jobs:
 
       - uses: crystal-lang/install-crystal@v1
         with:
-          crystal: "1.20.0"
+          crystal: latest
 
       - uses: ilammy/msvc-dev-cmd@v1
 

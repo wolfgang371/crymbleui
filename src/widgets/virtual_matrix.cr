@@ -659,33 +659,22 @@ module CrymbleUI
       @content_layer
     end
 
-    # Pull-based layer bounds: content and cursor overlay use effective content size
+    # Pull-based layer bounds: content and cursor overlay use effective content size.
+    # A shrink_to_content matrix has FIXED-width content, so during an ancestor
+    # resize it clips to the ancestor's live content rectangle — it shrinks only
+    # once the edge reaches it (not by the ancestor's whole delta), and the
+    # intersection is shrink-only and never negative. A full-size matrix (the
+    # main grid) reflows with the panel, so it keeps the delta-based clip.
     def compute_bounds_for_layer(layer : Layer) : Rect
       abs = absolute_bounds
       w, h = effective_content_size(bounds.width, bounds.height)
       natural = Rect.new(abs.x, abs.y, w, h)
 
-      # All layers clamp to shrink-only during resize (prevents ghost pixels / visual mismatch)
-      result = if layer == @cursor_overlay_layer
-        if delta = @resize_clip_delta
-          dw, dh, dx, dy = delta
-          # Capture baseline on first resize_move — stable for entire drag
-          orig = layer.resize_baseline || begin
-            layer.resize_baseline = natural
-            natural
-          end
-          clamped_dw = {dw, 0.0}.min
-          clamped_dh = {dh, 0.0}.min
-          Rect.new(orig.x + dx, orig.y + dy, orig.width + clamped_dw, orig.height + clamped_dh)
-        else
-          layer.resize_baseline = nil
-          natural
-        end
+      if @shrink_to_content && (clip = @resize_clip_bounds)
+        intersect_bounds(natural, clip)
       else
         apply_resize_clip(natural, layer)
       end
-
-      result
     end
 
     def content_layer : Layer?
@@ -737,19 +726,14 @@ module CrymbleUI
         # content overflows vertically. Cheap to always reserve it — the
         # scrollbar layer is inert when not needed.
         intrinsic_w += ScrollView::SCROLLBAR_WIDTH
-        # Width: clamp to available constraint; when columns would overflow,
-        # scale them down proportionally so the full matrix fits horizontally
-        # (no internal horizontal scrollbar). Caller explicitly chooses
-        # shrink_to_content; in that mode full visibility is the intent.
-        # Also invalidate dimension caches so the rescaled widths propagate
-        # through VM's internal pixel bookkeeping.
-        if constraints.max_width.finite? && intrinsic_w > constraints.max_width
-          scale = constraints.max_width / intrinsic_w
-          @col_widths = @col_widths.map { |w| w * scale }
-          invalidate_dimension_caches
-          intrinsic_w = constraints.max_width
-        end
-        width = constraints.max_width.finite? ? Math.min(intrinsic_w, constraints.max_width) : intrinsic_w
+        # Width: size to content, capped at the available constraint. When the
+        # panel is narrower than the content the matrix CLIPS — columns keep
+        # their natural, readable width and the right-most ones are cut off
+        # (horizontal scrolling/scrollbar is disabled in this mode; see
+        # horizontal_clip?). Scaling columns down to fit was tried and rejected:
+        # it renders cells as unreadable slivers, and doing it in measure()
+        # corrupted the authored @col_widths. @col_widths is never mutated here.
+        width = constraints.max_width.finite? ? Math.max(0.0, Math.min(intrinsic_w, constraints.max_width)) : intrinsic_w
         # Height: cap at optional max_height AND the parent's constraint.
         max_h = @max_height
         capped_h = max_h ? Math.min(intrinsic_h, max_h) : intrinsic_h
@@ -914,8 +898,15 @@ module CrymbleUI
         sync_from_scroll_view(new_offset)
       end
 
+      # A shrink_to_content matrix has fixed-width content: its sticky header
+      # must clip to the panel's content edge (like the data) during resize,
+      # not over-shrink by the panel delta. Full-size matrices keep delta.
+      scroll_view.clip_to_ancestor_content = @shrink_to_content
       scroll_view.viewport_size = Size.new(full_width, full_height)
-      scroll_view.content_size = Size.new(total_content_width, total_content_height)
+      # When clipping horizontally, pin the scroll content width to the viewport
+      # so no horizontal scrollbar appears and the overflow is simply clipped.
+      content_w = horizontal_clip? ? full_width : total_content_width
+      scroll_view.content_size = Size.new(content_w, total_content_height)
 
       # Sticky layer config (include ruler space for ruler widgets)
       scroll_view.sticky_rows = sticky_row_count
@@ -1769,6 +1760,15 @@ module CrymbleUI
       grid_spacing + get_col_width(col) * frame_height
     end
 
+    # Embedded shrink_to_content tables clip horizontally rather than scrolling
+    # or scaling: columns keep their natural width, and when the panel is too
+    # narrow the right-most columns are simply cut off (no horizontal scrollbar,
+    # no horizontal scroll). The full data grid (shrink_to_content == false)
+    # scrolls both ways as usual.
+    private def horizontal_clip? : Bool
+      @shrink_to_content
+    end
+
     private def row_height_pixels(row : Int32) : Float64
       grid_spacing + get_row_height(row) * frame_height
     end
@@ -1904,10 +1904,14 @@ module CrymbleUI
       w = full_width
       h = full_height
       needs_vscroll = total_content_height > h
-      needs_hscroll = total_content_width > w
+      # A horizontally clipping matrix (shrink_to_content) has no horizontal
+      # scrollbar — it clips overflow. Reserving height for a scrollbar that
+      # never appears made the matrix lose 16px of height (rows popping in/out)
+      # whenever the panel width crossed the content-fits threshold.
+      needs_hscroll = horizontal_clip? ? false : (total_content_width > w)
       if needs_vscroll
         w -= ScrollView::SCROLLBAR_WIDTH
-        needs_hscroll = total_content_width > w unless needs_hscroll
+        needs_hscroll = total_content_width > w unless needs_hscroll || horizontal_clip?
       end
       if needs_hscroll
         h -= ScrollView::SCROLLBAR_WIDTH
@@ -1955,6 +1959,7 @@ module CrymbleUI
     end
 
     private def max_content_scroll_x : Float64
+      return 0.0 if horizontal_clip? # clip horizontally — never scroll sideways
       viewport_width = @content_layer.try(&.bounds.width) || @bounds.width
       (total_content_width - viewport_width).clamp(0.0, Float64::MAX)
     end

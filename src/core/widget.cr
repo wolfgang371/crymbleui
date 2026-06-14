@@ -1354,12 +1354,12 @@ module CrymbleUI
         # Position changes are handled by pull-based bounds (compute_bounds_for_layer).
 
         # Broadcast resize move to all LayerOwner descendants
-        protected def notify_layer_owners_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0)
+        protected def notify_layer_owners_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0, clip_bounds : Rect? = nil)
           @children.each do |child|
             if child.responds_to?(:on_ancestor_resize_move)
-              child.on_ancestor_resize_move(dw, dh, dx, dy)
+              child.on_ancestor_resize_move(dw, dh, dx, dy, clip_bounds)
             end
-            child.notify_layer_owners_resize_move(dw, dh, dx, dy)
+            child.notify_layer_owners_resize_move(dw, dh, dx, dy, clip_bounds)
           end
         end
 

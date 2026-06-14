@@ -51,6 +51,13 @@ module CrymbleUI
     property sticky_col_width : Float64 = 0.0   # Total pixel width of sticky cols
     property sticky_background_color : Color = Theme.current.grid_content_background  # Background for sticky layers
 
+    # When true (set by an embedded shrink_to_content VirtualMatrix), layers clip
+    # to the resizing ancestor's content rect during resize instead of shrinking
+    # by the ancestor's delta — so a narrow inner table's header doesn't
+    # over-shrink ("Ta…") while its data stays full width. Default false keeps
+    # the delta-based clip used by full-size, panel-spanning scroll views.
+    property clip_to_ancestor_content : Bool = false
+
     @content_widget : Widget?
     @visible_widgets : Set(Widget) = Set(Widget).new  # Track which widgets are in viewport
     @last_visibility_offset : Vec2 = Vec2.new(-1.0, -1.0)  # Last offset where visibility was updated (for dedup)
@@ -128,6 +135,13 @@ module CrymbleUI
         Rect.new(abs.x, abs.y, @sticky_col_width, @sticky_row_height)
       else
         abs
+      end
+
+      # Embedded shrink_to_content matrix: clip every layer (incl. the sticky
+      # header) to the ancestor's live content rect, so the header doesn't
+      # over-shrink while the data stays full width.
+      if @clip_to_ancestor_content && (clip = @resize_clip_bounds)
+        return intersect_bounds(natural, clip)
       end
 
       result = if delta = @resize_clip_delta
