@@ -143,6 +143,14 @@ module CrymbleUI
     # Bool param: true=Down, false=Up. Return true to consume (TextInput won't process).
     property on_vertical_arrow : Proc(Bool, Bool)?
 
+    # Tab intercept: called before Tab/Shift+Tab would cycle focus. Bool param: shift.
+    # Return true to consume so FocusManager keeps focus here instead of cycling out
+    # (e.g. a ComboBox popup commits the highlight and re-dispatches Tab to its owning
+    # focus-scope). NB the polarity is the REVERSE of the arrow intercepts above: those
+    # return false-on-consume because handle_key_down discards the return, whereas
+    # handle_tab_key only skips focus-cycling when on_key_down(Tab) returns true.
+    property on_tab : Proc(Bool, Bool)?
+
     # Setter for on_event (allows parent widgets like ComboBox to set it)
     def on_event=(callback : Proc(String, TextInputEvent, Nil)?)
       @on_event = callback
@@ -722,6 +730,12 @@ module CrymbleUI
           release_focus
         end
         true
+      when SF::Keyboard::Key::Tab
+        # Let a focus-stealing overlay editor (e.g. a ComboBox popup) commit and
+        # re-dispatch Tab to its owning focus-scope. Consume (return true) so
+        # FocusManager keeps focus here rather than cycling out; decline (false, incl.
+        # no callback / standalone) so it cycles normally. See on_tab's polarity note.
+        @on_tab.try(&.call(shift)) || false
       else
         false # Not handled
       end

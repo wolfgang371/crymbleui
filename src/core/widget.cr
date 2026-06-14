@@ -1182,6 +1182,11 @@ module CrymbleUI
         #   that consumes Tab is a keyboard focus trap BY DESIGN — Ctrl+Tab
         #   (panel cycling) is the intended escape hatch, so don't "fix" the
         #   missing Tab-order leak.
+        #   The complement (overlay cell-editors): a cell editor that opens an
+        #   overlay and steals real focus (e.g. ComboBox's dropdown TextInput) is
+        #   NOT a proxy, so this forwarding doesn't apply — instead it must commit
+        #   and re-dispatch Tab back to its focus-scope ancestor itself (see
+        #   ComboBox#wire_popup_tab_callback), so Tab never escapes the matrix.
         # - Text input → always forwarded
         #
         # **Default behavior:** The base Widget implementation works for simple

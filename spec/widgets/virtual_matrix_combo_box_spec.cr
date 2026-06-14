@@ -514,3 +514,225 @@ describe "on_key_down 4-param dispatch (signature regression)" do
     cb.popup_open?.should be_true
   end
 end
+
+# T-015: a ComboBox dropdown open in a VMatrix cell must, on Tab/Shift+Tab, COMMIT
+# the highlighted value and advance/retreat the cell cursor (the spreadsheet Tab) —
+# never discard the highlight and let focus escape the matrix. These drive Tab through
+# the REAL dispatch (press_tab -> FocusManager#handle_tab_key) and assert observable
+# state: what value committed, where the cursor landed, who holds focus.
+
+# Records every commit so we can assert the HIGHLIGHTED value was taken (not the old
+# one). Mirrors ComboBoxInvalidatingAdapter but records via the ComboBox select block.
+private class ComboBoxRecordingAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
+
+  getter committed = [] of Tuple(Int32, String)
+
+  def initialize(@rows : Int32 = 3, @cols : Int32 = 2)
+  end
+
+  def row_count : Int32
+    @rows
+  end
+
+  def col_count : Int32
+    @cols
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    if col == 1
+      rec = self
+      CrymbleUI::ComboBox.new(
+        items: ["Apple", "Banana", "Cherry"],
+        selected: 0,
+        id: "combo_#{row}_#{col}"
+      ) do |idx, val|
+        rec.committed << {idx, val}
+      end
+    else
+      CrymbleUI::TextInput.new(
+        value: "R#{row}C#{col}",
+        id: "cell_#{row}_#{col}",
+        mode: CrymbleUI::TextInputMode::QuickEntry,
+      )
+    end
+  end
+end
+
+# Build a root holding the matrix AND a focusable sibling button. The sibling is
+# essential for observing "focus escaped": a matrix-only root is itself a focus scope,
+# so cycle_focus would boomerang back to the matrix and a leak would be invisible.
+# (build_matrix_with_sibling in virtual_matrix_tab_roundrobin_spec.cr is a file-private
+# def — not callable cross-file — so we author a local combo-flavoured equivalent.)
+private def setup_recording_matrix_with_sibling(adapter)
+  matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+  sibling = CrymbleUI::Button.new("Sibling", id: "sibling") { }
+  root = CrymbleUI::VStack.new(spacing: 0.0, padding: 0.0)
+  root.add_child(matrix)
+  root.add_child(sibling)
+
+  renderer = CrymbleUI::Testing::TestRenderer.new(600, 400)
+  app = TestApp.new
+  app.root_widget = root
+  app.build_tree
+  root.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(600.0, 400.0)), CrymbleUI::Vec2.zero)
+  renderer.render_frame(app)
+
+  {renderer, app, matrix, sibling}
+end
+
+# Move cursor to the ComboBox column (col 1) and open the popup by typing `ch`,
+# returning the live ComboBox cell. Leaves focus on the popup's TextInput.
+private def open_combo_popup(matrix, renderer, app, fm, ch : Char)
+  fm.focus(matrix)
+  fm.handle_key_down(SF::Keyboard::Key::Right, false, false)
+  renderer.render_frame(app)
+  fm.handle_text_input(ch)
+  renderer.render_frame(app)
+  matrix.active_cells[{0, 1}]?.as(CrymbleUI::ComboBox)
+end
+
+describe "VirtualMatrix ComboBox Tab/Shift+Tab (T-015)" do
+  it "Tab with popup open commits the highlighted item and advances the cursor" do
+    adapter = ComboBoxRecordingAdapter.new
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+    renderer, app = setup_combo_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+
+    combo = open_combo_popup(matrix, renderer, app, fm, 'B') # filter -> "Banana" (idx 1) highlighted
+    combo.popup_open?.should be_true
+
+    press_tab(app)
+    renderer.render_frame(app)
+
+    adapter.committed.should eq([{1, "Banana"}]) # took the HIGHLIGHTED value, not old "Apple"
+    matrix.cursor_rc.should eq({1, 0})            # Tab from {0,1} (2 cols) round-robins to next row col 0
+    combo.popup_open?.should be_false
+  end
+
+  it "Shift+Tab with popup open commits and retreats the cursor" do
+    adapter = ComboBoxRecordingAdapter.new
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+    renderer, app = setup_combo_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+
+    combo = open_combo_popup(matrix, renderer, app, fm, 'B')
+    combo.popup_open?.should be_true
+
+    press_tab(app, shift: true)
+    renderer.render_frame(app)
+
+    adapter.committed.should eq([{1, "Banana"}])
+    matrix.cursor_rc.should eq({0, 0}) # Shift+Tab from {0,1} -> {0,0}
+  end
+
+  it "Tab in Enter/browse mode also commits the highlighted item and advances" do
+    adapter = ComboBoxRecordingAdapter.new
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+    renderer, app = setup_combo_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+
+    fm.focus(matrix)
+    fm.handle_key_down(SF::Keyboard::Key::Right, false, false)
+    renderer.render_frame(app)
+    fm.handle_key_down(SF::Keyboard::Key::Enter, false, false) # browse-mode popup (no initial char)
+    renderer.render_frame(app)
+    combo = matrix.active_cells[{0, 1}]?.as(CrymbleUI::ComboBox)
+    combo.popup_open?.should be_true
+
+    fm.handle_key_down(SF::Keyboard::Key::Down, false, false) # highlight "Banana" (item nav, not grid)
+    renderer.render_frame(app)
+
+    press_tab(app)
+    renderer.render_frame(app)
+
+    adapter.committed.should eq([{1, "Banana"}])
+    matrix.cursor_rc.should eq({1, 0})
+  end
+
+  it "Tab over an unmatched filter closes without commit but still advances" do
+    adapter = ComboBoxRecordingAdapter.new
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+    renderer, app = setup_combo_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+
+    combo = open_combo_popup(matrix, renderer, app, fm, 'Z') # no item matches
+    combo.popup_open?.should be_true
+
+    press_tab(app)
+    renderer.render_frame(app)
+
+    adapter.committed.should be_empty       # nothing to commit
+    combo.popup_open?.should be_false
+    matrix.cursor_rc.should eq({1, 0})      # "execute tab" still advances
+  end
+
+  it "Tab keeps focus inside the matrix (does not escape to a sibling)" do
+    adapter = ComboBoxRecordingAdapter.new
+    renderer, app, matrix, sibling = setup_recording_matrix_with_sibling(adapter)
+    fm = CrymbleUI::Widget.focus_manager
+
+    combo = open_combo_popup(matrix, renderer, app, fm, 'B')
+    combo.popup_open?.should be_true
+
+    press_tab(app)
+    renderer.render_frame(app)
+
+    fm.focused_widget.should eq(matrix)     # focus stayed in the matrix...
+    fm.focused_widget.should_not eq(sibling) # ...not the sibling button
+    matrix.cursor_rc.should eq({1, 0})
+  end
+
+  it "Tab on a standalone ComboBox commits the highlight then cycles to the next widget" do
+    recorded = [] of Tuple(Int32, String)
+    combo = CrymbleUI::ComboBox.new(items: ["Apple", "Banana", "Cherry"], selected: 0, id: "standalone") do |idx, val|
+      recorded << {idx, val}
+    end
+    button = CrymbleUI::Button.new("Next", id: "next") { }
+    root = CrymbleUI::VStack.new(spacing: 0.0, padding: 0.0)
+    root.add_child(combo)
+    root.add_child(button)
+
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = TestApp.new
+    app.root_widget = root
+    app.build_tree
+    root.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0)), CrymbleUI::Vec2.zero)
+    renderer.render_frame(app)
+
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(combo)
+    fm.handle_text_input('B') # open + filter -> "Banana"
+    renderer.render_frame(app)
+    combo.popup_open?.should be_true
+
+    press_tab(app)
+    renderer.render_frame(app)
+
+    recorded.should eq([{1, "Banana"}]) # standalone now COMMITS on Tab (was: discard)
+    fm.focused_widget.should eq(button) # ...and focus cycles to the next widget
+  end
+
+  # NB: no "Tab after invalidate-while-open" test. A matrix rebuild while a popup is
+  # open orphans/closes the popup (see ComboBox#expand's mark_needs_render rationale),
+  # and embrace only ever invalidates on SELECT — which collapses first — so the
+  # preserved-open-popup branch in copy_state_from is unreachable here. The on_tab
+  # re-bind there is consistency with the existing on_select/on_cancel/on_click_outside
+  # re-binds in the same branch (defensive, untested-by-design like those three).
+
+  it "Escape still cancels without commit (the new commit path does not leak)" do
+    adapter = ComboBoxRecordingAdapter.new
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")
+    renderer, app = setup_combo_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+
+    combo = open_combo_popup(matrix, renderer, app, fm, 'B')
+    combo.popup_open?.should be_true
+
+    fm.handle_key_down(SF::Keyboard::Key::Escape, false, false)
+    renderer.render_frame(app)
+
+    adapter.committed.should be_empty
+    combo.popup_open?.should be_false
+  end
+end

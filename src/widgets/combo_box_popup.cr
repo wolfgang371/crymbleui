@@ -29,6 +29,11 @@ module CrymbleUI
     ITEM_SPACING = 0.0
     FLASH_INTERVAL_MS = 300
 
+    # Index reported to on_select when an editable popup commits free-typed text
+    # that is not one of @all_items — distinguishes a custom value from a real
+    # item pick.
+    CUSTOM_INDEX = -1
+
     # Override Popup's compute_bounds_for_layer: no border margin expansion
     def compute_bounds_for_layer(layer : Layer) : Rect
       absolute_bounds
@@ -66,6 +71,11 @@ module CrymbleUI
     @text_background_color : Color?
     @text_background_colors : Array(Color)?
 
+    # When true, submitting text that matches no item commits it as a custom
+    # value (on_select with CUSTOM_INDEX) instead of cancelling. Opt-in: default
+    # combos stay pick-from-list only.
+    @editable : Bool
+
     # Flash timer
     @flash_timer_id : Int32?
     @flash_state : Bool = true
@@ -94,6 +104,10 @@ module CrymbleUI
       @filtered_items
     end
 
+    def editable? : Bool
+      @editable
+    end
+
     def highlighted_index : Int32
       @highlighted_index
     end
@@ -108,7 +122,8 @@ module CrymbleUI
       padding : Float64 = 4.0,
       id : String? = nil,
       @text_background_color : Color? = nil,
-      @text_background_colors : Array(Color)? = nil
+      @text_background_colors : Array(Color)? = nil,
+      @editable : Bool = false
     )
       # Initialize all instance variables before super
       @all_items = items
@@ -168,6 +183,7 @@ module CrymbleUI
       @scroll_view = ScrollView.new
       @text_background_color = nil
       @text_background_colors = nil
+      @editable = false
 
       super(
         width: nil,
@@ -279,8 +295,23 @@ module CrymbleUI
       end
     end
 
-    # Select the currently highlighted item
+    # Select the currently highlighted item. In an editable popup, the typed
+    # text takes precedence: text that exactly matches an item picks that item;
+    # any other non-empty text commits as a custom value (CUSTOM_INDEX). Empty
+    # text falls through to the highlighted item — so navigating the list with
+    # arrows and pressing Enter behaves as usual.
     def select_highlighted
+      if @editable
+        typed = @text_input.value
+        if idx = @all_items.index(typed)
+          @on_select.try(&.call(idx, typed))
+          return
+        elsif !typed.empty?
+          @on_select.try(&.call(CUSTOM_INDEX, typed))
+          return
+        end
+      end
+
       if @filtered_items.empty? || @highlighted_index < 0 || @highlighted_index >= @filtered_items.size
         # No valid selection — cancel (close without selecting)
         @on_cancel.try(&.call)
