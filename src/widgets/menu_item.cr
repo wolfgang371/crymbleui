@@ -58,12 +58,25 @@ module CrymbleUI
             ShortcutFormat.to_display(shortcut)
         end
 
-        # Checkable state
+        # Checkable state. `checked` (Bool) is the back-compat on/off; `check_state`
+        # carries the tristate. Resolved render state = `checked ? Checked : check_state`.
         reactive_property checked : Bool
+        reactive_property check_state : CheckState
         @checkable : Bool  # If true, this is a toggle item (keeps menu open on click)
+        @tristate : Bool = false # If true, a click cycles through all three states
 
         def checkable : Bool
             @checkable
+        end
+
+        def tristate : Bool
+            @tristate
+        end
+
+        # The state actually rendered: an explicit `checked` forces Checked, else the
+        # tristate `check_state`.
+        def resolved_check_state : CheckState
+            checked ? CheckState::Checked : check_state
         end
 
         # Visual properties
@@ -92,6 +105,8 @@ module CrymbleUI
             shortcut : String? = nil,
             checked : Bool? = nil,
             checkable : Bool = false,
+            check_state : CheckState? = nil,
+            tristate : Bool = false,
             id : String? = nil,
             font_scale : Int32 = 0,
             text_color : Color? = nil,
@@ -103,6 +118,7 @@ module CrymbleUI
         )
             @label_text = Source(String).new(label)
             @checked = Source(Bool).new(checked || false)
+            @check_state = Source(CheckState).new(check_state || CheckState::Unchecked)
             @padding = Source(Float64).new(padding)
             @min_width = Source(Float64).new(min_width)
             @font_scale.set(font_scale)
@@ -112,8 +128,9 @@ module CrymbleUI
             @hover_color = hover_color
             @shortcut = Source(String?).new(shortcut)
             @on_click = block
-            # If checked is provided (not nil), this is a checkable item
-            @checkable = checked.nil? ? checkable : true
+            @tristate = tristate
+            # Checkable if explicitly so, or if any check state / tristate was given.
+            @checkable = (checked.nil? && check_state.nil? && !tristate) ? checkable : true
         end
 
         # Constructor without block (for items that just toggle checked state)
@@ -122,6 +139,8 @@ module CrymbleUI
             shortcut : String? = nil,
             checked : Bool? = nil,
             checkable : Bool = false,
+            check_state : CheckState? = nil,
+            tristate : Bool = false,
             id : String? = nil,
             font_scale : Int32 = 0,
             text_color : Color? = nil,
@@ -132,6 +151,7 @@ module CrymbleUI
         )
             @label_text = Source(String).new(label)
             @checked = Source(Bool).new(checked || false)
+            @check_state = Source(CheckState).new(check_state || CheckState::Unchecked)
             @padding = Source(Float64).new(padding)
             @min_width = Source(Float64).new(min_width)
             @font_scale.set(font_scale)
@@ -141,8 +161,9 @@ module CrymbleUI
             @hover_color = hover_color
             @shortcut = Source(String?).new(shortcut)
             @on_click = nil
-            # If checked is provided (not nil), this is a checkable item
-            @checkable = checked.nil? ? checkable : true
+            @tristate = tristate
+            # Checkable if explicitly so, or if any check state / tristate was given.
+            @checkable = (checked.nil? && check_state.nil? && !tristate) ? checkable : true
         end
 
         # Override label for path_id generation
@@ -197,6 +218,11 @@ module CrymbleUI
         def trigger_click
             return unless enabled?
 
+            # Checkable items AUTO-CYCLE their own state (option B): a normal checkable
+            # toggles on/off; a tristate item cycles Unchecked→Checked→Indeterminate.
+            # The block still fires (and can react to / persist the new state).
+            advance_check_state if @checkable
+
             # Execute callback
             @on_click.try &.call
 
@@ -219,6 +245,22 @@ module CrymbleUI
         # This is called when Menu closes via click (not used by mouse events)
         def on_click
             trigger_click
+        end
+
+        # Advance the checkbox state on a click (widget-owned). Non-tristate toggles
+        # on/off via `checked`; tristate cycles the resolved state through all three.
+        private def advance_check_state
+            if @tristate
+                next_state = case resolved_check_state
+                             when CheckState::Unchecked then CheckState::Checked
+                             when CheckState::Checked   then CheckState::Indeterminate
+                             else                            CheckState::Unchecked
+                             end
+                self.checked = false
+                self.check_state = next_state
+            else
+                self.checked = !checked
+            end
         end
 
         # Mouse enter - highlight item
@@ -251,7 +293,6 @@ module CrymbleUI
             # Get dynamic sizes
             height = item_height
             check_width = check_icon_width
-            check_size = checkmark_size
             line_thickness = checkmark_line_thickness
             junction_radius = checkmark_junction_radius
 
@@ -271,25 +312,14 @@ module CrymbleUI
                     fill_rect(local_bounds, hover_color)
                 end
 
-                # Draw checkmark if checked (geometric)
-                if checked
-                    # Draw a checkmark as two line segments forming a "✓" shape
-                    check_center_x = 0.0 + padding + check_width / 2.0  # Center in check area
-                    # Align vertically with text baseline
-                    check_center_y = 0.0 + (height - font_size) / 2.0 + font_size * 0.6
-
-                    # Short stroke going down-left
-                    p1 = Vec2.new(check_center_x - check_size * 0.35, check_center_y - check_size * 0.1)
-                    p2 = Vec2.new(check_center_x - check_size * 0.1, check_center_y + check_size * 0.25)
-
-                    # Long stroke going up-right
-                    p3 = Vec2.new(check_center_x - check_size * 0.1, check_center_y + check_size * 0.25)
-                    p4 = Vec2.new(check_center_x + check_size * 0.4, check_center_y - check_size * 0.4)
-
-                    draw_line(p1, p2, txt, line_thickness)
-                    draw_line(p3, p4, txt, line_thickness)
-                    # Fill junction with a circle for smooth connection
-                    draw_circle(p2, junction_radius, txt, fill: true)
+                # Checkable items render the REAL checkbox (box + state mark) via the
+                # shared helper — a deliberate visual change (option B): an unchecked
+                # checkable item now shows an empty box, not a bare checkmark.
+                if @checkable
+                    box = font_size
+                    box_rect = Rect.new(padding + (check_width - box) / 2.0, (height - box) / 2.0, box, box)
+                    draw_check_glyph(resolved_check_state, box_rect, box_color: txt, check_color: txt,
+                        line_thickness: line_thickness, junction_radius: junction_radius)
                 end
 
                 # Draw label text

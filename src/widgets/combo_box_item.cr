@@ -66,10 +66,16 @@ module CrymbleUI
       self.selected = value
     end
 
-    # When non-nil, this item is in "checkable" mode.
-    # True = checked (✓), false = unchecked (☐).
-    # The gutter region click fires @on_toggle; body region keeps the existing on_click path.
-    property checked : Bool? = nil
+    # When non-nil, this item is in "checkable" mode: the gutter renders a REAL
+    # tristate checkbox whose state is PULLED from this closure. The closure is
+    # called inside `to_primitives`, so reading the underlying selection Source
+    # auto-captures it — a selection change re-renders this row with no manual mark.
+    # nil ⇒ not checkable (plain row). Gutter click fires @on_toggle; body keeps on_click.
+    property check_state_fn : (-> CheckState)? = nil
+
+    def checkable? : Bool
+      !@check_state_fn.nil?
+    end
 
     # Gutter width for the ✓/☐ column (pixels from left edge)
     GUTTER_WIDTH = 20.0
@@ -159,7 +165,7 @@ module CrymbleUI
     # fire toggle (stay open) vs select (close) with no double-fire.
     def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       return unless button == MouseButton::Left
-      if @checked != nil
+      if checkable?
         # Checkable mode: decide by horizontal position
         local_x = point.x - absolute_bounds.x
         if local_x < GUTTER_WIDTH
@@ -173,7 +179,7 @@ module CrymbleUI
 
     def on_click
       # For checkable items on_mouse_up already handled everything — skip double-fire.
-      return if @checked != nil
+      return if checkable?
       @on_click_callback.try &.call(@value)
     end
 
@@ -203,14 +209,16 @@ module CrymbleUI
 
       primitives do
         fill_rect(bg_rect, bg_color)
-        # MultiComboBox checkbox items show a ✓/☐ gutter. Read the reactive getters
-        # (label_text / text_color / font_scale), never the ivars — under t029 those are now
-        # a Source / a raw ThemeColor override, not the painted value.
-        if (c = checked) != nil
-          gutter_pos = Vec2.new(2.0, text_y)
-          glyph = c ? "✓" : "☐"
-          draw_text(glyph, gutter_pos, text_color, font_scale)
-          # Shift label text to the right of the gutter
+        # MultiComboBox checkbox rows render a REAL checkbox in the gutter. Calling the
+        # pull-closure HERE (inside to_primitives) auto-captures the selection Source, so
+        # a selection change re-renders this row with no manual mark. Read the reactive
+        # getters (label_text / text_color / font_scale), never the ivars.
+        if fn = @check_state_fn
+          box = font_size
+          box_rect = Rect.new(2.0, (bounds.height - box) / 2.0, box, box)
+          draw_check_glyph(fn.call, box_rect, box_color: text_color, check_color: text_color,
+            line_thickness: box * 0.2, junction_radius: box * 0.1)
+          # Shift the label to the right of the gutter.
           draw_text(label_text, Vec2.new(GUTTER_WIDTH + PADDING, text_y), text_color, font_scale)
         else
           draw_text(label_text, text_pos, text_color, font_scale)

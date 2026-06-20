@@ -16,8 +16,8 @@ class MultiSelApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(items: ["Apple", "Banana", "Cherry"], selected: @selected, id: "mc") do |index, now_on|
-        self.selected = now_on ? (@selected.dup << index) : @selected.dup.tap(&.delete(index))
+      combo_box(items: ["Apple", "Banana", "Cherry"], selected: @selected, id: "mc") do |new_set|
+        self.selected = new_set
       end
     end
   end
@@ -29,8 +29,8 @@ class MultiSelFilterApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(items: ["Apple", "Apricot", "Banana", "Cherry"], selected: @selected, id: "mc") do |index, now_on|
-        self.selected = now_on ? (@selected.dup << index) : @selected.dup.tap(&.delete(index))
+      combo_box(items: ["Apple", "Apricot", "Banana", "Cherry"], selected: @selected, id: "mc") do |new_set|
+        self.selected = new_set
       end
     end
   end
@@ -42,8 +42,8 @@ class MultiSelAllApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(items: ["Alpha", "Beta", "Gamma"], selected: @selected, id: "mc") do |index, now_on|
-        self.selected = now_on ? (@selected.dup << index) : @selected.dup.tap(&.delete(index))
+      combo_box(items: ["Alpha", "Beta", "Gamma"], selected: @selected, id: "mc") do |new_set|
+        self.selected = new_set
       end
     end
   end
@@ -55,8 +55,8 @@ class MultiSelEmptyApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(items: [] of String, selected: @selected, id: "mc") do |index, now_on|
-        self.selected = now_on ? (@selected.dup << index) : @selected.dup.tap(&.delete(index))
+      combo_box(items: [] of String, selected: @selected, id: "mc") do |new_set|
+        self.selected = new_set
       end
     end
   end
@@ -70,8 +70,8 @@ class MultiSelSummaryApp < CrymbleUI::App
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
       combo_box(items: ITEMS, selected: @selected, id: "mc",
-        summary: ->(s : Set(Int32)) { s.map { |i| ITEMS[i] }.join(", ") }) do |index, now_on|
-        self.selected = now_on ? (@selected.dup << index) : @selected.dup.tap(&.delete(index))
+        summary: ->(s : Set(Int32)) { s.map { |i| ITEMS[i] }.join(", ") }) do |new_set|
+        self.selected = new_set
       end
     end
   end
@@ -163,7 +163,7 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
   it "header click selects ALL items" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelApp.new  # starts with Set{0}
+    app = MultiSelApp.new # starts with Set{0}
     app.build_tree
     renderer.settle_rendering(app)
 
@@ -178,7 +178,7 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
   it "header click when all selected deselects ALL items" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelAllApp.new  # starts with Set{0,1,2}
+    app = MultiSelAllApp.new # starts with Set{0,1,2}
     app.build_tree
     renderer.settle_rendering(app)
 
@@ -193,7 +193,7 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
   it "toggle while filtered maps to the correct ORIGINAL item index" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelFilterApp.new  # items: Apple=0, Apricot=1, Banana=2, Cherry=3
+    app = MultiSelFilterApp.new # items: Apple=0, Apricot=1, Banana=2, Cherry=3
     app.build_tree
     renderer.settle_rendering(app)
 
@@ -219,7 +219,7 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
   it "collapsed cell shows the custom summary text" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelSummaryApp.new  # selected: {0, 2}, items: Red/Green/Blue
+    app = MultiSelSummaryApp.new # selected: {0, 2}, items: Red/Green/Blue
     app.build_tree
     renderer.settle_rendering(app)
 
@@ -234,17 +234,29 @@ describe "MultiComboBox (selected : Set(Int32))" do
     texts.any? { |t| t.includes?("Red") && t.includes?("Blue") }.should be_true
   end
 
-  it "default summary shows 'k of n' format" do
+  it "default summary: a SINGLE pick shows the item NAME (not '1 of 3')" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelApp.new  # selected: {0}, items: 3
+    app = MultiSelApp.new # selected: {0} of [Apple, Banana, Cherry]
     app.build_tree
     renderer.settle_rendering(app)
 
     mc = app.find("mc").not_nil!.as(CrymbleUI::MultiComboBox)
-    primitives = mc.to_primitives(mc.bounds)
-    text_primitives = primitives.select(&.is_a?(CrymbleUI::DrawText)).map(&.as(CrymbleUI::DrawText))
-    texts = text_primitives.map(&.text)
-    texts.any? { |t| t.includes?("1 of 3") }.should be_true
+    texts = mc.to_primitives(mc.bounds).compact_map { |p| p.as?(CrymbleUI::DrawText).try(&.text) }
+    texts.any?(&.includes?("Apple")).should be_true   # the name
+    texts.any?(&.includes?("1 of 3")).should be_false # NOT the count form
+  end
+
+  it "default summary: MANY picks show 'N of M (names…)' using the width" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = MultiSelAllApp.new # selected {0,1,2} of [Alpha, Beta, Gamma], no custom summary
+    app.build_tree
+    renderer.settle_rendering(app)
+
+    mc = app.find("mc").not_nil!.as(CrymbleUI::MultiComboBox)
+    texts = mc.to_primitives(mc.bounds).compact_map { |p| p.as?(CrymbleUI::DrawText).try(&.text) }
+    label = texts.find(&.includes?("of")).not_nil!
+    label.should contain("3 of 3") # the count
+    label.should contain("Alpha")  # the name list fills the space
   end
 
   # ===== EDGE CASES =====
@@ -262,7 +274,7 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
   it "all-preselected round-trip: toggle off then on preserves identity" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
-    app = MultiSelAllApp.new  # Set{0,1,2}
+    app = MultiSelAllApp.new # Set{0,1,2}
     app.build_tree
     renderer.settle_rendering(app)
 
@@ -295,15 +307,17 @@ describe "MultiComboBox (selected : Set(Int32))" do
     prims.size.should eq(2)
   end
 
-  it "checkable ComboBoxItem has an extra draw_text for the glyph" do
+  it "checkable ComboBoxItem draws a REAL checkbox in the gutter (not a text glyph)" do
     item = CrymbleUI::ComboBoxItem.new("TestItem")
-    item.checked = true
+    item.check_state_fn = -> { CrymbleUI::CheckState::Checked }
     bounds = CrymbleUI::Rect.new(0.0, 0.0, 150.0, 24.0)
     prims = item.to_primitives(bounds)
-    draw_texts = prims.count(&.is_a?(CrymbleUI::DrawText))
 
-    # 1 fill_rect (bg) + 1 draw_text (glyph) + 1 draw_text (label) = 3 total
-    draw_texts.should eq(2)
-    prims.size.should eq(3)
+    # Gutter is the real checkbox visual: box (4 edge fill_rects) + a checkmark
+    # (2 lines + 1 junction) — NOT an extra text glyph. The only DrawText is the label.
+    prims.count(&.is_a?(CrymbleUI::DrawText)).should eq(1)   # label only
+    prims.count(&.is_a?(CrymbleUI::DrawLine)).should eq(2)   # checkmark strokes
+    prims.count(&.is_a?(CrymbleUI::DrawCircle)).should eq(1) # junction
+    prims.count(&.is_a?(CrymbleUI::FillRect)).should eq(5)   # 1 bg + 4 box edges
   end
 end

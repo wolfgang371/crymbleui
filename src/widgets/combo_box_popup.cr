@@ -15,7 +15,7 @@ module CrymbleUI
   #
   # ## Usage
   #
-  # ```crystal
+  # ```
   # popup = ComboBoxPopup.new(
   #   items: ["Apple", "Banana", "Cherry"],
   #   selected_index: 0,
@@ -26,7 +26,7 @@ module CrymbleUI
   # ```
   class ComboBoxPopup < Popup
     # Layout constants
-    ITEM_SPACING = 0.0
+    ITEM_SPACING      = 0.0
     FLASH_INTERVAL_MS = 300
 
     # Index reported to on_select when an editable popup commits free-typed text
@@ -38,8 +38,9 @@ module CrymbleUI
     def compute_bounds_for_layer(layer : Layer) : Rect
       absolute_bounds
     end
+
     TEXT_INPUT_PADDING = 4.0
-    TEXT_INPUT_BORDER = 1.0
+    TEXT_INPUT_BORDER  = 1.0
 
     # Dynamic text input height (scales with font zoom)
     def text_input_height : Float64
@@ -80,18 +81,23 @@ module CrymbleUI
     @flash_timer_id : Int32?
     @flash_state : Bool = true
 
-    # Checkable mode (opt-in; default off → inert for single-select ComboBox)
-    # When non-nil: provider returns current checked state for a given original index
-    @checked_provider : (Int32 -> Bool)?
-    # Called when a gutter is clicked; the argument is the ORIGINAL item index
-    property on_toggle : Proc(Int32, Nil)?
-    # Called when tristate header is clicked (toggle all/none over ALL items)
-    property on_toggle_all : Proc(Bool, Nil)?
-    # Tristate header item (real child widget, inserted when checkable mode is enabled)
+    # Checkable mode (opt-in; default off → inert for single-select ComboBox).
+    # When set, item gutters render a REAL tristate checkbox PULLED from this Source;
+    # a gutter toggle (or the header) mutates the Source and fires on_change. No
+    # push/refresh path.
+    @selection_source : Source(Set(Int32))? = nil
+    # Fired ONCE after any selection mutation (gutter toggle / select-all). The host
+    # reads the new full set from the Source — no per-item deltas.
+    property on_change : Proc(Nil)?
+    # Tristate "(select all)" header item (real child widget) inserted in checkable mode.
     @header_item : ComboBoxItem?
 
     def checkable? : Bool
-      !@checked_provider.nil?
+      !@selection_source.nil?
+    end
+
+    def selection_source : Source(Set(Int32))?
+      @selection_source
     end
 
     # Callbacks
@@ -126,40 +132,15 @@ module CrymbleUI
       @highlighted_index
     end
 
-    # Enable checkable mode by supplying a function that returns the current
-    # checked state for a given ORIGINAL item index.
-    # Also rebuilds the items with checkable state and inserts a tristate header.
-    # Call before layout (i.e., before the popup is added to the window overlays).
-    def checked_provider=(provider : Int32 -> Bool)
-      @checked_provider = provider
-      rebuild_items   # re-build items now that the provider is set
+    # Enable checkable mode: items PULL their checked state from `source` and a gutter
+    # toggle mutates it + fires `on_change`. Rebuilds the items (with pull closures) and
+    # inserts the tristate header. Call before layout. There is NO push/refresh path —
+    # a Source change re-renders the captured rows automatically (auto-capture).
+    def enable_checkable(source : Source(Set(Int32)), on_change : Proc(Nil))
+      @selection_source = source
+      @on_change = on_change
+      rebuild_items
       rebuild_header
-    end
-
-    # Update the checked_provider WITHOUT rebuilding items (for use in copy_state_from
-    # when items already exist with valid layout/bounds). Only updates the provider
-    # reference so future refreshes use the new closure; callers should follow up
-    # with refresh_checked_states to update visual state.
-    def update_checked_provider(provider : Int32 -> Bool)
-      @checked_provider = provider
-    end
-
-    # Update the checked state shown in all currently-built item widgets.
-    # Called by MultiComboBox after a toggle so the popup reflects the new state
-    # without closing and reopening.
-    def refresh_checked_states
-      provider = @checked_provider
-      return unless provider
-
-      @item_widgets.each_with_index do |item, idx|
-        original_index = @all_items.index(@filtered_items[idx]?) || 0
-        item.checked = provider.call(original_index)
-        item.mark_needs_render
-      end
-
-      # Refresh the header tristate state
-      refresh_header_state
-      mark_needs_render
     end
 
     # Expose the header item for testing
@@ -178,7 +159,7 @@ module CrymbleUI
       id : String? = nil,
       @text_background_color : Color? = nil,
       @text_background_colors : Array(Color)? = nil,
-      @editable : Bool = false
+      @editable : Bool = false,
     )
       # Initialize all instance variables before super
       @all_items = items
@@ -190,9 +171,8 @@ module CrymbleUI
       @text_input = TextInput.new(value: "", width: width)
       @vstack = VStack.new
       @scroll_view = ScrollView.new
-      @checked_provider = nil
-      @on_toggle = nil
-      @on_toggle_all = nil
+      @selection_source = nil
+      @on_change = nil
       @header_item = nil
 
       super(
@@ -228,7 +208,7 @@ module CrymbleUI
       background_color : Color? = nil,
       border_color : Color? = nil,
       padding : Float64 = 0.0,
-      id : String? = nil
+      id : String? = nil,
     )
       # Initialize all instance variables before super
       @all_items = [] of String
@@ -243,9 +223,8 @@ module CrymbleUI
       @text_background_color = nil
       @text_background_colors = nil
       @editable = false
-      @checked_provider = nil
-      @on_toggle = nil
-      @on_toggle_all = nil
+      @selection_source = nil
+      @on_change = nil
       @header_item = nil
 
       super(
@@ -407,11 +386,22 @@ module CrymbleUI
           @on_select.try(&.call(original_index, item_text))
         end
 
-        # Checkable mode: set checked state + wire gutter toggle
-        if provider = @checked_provider
-          item.checked = provider.call(original_index)
+        # Checkable mode: the item PULLS its state from @selection_source (read inside
+        # the item's to_primitives → auto-captures), and a gutter toggle mutates the
+        # Source + fires on_change. oi is captured per row (ORIGINAL, not filtered, index).
+        if checkable?
+          oi = original_index
+          item.check_state_fn = -> {
+            src = @selection_source
+            (src && src.get.includes?(oi)) ? CheckState::Checked : CheckState::Unchecked
+          }
           item.on_toggle = -> {
-            @on_toggle.try(&.call(original_index))
+            if src = @selection_source
+              cur = src.get
+              now = !cur.includes?(oi)
+              src.set(now ? (cur.dup << oi) : cur.dup.tap(&.delete(oi)))
+              @on_change.try(&.call)
+            end
           }
         end
 
@@ -441,37 +431,51 @@ module CrymbleUI
         @children.delete(old_hdr)
       end
 
-      all_checked = @all_items.size > 0 && @all_items.each_index.all? do |i|
-        @checked_provider.try(&.call(i)) || false
-      end
-
       hdr = ComboBoxItem.new("(select all)", text_background_color: nil) do |_|
-        # body-click on the header: toggle all/none
-        new_all = !all_checked
-        @on_toggle_all.try(&.call(new_all))
+        toggle_all # body-click toggles all/none
       end
-      hdr.checked = all_checked
-
-      # Gutter click on the header also toggles all/none
-      hdr.on_toggle = -> {
-        new_all = !all_checked
-        @on_toggle_all.try(&.call(new_all))
-      }
+      # The header PULLS a tristate over ALL items (read inside to_primitives).
+      hdr.check_state_fn = -> { header_check_state }
+      hdr.on_toggle = -> { toggle_all } # gutter-click toggles all/none too
 
       hdr.parent = self
-      # Insert header as the second child (after TextInput, before ScrollView)
-      # Find TextInput position and insert after it
+      # Insert header as the second child (after TextInput, before ScrollView).
       ti_idx = @children.index(@text_input) || 0
       @children.insert(ti_idx + 1, hdr)
       @header_item = hdr
     end
 
-    # Update the header tristate state after a toggle by rebuilding it.
-    private def refresh_header_state
-      return unless @header_item
-      return unless @checked_provider
-      rebuild_header
-      mark_needs_layout
+    # Tristate over ALL items: none → Unchecked, all → Checked, some → Indeterminate.
+    private def header_check_state : CheckState
+      src = @selection_source
+      return CheckState::Unchecked unless src
+      return CheckState::Unchecked if @all_items.empty?
+      sel = src.get
+      n = (0...@all_items.size).count { |i| sel.includes?(i) }
+      if n == 0
+        CheckState::Unchecked
+      elsif n == @all_items.size
+        CheckState::Checked
+      else
+        CheckState::Indeterminate
+      end
+    end
+
+    # Header click: select all if not already all-selected, else clear all. Mutates the
+    # Source (immediate visual) and fires on_change ONCE — the host reads the new full
+    # set, so the next rebuild's build-value reconciles to the same selection.
+    private def toggle_all
+      src = @selection_source
+      return unless src
+      all_on = !@all_items.empty? && (0...@all_items.size).all? { |i| src.get.includes?(i) }
+      if all_on
+        src.set(Set(Int32).new)
+      else
+        newset = Set(Int32).new
+        @all_items.each_index { |i| newset << i }
+        src.set(newset)
+      end
+      @on_change.try(&.call)
     end
 
     # Focus the TextInput

@@ -207,42 +207,10 @@ module CrymbleUI
         if bg = background_color
           fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
         end
-        # Draw checkbox box border as 4 filled rectangles (avoids SFML outline_thickness clipping)
-        # Similar to panel borders - drawn INSIDE bounds for pixel-perfect alignment
-        fill_rect(Rect.new(box_x, box_y, box, 1.0), actual_box_color)             # Top edge
-        fill_rect(Rect.new(box_x, box_y + box - 1.0, box, 1.0), actual_box_color) # Bottom edge
-        fill_rect(Rect.new(box_x, box_y, 1.0, box), actual_box_color)             # Left edge
-        fill_rect(Rect.new(box_x + box - 1.0, box_y, 1.0, box), actual_box_color) # Right edge
-
-        # Draw check mark based on state (geometric)
-        case actual_state
-        when CheckState::Checked
-          # Draw checkmark as two line segments forming a "✓" shape
-          check_center_x = box_x + box / 2.0
-          check_center_y = box_y + box / 2.0
-          check_size = box * 0.7
-
-          # Short stroke going down-left
-          p1 = Vec2.new(check_center_x - check_size * 0.35, check_center_y - check_size * 0.1)
-          p2 = Vec2.new(check_center_x - check_size * 0.1, check_center_y + check_size * 0.25)
-
-          # Long stroke going up-right
-          p3 = Vec2.new(check_center_x - check_size * 0.1, check_center_y + check_size * 0.25)
-          p4 = Vec2.new(check_center_x + check_size * 0.4, check_center_y - check_size * 0.4)
-
-          draw_line(p1, p2, check_color, line_thickness)
-          draw_line(p3, p4, check_color, line_thickness)
-          # Fill junction with a circle for smooth connection
-          draw_circle(p2, junction_radius, check_color, fill: true)
-        when CheckState::Indeterminate
-          # Draw horizontal line in middle (minus sign)
-          padding = box * 0.2 # Less padding for larger line
-          p1 = Vec2.new(box_x + padding, box_y + box / 2.0)
-          p2 = Vec2.new(box_x + box - padding, box_y + box / 2.0)
-          draw_line(p1, p2, check_color, line_thickness)
-        when CheckState::Unchecked
-          # Nothing to draw (just the outline)
-        end
+        # Box outline + state mark — the shared checkbox visual (PrimitiveBuilder#draw_check_glyph).
+        # box_color carries the focus highlight; check_color stays the plain theme color.
+        draw_check_glyph(actual_state, box_rect, box_color: actual_box_color, check_color: check_color,
+          line_thickness: line_thickness, junction_radius: junction_radius)
 
         # Draw label text
         draw_text(text, text_position, actual_text_color, font_scale)

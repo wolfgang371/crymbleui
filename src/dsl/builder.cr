@@ -261,14 +261,15 @@ module CrymbleUI
             # Multi-select combo box — `selected` is a Set(Int32).
             # `selected` is REQUIRED (no default) so a bare `combo_box(items: …)`
             # stays unambiguously the Int32 path.
-            # The block receives `(index : Int32, now_on : Bool)`.
+            # The block receives the COMPLETE new selection `(Set(Int32))` after any
+            # change (toggle / select-all / body select-one) — just store it.
             def combo_box(
                 items : Array(String),
                 selected : Set(Int32),
                 width : Float64? = nil,
                 id : String? = nil,
                 summary : (Set(Int32) -> String)? = nil,
-                &block : Int32, Bool -> Nil
+                &block : Set(Int32) -> Nil
             )
                 ensure_container_stack
                 widget = MultiComboBox.new(
@@ -1004,10 +1005,12 @@ module CrymbleUI
                 shortcut : String? = nil,
                 checked : Bool? = nil,
                 checkable : Bool = false,
+                check_state : CheckState? = nil,
+                tristate : Bool = false,
                 id : String? = nil,
                 &block : -> Nil
             )
-                item = MenuItem.new(label, shortcut, checked, checkable, id: id, &block)
+                item = MenuItem.new(label, shortcut, checked, checkable, check_state, tristate, id: id, &block)
                 current_container.add_child(item)
 
                 # Register shortcut if provided
@@ -1024,9 +1027,11 @@ module CrymbleUI
                 shortcut : String? = nil,
                 checked : Bool? = nil,
                 checkable : Bool = false,
+                check_state : CheckState? = nil,
+                tristate : Bool = false,
                 id : String? = nil
             )
-                item = MenuItem.new(label, shortcut, checked, checkable, id: id)
+                item = MenuItem.new(label, shortcut, checked, checkable, check_state, tristate, id: id)
                 current_container.add_child(item)
                 # Note: No shortcut registration for menu items without action blocks
                 item

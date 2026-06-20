@@ -16,16 +16,18 @@ module CrymbleUI
   # - Clicking a row's ✓ gutter TOGGLES membership and KEEPS the popup open.
   # - Clicking the row body selects-only-that item and CLOSES the popup.
   # - The tristate header selects all / none (over ALL items, not just filtered).
-  # - The callback is `(index : Int32, now_on : Bool) -> Nil`.
-  #   The app is responsible for producing the new Set and passing it on rebuild.
+  # - The callback is `(new_selection : Set(Int32)) -> Nil` — handed the COMPLETE new
+  #   selection after any change. The app just stores it; there are no per-item deltas
+  #   to re-apply (a delta sequence can't round-trip through an app that re-seeds a
+  #   default when the selection momentarily empties — the real-world bug this fixes).
   #
   # ## Set-reconcile contract (load-bearing)
-  # The constructor does `@selected = selected.dup` AND `@_build_selected = selected.dup`
+  # The constructor does `Source.new(selected.dup)` AND `@_build_selected = selected.dup`
   # (two independent value-snapshots).  This means:
   # - The widget NEVER mutates the app's passed Set.
-  # - The build-shadow is a value-copy so `auto_copy_reconcile_properties` can detect
-  #   when the app actually changed the Set (build value changed) vs when the widget
-  #   just mutated its own copy (build value unchanged → preserve widget state).
+  # - The build-shadow is a value-copy so `copy_state_from` can detect when the app
+  #   actually changed the Set (build value changed) vs when the widget just mutated its
+  #   own copy (build value unchanged → preserve widget state via the identity-carried Source).
   #
   class MultiComboBox < Widget
     include PrimitiveBuilder
@@ -33,29 +35,37 @@ module CrymbleUI
 
     BORDER_WIDTH = 1.0
     PADDING      = 4.0
-    FONT_SCALE = 0
+    FONT_SCALE   =   0
 
     @items : Array(String)
 
-    # The reconcile_property macro generates @_build_selected but does NOT dup.
-    # We handle the dup manually in initialize + copy_state_from.
+    # The selection is a Source(Set(Int32)) CARRIED BY IDENTITY across reconcile: the
+    # @[Reconcile] ivar has NO matching @_build_selection shadow (the shadow is named
+    # @_build_selected), so auto_copy_reconcile_properties copies the OBJECT
+    # unconditionally — the popup items that captured it stay valid across rebuilds.
+    # @_build_selected (a plain value-snapshot, NOT reconciled) lets copy_state_from
+    # honor build-value-wins: `.set` the carried Source only when the app's build Set
+    # actually changed. The widget never mutates the app's Set (both are dups).
     @[::CrymbleUI::Reconcile]
-    @selected : Set(Int32)
+    @selection : Source(Set(Int32))
     @_build_selected : Set(Int32)
 
     def selected : Set(Int32)
-      @selected
+      @selection.get
     end
 
     def selected=(value : Set(Int32))
-      @selected = value
+      @selection.set(value)
     end
 
     reconcile_property popup_open : Bool = false
 
     @explicit_width : Float64?
     @summary : (Set(Int32) -> String)?
-    @on_toggle : Proc(Int32, Bool, Nil)?
+    # The host callback: handed the COMPLETE new selection after any change (gutter
+    # toggle, select-all, or a body-click select-one). The app just stores it — no
+    # per-item deltas to re-apply (which an app with default-seeding can't round-trip).
+    @on_change : Proc(Set(Int32), Nil)?
 
     @current_popup : ComboBoxPopup?
     @expanding : Bool = false
@@ -83,17 +93,17 @@ module CrymbleUI
       width : Float64? = nil,
       id : String? = nil,
       summary : (Set(Int32) -> String)? = nil,
-      &block : Int32, Bool -> Nil
+      &block : Set(Int32) -> Nil
     )
       super(id: id)
       @items = items
-      # Two independent dupes: one for the widget's live state, one for the
-      # reconcile build-shadow.  Neither references the app's Set.
-      @selected = selected.dup
+      # Two independent dupes: the Source's live value + the reconcile build-shadow.
+      # Neither references the app's Set (the widget never mutates the app's Set).
+      @selection = Source(Set(Int32)).new(selected.dup)
       @_build_selected = selected.dup
       @explicit_width = width
       @summary = summary
-      @on_toggle = block
+      @on_change = block
     end
 
     # No-block twin
@@ -102,15 +112,15 @@ module CrymbleUI
       selected : Set(Int32),
       width : Float64? = nil,
       id : String? = nil,
-      summary : (Set(Int32) -> String)? = nil
+      summary : (Set(Int32) -> String)? = nil,
     )
       super(id: id)
       @items = items
-      @selected = selected.dup
+      @selection = Source(Set(Int32)).new(selected.dup)
       @_build_selected = selected.dup
       @explicit_width = width
       @summary = summary
-      @on_toggle = nil
+      @on_change = nil
     end
 
     def label : String?
@@ -119,13 +129,41 @@ module CrymbleUI
 
     # ========== SUMMARY ==========
 
-    private def summary_text : String
+    # The collapsed-cell label. A custom `summary` proc wins; otherwise the default
+    # makes good use of the cell width: nothing → "(none)"; one → just its name; many →
+    # "N of M (name, name, …)" with the name list filling `max_width` px (truncated with
+    # an ellipsis). `max_width` is the pixel budget for the text (nil in measure, where
+    # only the height matters).
+    private def summary_text(max_width : Float64? = nil) : String
       if fn = @summary
-        fn.call(@selected)
-      else
-        n = @selected.size
-        "#{n} of #{@items.size}"
+        return fn.call(selected)
       end
+      sel = selected.to_a.sort
+      return "(none)" if sel.empty?
+      font = FontSizing.calculate_size(FONT_SCALE)
+      if sel.size == 1
+        name = name_of(sel.first)
+        return max_width ? fit_text(name, max_width, font) : name
+      end
+      base = "#{sel.size} of #{@items.size}"
+      return base unless max_width
+      budget = max_width - Widget.measure_text("#{base} ()", font).width
+      return base if budget <= 0
+      "#{base} (#{fit_text(sel.map { |i| name_of(i) }.join(", "), budget, font)})"
+    end
+
+    private def name_of(i : Int32) : String
+      @items[i]? || "?"
+    end
+
+    # `text` if it fits in `budget` px, else trimmed from the end with an ellipsis.
+    private def fit_text(text : String, budget : Float64, font_size : Float64) : String
+      return text if Widget.measure_text(text, font_size).width <= budget
+      s = text
+      while !s.empty? && Widget.measure_text("#{s}…", font_size).width > budget
+        s = s[0...-1]
+      end
+      "#{s}…"
     end
 
     # ========== MEASURE / LAYOUT ==========
@@ -165,13 +203,15 @@ module CrymbleUI
     # ========== PRIMITIVES ==========
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-      display_text = "»#{summary_text}"
+      font_size = FontSizing.calculate_size(FONT_SCALE)
+      # Pixel budget for the summary text: cell width minus padding and the "»" prefix.
+      avail = bounds.width - PADDING * 2 - Widget.measure_text("»", font_size).width
+      display_text = "»#{summary_text(avail)}"
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
       primitives do
         fill_rect(local_bounds, Theme.current.combo_background)
         draw_rect(local_bounds, Theme.current.combo_border)
-        font_size = FontSizing.calculate_size(FONT_SCALE)
         content_y = BORDER_WIDTH + PADDING
         content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
         text_y = content_y + (content_height - font_size) / 2.0
@@ -214,66 +254,35 @@ module CrymbleUI
 
       popup = ComboBoxPopup.new(
         items: @items,
-        selected_index: @selected.first? || 0,
+        selected_index: selected.first? || 0,
         max_height: 200.0
       )
 
-      # Enable checkable mode: provide current checked state
-      sel = @selected
-      popup.checked_provider = ->(idx : Int32) { sel.includes?(idx) }
+      # Checkable mode: items PULL their checked state from @selection and mutate it on a
+      # gutter toggle; the popup signals "changed" and we hand the host the new full set.
+      # No push / refresh — the captured rows re-render automatically when @selection changes.
+      popup.enable_checkable(@selection, -> { notify_change })
 
-      # Toggle (gutter click): update Set + keep popup open
-      popup.on_toggle = ->(idx : Int32) {
-        was_on = @selected.includes?(idx)
-        now_on = !was_on
-        if now_on
-          @selected = @selected.dup << idx
-        else
-          @selected = @selected.dup.tap(&.delete(idx))
-        end
-        @on_toggle.try(&.call(idx, now_on))
-        # Refresh popup visuals to show new check state
-        popup.checked_provider = ->(i : Int32) { @selected.includes?(i) }
-        popup.refresh_checked_states
-        mark_needs_render
-      }
-
-      # Toggle-all (header click): flip all indices
-      popup.on_toggle_all = ->(new_all : Bool) {
-        if new_all
-          all_set = Set(Int32).new
-          @items.each_index { |i| all_set << i }
-          @selected = all_set
-          @items.each_index { |i| @on_toggle.try(&.call(i, true)) }
-        else
-          old_sel = @selected.dup
-          @selected = Set(Int32).new
-          old_sel.each { |i| @on_toggle.try(&.call(i, false)) }
-        end
-        popup.checked_provider = ->(i : Int32) { @selected.includes?(i) }
-        popup.refresh_checked_states
-        mark_needs_render
-      }
-
-      # Select-one (body click): replace set with single item + close
-      popup.on_select = ->(idx : Int32, _val : String) {
-        old_sel = @selected.dup
-        @selected = Set{idx}
-        # Fire toggle-off for every previously-on item (except the new selection)
-        old_sel.each do |i|
-          @on_toggle.try(&.call(i, false)) unless i == idx
-        end
-        # Fire toggle-on for the new selection if it wasn't already on
-        @on_toggle.try(&.call(idx, true)) unless old_sel.includes?(idx)
-        collapse
-      }
-
+      # Body click selects ONLY that item, then closes.
+      popup.on_select = ->(idx : Int32, _val : String) { select_one(idx); collapse }
       popup.on_cancel = -> { collapse }
       popup.on_click_outside_callback = -> { collapse }
 
       mount_popup(popup)
 
       mark_needs_render
+    end
+
+    # Hand the host the COMPLETE new selection (a defensive dup so it can't alias @selection).
+    private def notify_change
+      @on_change.try(&.call(selected.dup))
+    end
+
+    # Body click: replace the selection with exactly {idx} and notify atomically.
+    # (The caller collapses.)
+    private def select_one(idx : Int32)
+      @selection.set(Set{idx})
+      notify_change
     end
 
     def collapse
@@ -285,80 +294,31 @@ module CrymbleUI
     # ========== RECONCILE ==========
 
     def copy_state_from(old_widget : Widget)
-      # Manually handle the Set reconcile with dup-discipline:
-      # Only preserve widget state if the build-time Set didn't change.
-      if old_widget.is_a?(MultiComboBox)
-        old = old_widget.as(MultiComboBox)
-
-        # Reconcile selected: if the app didn't change the build value, keep widget's live state
-        if @_build_selected == old.@_build_selected
-          @selected = old.@selected.dup
-        end
-        # (If they differ, @selected was already set from the new build value in initialize)
-      end
-
-      # Let base handle popup_open + other @[Reconcile] props + background_backend
+      # Carry the @selection Source OBJECT by identity (the @[Reconcile] ivar has no
+      # matching @_build_selection shadow → auto_copy copies it unconditionally) +
+      # popup_open + background_backend (super).
       auto_copy_reconcile_properties(old_widget)
       super
 
       return unless old_widget.is_a?(MultiComboBox)
       old = old_widget.as(MultiComboBox)
 
-      # Re-wire popup callbacks to THIS instance
+      # Build-value-wins: if the app changed the build Set, push it onto the SAME
+      # (carried) Source — this dirties the popup items that captured it, so they
+      # re-render with the new state. No per-item refresh, no provider re-point.
+      if @_build_selected != old.@_build_selected
+        @selection.set(@_build_selected.dup)
+      end
+
+      # Carry the open popup and re-point ONLY the notify/close callbacks to self.
+      # Items pull the identity-stable @selection Source — nothing else to re-wire.
       if @popup_open && (popup = old.@current_popup)
         @current_popup = popup
-
-        # Update the provider WITHOUT rebuilding items — items already have valid
-        # layout/bounds from when they were built in expand(). The toggle handler
-        # already called refresh_checked_states before the rebuild, so item states
-        # are current. We only update the closure so future toggles use the new
-        # @selected reference.
-        popup.update_checked_provider(->(idx : Int32) { @selected.includes?(idx) })
-
-        popup.on_toggle = ->(idx : Int32) {
-          was_on = @selected.includes?(idx)
-          now_on = !was_on
-          if now_on
-            @selected = @selected.dup << idx
-          else
-            @selected = @selected.dup.tap(&.delete(idx))
-          end
-          @on_toggle.try(&.call(idx, now_on))
-          popup.update_checked_provider(->(i : Int32) { @selected.includes?(i) })
-          popup.refresh_checked_states
-          mark_needs_render
-        }
-
-        popup.on_toggle_all = ->(new_all : Bool) {
-          if new_all
-            all_set2 = Set(Int32).new
-            @items.each_index { |i| all_set2 << i }
-            @selected = all_set2
-            @items.each_index { |i| @on_toggle.try(&.call(i, true)) }
-          else
-            old_sel = @selected.dup
-            @selected = Set(Int32).new
-            old_sel.each { |i| @on_toggle.try(&.call(i, false)) }
-          end
-          popup.update_checked_provider(->(i : Int32) { @selected.includes?(i) })
-          popup.refresh_checked_states
-          mark_needs_render
-        }
-
-        popup.on_select = ->(idx : Int32, _val : String) {
-          old_sel = @selected.dup
-          @selected = Set{idx}
-          old_sel.each do |i|
-            @on_toggle.try(&.call(i, false)) unless i == idx
-          end
-          @on_toggle.try(&.call(idx, true)) unless old_sel.includes?(idx)
-          collapse
-        }
-
+        popup.on_change = -> { notify_change }
+        popup.on_select = ->(idx : Int32, _val : String) { select_one(idx); collapse }
         popup.on_cancel = -> { collapse }
         popup.on_click_outside_callback = -> { collapse }
       end
     end
-
   end
 end

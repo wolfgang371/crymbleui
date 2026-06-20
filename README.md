@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 0.7.1**
+**Version 0.7.2**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,15 +21,15 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~31344 LOC
-- spec/: ~54174 LOC
+- src/: ~31359 LOC
+- spec/: ~54590 LOC
 
 ## Features
 
 - **Declarative DSL** - Build UIs with a clean, SwiftUI-inspired syntax
-- **Reactive State** - Automatic UI updates when state changes
+- **Reactive State** - Pull-based, auto-capturing: widgets re-render whenever a value they read changes
 - **Performant** - Uses several internal caching techniques
-- **Rich Widget Set** - Buttons, text inputs, checkboxes, combo boxes, scroll views, menus, panels, and more
+- **Rich Widget Set** - Buttons, text inputs, checkboxes, single- and multi-select combo boxes, scroll views, menus, panels, and more
 - **Drag & Drop** - Type-safe drag and drop with accept filtering
 - **Keyboard Navigation** - Tab focus, shortcuts, and accessibility support
 - **VirtualMatrix widget** (since v0.3.0)
@@ -100,10 +100,73 @@ and many more in examples/
 
 ## New Features
 
+### v0.7.0
+
+#### Truly reactive — and faster
+The entire render-invalidation model is now pull-based and auto-capturing: a widget re-renders automatically whenever a value it *reads* changes, with no hand-wired invalidation. A forgotten dependency becomes a missing read (a structurally impossible stale-pixel "garble"), not a silent missing push. Switching the theme or zoom now recolors/resizes every widget live, with no rebuild. And it renders *less* while doing more — the VirtualMatrix viewport renders cells on demand, slot by slot (~6.5× fewer cell renders per scroll than before).
+
+---
+
+#### Tutorial 27: MultiComboBox
+A multi-select dropdown: checkable items with a tristate "(select all)" header. Click a checkbox to toggle (the list stays open); click a row body to pick one and close.
+
+![Tutorial 27: MultiComboBox](screenshots/tutorial-27.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial27App < CrymbleUI::App
+  state selected : Set(Int32) = Set{0}
+
+  FRUITS = ["Apple", "Banana", "Cherry", "Date", "Elderberry"]
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 27: MultiComboBox", 420, 420) do
+      vstack(padding: 20.0, spacing: 12.0) do
+        text("Pick some fruits:")
+
+        # No custom `summary:` — the default labels the cell nicely: one pick shows the
+        # name, several show "N of M (Apple, Ban…)" filling the width.
+        combo_box(
+          items: FRUITS,
+          selected: selected,
+          width: 240.0
+        ) do |new_set|
+          self.selected = new_set
+        end
+
+        text("Selected: #{selected.to_a.sort.map { |i| FRUITS[i] }.join(", ")}", font_scale: -1)
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial27App.new)
+```
+
+</details>
+
+---
+#### Theme.ref — live theme-keyed colors
+A widget color can follow a chosen theme key, resolved at draw time — so a theme switch recolors it live.
+
+---
+
+### v0.6.0
+
+A stabilization release — bugfixes and hardening only (VirtualMatrix robustness, focus handling, the SFML `--release` crash fix). No new widgets.
+
+---
+
 ### v0.5.0
 
 #### Tutorial 26: FlowLayout
-Wrap-aware horizontal layout. Arranges children left-to-right and
+Wrap-aware horizontal layout. Arranges children left-to-right and automatically wraps to the next row when they don't fit the available width. Think CSS flex-wrap, or a tag cloud that reflows on resize.
 
 ![Tutorial 26: FlowLayout](screenshots/tutorial-26.png)
 
@@ -1945,7 +2008,7 @@ CrymbleUI.run(Tutorial25App.new)
 
 ---
 ### Tutorial 26: FlowLayout
-Wrap-aware horizontal layout. Arranges children left-to-right and
+Wrap-aware horizontal layout. Arranges children left-to-right and automatically wraps to the next row when they don't fit the available width. Think CSS flex-wrap, or a tag cloud that reflows on resize.
 
 ![Tutorial 26: FlowLayout](screenshots/tutorial-26.png)
 
@@ -2006,6 +2069,51 @@ CrymbleUI.run(Tutorial26App.new)
 </details>
 
 ---
+### Tutorial 27: MultiComboBox
+A multi-select dropdown: checkable items with a tristate "(select all)" header. Click a checkbox to toggle (the list stays open); click a row body to pick one and close.
+
+![Tutorial 27: MultiComboBox](screenshots/tutorial-27.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial27App < CrymbleUI::App
+  state selected : Set(Int32) = Set{0}
+
+  FRUITS = ["Apple", "Banana", "Cherry", "Date", "Elderberry"]
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 27: MultiComboBox", 420, 420) do
+      vstack(padding: 20.0, spacing: 12.0) do
+        text("Pick some fruits:")
+
+        # No custom `summary:` — the default labels the cell nicely: one pick shows the
+        # name, several show "N of M (Apple, Ban…)" filling the width.
+        combo_box(
+          items: FRUITS,
+          selected: selected,
+          width: 240.0
+        ) do |new_set|
+          self.selected = new_set
+        end
+
+        text("Selected: #{selected.to_a.sort.map { |i| FRUITS[i] }.join(", ")}", font_scale: -1)
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial27App.new)
+```
+
+</details>
+
+---
 
 ---
 
@@ -2030,6 +2138,8 @@ Run a specific tutorial:
 - [Architecture](docs/ARCHITECTURE.md) - DrawPrimitive system, cache policies
 - [Layer Rendering](docs/LAYER_RENDERING_ARCHITECTURE.md) - Layer tree, rendering pipeline
 - [Rendering Pipelines](docs/RENDERING_PIPELINES.md) - Rendering pipelines, cache validation, widget author guide
+- [Reactivity](docs/REACTIVITY.md) - the pull-based, auto-capturing render model
+- [Migration](docs/MIGRATION.md) - upgrade notes & breaking changes (Source-backed reactive fields)
 
 ## License
 

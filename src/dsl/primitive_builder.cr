@@ -81,6 +81,46 @@ module CrymbleUI
       @primitives.not_nil! << DrawRect.new(bounds, color, width)
     end
 
+    # Draw the REAL checkbox glyph (box outline + state mark) into the current
+    # primitives block — the shared visual used by Checkbox, the MultiComboBox
+    # gutter, and checkable menu items. Geometry only: the caller resolves colors
+    # (including any focus highlight) and sizes. `rect` is the square box area;
+    # `rect.width` is taken as the box size. Box = 4 edge fill_rects (always);
+    # Checked = 2 lines + a junction circle; Indeterminate = 1 dash; Unchecked = box only.
+    def draw_check_glyph(state : CheckState, rect : Rect, box_color : Color, check_color : Color,
+                         line_thickness : Float64 = 2.0, junction_radius : Float64 = 1.0)
+      box_x = rect.x
+      box_y = rect.y
+      box = rect.width
+
+      # Box border as 4 filled rectangles (pixel-perfect, drawn inside bounds —
+      # avoids SFML outline_thickness clipping).
+      fill_rect(Rect.new(box_x, box_y, box, 1.0), box_color)             # Top
+      fill_rect(Rect.new(box_x, box_y + box - 1.0, box, 1.0), box_color) # Bottom
+      fill_rect(Rect.new(box_x, box_y, 1.0, box), box_color)             # Left
+      fill_rect(Rect.new(box_x + box - 1.0, box_y, 1.0, box), box_color) # Right
+
+      case state
+      when CheckState::Checked
+        cx = box_x + box / 2.0
+        cy = box_y + box / 2.0
+        cs = box * 0.7
+        # Short down-left stroke into the junction, then long up-right stroke.
+        p1 = Vec2.new(cx - cs * 0.35, cy - cs * 0.1)
+        junction = Vec2.new(cx - cs * 0.1, cy + cs * 0.25)
+        p4 = Vec2.new(cx + cs * 0.4, cy - cs * 0.4)
+        draw_line(p1, junction, check_color, line_thickness)
+        draw_line(junction, p4, check_color, line_thickness)
+        draw_circle(junction, junction_radius, check_color, fill: true)
+      when CheckState::Indeterminate
+        pad = box * 0.2
+        draw_line(Vec2.new(box_x + pad, box_y + box / 2.0),
+          Vec2.new(box_x + box - pad, box_y + box / 2.0), check_color, line_thickness)
+      when CheckState::Unchecked
+        # Box only.
+      end
+    end
+
     # Push a clipping rectangle
     def push_clip(rect : Rect)
       @primitives.not_nil! << PushClip.new(rect)
