@@ -63,6 +63,7 @@ end
 
 describe "Cache Validation" do
   before_each do
+    CrymbleUI::CacheValidation.suite_gate = false # self-tests assert on failures themselves
     CrymbleUI::CacheValidation.clear_failures!
     CrymbleUI::CacheValidation.enable_all
   end

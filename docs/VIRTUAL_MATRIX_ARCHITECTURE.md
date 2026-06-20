@@ -1,8 +1,8 @@
 # VirtualMatrix Architecture
 
 **Status**: IMPLEMENTED
-**Last Updated**: 2026-02-21
-**Related**: See `LAYER_RENDERING_ARCHITECTURE.md` for layer rendering pipeline, `RENDERING_PIPELINES.md` for rendering pipelines and cache validation
+**Last Updated**: 2026-06-19
+**Related**: See `REACTIVITY.md` for the reactive model (property macros, Source-backed `scroll_offset`, the matrix viewport-cache slot as the canonical "spatial coherence" axis), `LAYER_RENDERING_ARCHITECTURE.md` for the layer rendering pipeline, `RENDERING_PIPELINES.md` for rendering pipelines and cache validation
 
 ## Overview
 
@@ -111,7 +111,7 @@ ScrollView provides 3 sticky sub-layers:
                           └─────────────────────────────────────────┘
 ```
 
-**content_layer**: Owned directly by VirtualMatrix (via LayerOwner). Uses `viewport_cache = true` with `cache_extent = 100.0` for smooth scrolling. Cell widgets are registered to `layer.widgets` and rendered at fixed content-space positions; the compositor handles the viewport shift via `layer.scroll_offset`.
+**content_layer**: Owned directly by VirtualMatrix (via LayerOwner). Uses `viewport_cache = true` with `cache_extent = 100.0` for smooth scrolling. Cell widgets are registered to `layer.widgets` and rendered at fixed content-space positions; the compositor handles the viewport shift via `layer.scroll_offset`. The layer is rendered with a **Pull/SlotBuffer** model (see "Content-Layer Render Model" below): each frame it visits every visible cell and slot-skips the ones whose buffer already holds their current pixels.
 
 **Sticky layers**: Owned by the child ScrollView. Cells on sticky layers are repositioned to screen-space coordinates every frame (via `reposition_sticky_cells` or the fast-path `compute_sticky_blit_plans`), because these layers do NOT use viewport_cache.
 
@@ -186,8 +186,10 @@ Content cell (row=5, col=3):
    │
    ├── Compute visible indices via StickyMath.sticky()  [O(log n) bsearch + cached O(n)]
    │
-   ├── Early-exit if visible_key unchanged              [O(1) common case]
+   ├── Early-exit if visible_key unchanged              [O(1) cell-set gate]
    │   └── reposition_sticky_cells or compute_sticky_blit_plans
+   │       (only gates cell create/destroy — content re-render is
+   │        decided per-slot at render time, see below)
    │
    ├── Compute creation/destruction regions (with buffers)
    │
@@ -201,7 +203,7 @@ Content cell (row=5, col=3):
    ├── CREATE new cells via adapter.cell_paint()
    │   └── Layout at content-space position, mark needs_fresh_background
    │
-   ├── WU3: Compute visible compound sizes (sticky compounds only)
+   ├── Compute visible compound sizes (sticky compounds only)
    │
    ├── Re-layout during resize drag (content cells at affected positions)
    │
@@ -211,14 +213,41 @@ Content cell (row=5, col=3):
        └── get_cell_layer() routes to content/sticky_row/sticky_col/sticky_corner
 ```
 
-### Early-Exit Optimization
+### Content-Layer Render Model (Pull / SlotBuffer)
 
-The `@last_visible_key` tracks `{visible_rows, visible_cols}`. When scrolling within the same set of visible indices (common during smooth scrolling), update_visible_cells returns early after only:
-1. Repositioning sticky cells (screen-space update)
-2. Ensuring layer.widgets are synced (idempotent flag-based)
-3. Computing blit plans if eligible (fast path)
+The content layer is rendered with a **Pull/SlotBuffer** model, not a
+dirty-widgets / early-exit model. Every frame, the layer renderer **visits every
+visible cell** and decides re-render vs. skip per cell against a
+`{rev, buffer_pos}` slot key (see `REACTIVITY.md`, axis 2 "spatial coherence",
+for which the matrix viewport-cache slot is the canonical example; and
+`LAYER_RENDERING_ARCHITECTURE.md` for the generic render mechanics):
 
-This makes the common scroll case O(sticky_cells) rather than O(visible_cells).
+- The slot key is `{content version, BUFFER position}` where the content version
+  is the cell's `primitives_version` (auto-captures theme/zoom/layout) and the
+  buffer position is `content_pos − buffer_origin`. The methods are
+  `slot_fresh?` / `slot_rev_matches?` / `stamp_slot` on `Widget`.
+- `slot_fresh?(buffer_pos)` → the buffer already holds this cell's current pixels
+  at this buffer position (rev *and* buffer_pos unchanged since the last blit) →
+  the renderer returns without touching it. This is the common smooth-scroll case.
+- The soundness invariant is that `buffer_pos` moves **in lockstep** with the
+  pixels: on a scroll recenter the buffer's pixels are **blit-shifted**, and
+  `shift_slot(dx, dy)` shifts each cell's stamp by the same amount; a reflow/clear
+  disposes the backend so the slot is forced stale. A re-entering or moved cell has
+  a stale `buffer_pos` (or no backend) and falls through to re-render. Only the
+  newly-exposed edge strip is actually re-rendered.
+
+This visit-all-then-slot-skip model re-renders roughly **6.5× fewer cells per
+scroll** than the previous dirty-widgets/early-exit approach, and it is
+correct-by-construction: visiting every visible cell means a change to any cell
+can never be missed.
+
+**`@last_visible_key` is no longer the scroll optimization.** It tracks
+`{visible_rows, visible_cols}` and now serves only as a **cell create/destroy
+gate** in `update_visible_cells`: when the visible index *set* is unchanged
+(common during smooth scroll), `update_visible_cells` skips the create/destroy
+work and only repositions sticky cells / computes blit plans. Whether content
+cells re-render is decided entirely by the per-slot check at render time, not by
+this key.
 
 ## Scroll and Viewport Integration
 
@@ -244,23 +273,42 @@ VirtualMatrix <-------> ScrollView
     If SV.offset != last_synced -> pull from SV
 ```
 
-### Deferred Scroll Updates
+### Scroll Updates (coalesced to once-per-frame)
 
-Scrollbar drag fires many events per frame. Processing `update_visible_cells` on each would be expensive. Instead:
+Scrollbar thumb drag fires `on_scroll_changed` → `sync_from_scroll_view` on **every** mouse
+event (~125Hz). Running `update_visible_cells` (cell create/destroy) on each one backs the event
+loop up into a multi-second freeze at large grids. So the thumb path is **deferred**:
+`sync_from_scroll_view` applies only the cheap compositing offset and flags
+`@pending_scroll_update`; `pre_render_flush` runs the expensive cell management **once per
+frame**, for the only scroll position the user actually sees. (`on_mouse_wheel` is discrete and
+stays synchronous via `apply_scroll`.)
+
+> This deferral was once removed as "unnecessary complexity" and the freeze came straight back —
+> coalescing is the architecture, not an optimization. Each coalesced update is itself O(visible)
+> (see StickyMath above), so the result is cheap *and* once-per-frame.
 
 ```
-sync_from_scroll_view(new_offset):
-  1. Update @scroll_offset (for correct compositing)
-  2. Update layer.scroll_offset (compositor uses immediately)
-  3. Set @pending_scroll_update = true (defer cell management)
-  4. mark_needs_render
+sync_from_scroll_view(new_offset):   <- scrollbar thumb/track, potentially every mouse event
+  1. @scroll_offset.set(new_offset)              (Source.set — notify)
+  2. layer.scroll_offset = new_offset            (compositor shifts cached content immediately)
+  3. @pending_scroll_update = true               (DEFER cell create/destroy to the frame)
+  4. mark_needs_render + mark_cursor_overlay_dirty
+       (rulers self-enqueue via auto-captured scroll_offset)
 
-pre_render_flush():     <- Called by layer_renderer before rendering
-  1. Process pending adapter invalidations
-  2. If @pending_scroll_update -> update_visible_cells() once
+pre_render_flush():                  <- called by layer_renderer once per frame, before render
+  1. if @pending_scroll_update -> update_visible_cells ONCE   (the coalesced update)
+  2. process pending adapter invalidations + change-animation
 ```
 
-This batches multiple scroll events into a single update_visible_cells call per frame.
+**Why the deferral lives in VirtualMatrix, not the event loop.** Render-coalescing is already
+general: the SFML loop drains *all* queued events and renders once per batch (`sfml_renderer.cr`
+— *"poll all pending events, don't render per event"*). But it still *dispatches* every mouse
+event to widgets — deliberately, since dropping events would break anything that needs each one
+(drag precision, gestures). `pre_render_flush` is likewise a general hook (`widget.cr`, invoked
+on every layer owner). So the only VirtualMatrix-specific part is the *decision* to defer its
+scroll work into that hook — and it's the only widget that needs to, because it's the only one
+whose per-mouse-move work (cell create/destroy, sticky math, blit plans) is heavy enough to back
+the event loop up. Cheap per-event widgets (hover, labels) ride the existing render-coalescing.
 
 ### effective_content_size Two-Pass Algorithm
 
@@ -326,7 +374,7 @@ Full sticky() only when cache key changes:
   A boundary crossing (column shifts in/out) invalidates the cache
 ```
 
-This means smooth scrolling within the same column boundaries is O(log n) per frame, with O(n) recomputation only when a column actually enters or leaves the viewport.
+This means smooth scrolling within the same column boundaries is O(log n) per frame. When a column actually enters or leaves the viewport, the recompute (`sticky_fast`) is **O(visible), not O(n)**: shifted-out membership is answered in O(1) via a per-resize cached inverse permutation (`scroll_rank` → `StickyMath::ShiftedSet`), and positions are computed by walking only the visible window. This rests on the weak **seam invariant** — nothing scrolled out lives physically past the viewport bottom (top-down scroll cannot have passed a cell below it), asserted under `-Dverify_bounds`. No assumption is made that shifted cells form a contiguous physical prefix, so grouped / pivot layouts (a header pinned while its data scrolls out from under it) are handled directly.
 
 ## Merged/Compound Cells
 
@@ -355,9 +403,9 @@ Row 3+4 scrolled: handle = {5, 2}   (last row)
 All scrolled:     handle = nil       (entirely invisible, destroyed)
 ```
 
-### WU3: Visible Portion Computation
+### Visible Portion Computation (Sticky Compounds)
 
-For sticky compound cells that are partially scrolled, WU3 computes the visible portion:
+For sticky compound cells that are partially scrolled, the visible portion is computed:
 
 ```
 Sticky-row compound cell spanning cols 2-5:
@@ -369,7 +417,7 @@ Sticky-row compound cell spanning cols 2-5:
   compound_clipped_pos  = position of first visible column (clamped to sticky boundary)
 ```
 
-Content compound cells use FIXED sizes in content-space (the viewport_cache handles clipping), so WU3 only applies to sticky compounds.
+Content compound cells use FIXED sizes in content-space (the viewport_cache handles clipping), so this visible-portion computation only applies to sticky compounds.
 
 ## Cursor and Proxy Focus
 
@@ -510,7 +558,7 @@ set_col_width_for_drag:
 
 on_mouse_move (resize):
   set_col_width_for_drag(...)
-  Mark ruler widgets dirty
+  mark_ruler_widgets_dirty     <- RESIZE-only; rulers don't depend on the resized geometry reactively
   Update corner widget bounds
   Sync sticky layer bounds
   update_visible_cells(...)    <- Re-layouts affected cells
@@ -518,6 +566,15 @@ on_mouse_move (resize):
 ```
 
 During resize drag, `update_visible_cells` re-layouts only cells whose position or size is affected by the resized column/row. Cells to the left/above the resized dimension are skipped. Size-changed cells get `invalidate_primitive_cache + needs_fresh_background = true`; moved-only cells keep their cached `widget_backend` for fast-path blit.
+
+**Rulers on scroll vs. resize.** The four ruler widgets are `CachePolicy::Dynamic`,
+so their primitives nodes **auto-capture `scroll_offset`** (a Source). On a scroll,
+the `scroll_offset` setter notifies and the ruler nodes self-enqueue for re-render
+— `apply_scroll` does **not** call `mark_ruler_widgets_dirty`. `mark_ruler_widgets_dirty`
+is **RESIZE-only**: a column/row size change alters geometry the rulers depend on
+but which is not a reactive Source, so it must be marked explicitly (the cursor
+overlay is `CachePolicy::Never` with no node, so it is still marked explicitly on
+scroll via `mark_cursor_overlay_dirty`).
 
 ## Sticky Cell Rendering: Two Paths
 
@@ -603,20 +660,27 @@ the last data row.
 VirtualMatrix supports DSL-style apps where `build()` creates new widget instances on every rebuild:
 
 ```crystal
-# Reconciled properties (auto-copied to new instance):
-layout_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
-reconcile_property cursor_rc : Tuple(Int32, Int32) = {0, 0}
-reconcile_property resize_axis : ResizeAxis = ResizeAxis::None
+# Reconciled properties (auto-copied to new instance).
+# reactive_property is Source-backed (see REACTIVITY.md); reconcile: true adds
+# the @[Reconcile] annotation so the value carries to the new instance.
+reactive_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
+reactive_property cursor_rc : Tuple(Int32, Int32) = {0, 0}, reconcile: true
+reactive_property resize_axis : ResizeAxis = ResizeAxis::None, reconcile: true
 # ... and other resize/drag state
 
-# Content layer is reconciled (preserves layer state):
-@[Reconcile]
-@content_layer : Layer?
+# Object refs are carried over via reconcile_property (non-reactive: no
+# Source backing, no read-sweep — just the @[Reconcile] carry-over):
+reconcile_property content_layer : Layer?
 
 # Active cells are NOT reconciled:
 # Cells are recreated fresh on rebuild to avoid bounds corruption
 @active_cells : Hash(Tuple(Int32, Int32), Widget) = {} of ...
 ```
+
+> The property macros are `reactive_property` (Source-backed; takes `layout:` and
+> `reconcile:` flags), `reconcile_property` (non-reactive object-ref carry-over),
+> and `theme_property`. The former `render_property` / `layout_property` macros are
+> gone — see `REACTIVITY.md` for the reactive model.
 
 The `copy_state_from` override handles:
 1. `auto_copy_reconcile_properties(old_widget)` -- copies all `@[Reconcile]` annotated properties
@@ -661,11 +725,11 @@ Per-scroll (creation/destruction regions):
 
 ## Key Invariants
 
-1. **Layout is expensive, render is cheap**: After initial layout, scrolling and cursor movement NEVER call `mark_needs_layout`. They update `@scroll_offset` directly (bypassing the layout_property setter), sync to layer and ScrollView, and call `mark_needs_render`.
+1. **Layout is expensive, render is cheap**: After initial layout, scrolling and cursor movement NEVER call `mark_needs_layout`. `scroll_offset` is a Source-backed `reactive_property`; scroll-changing paths write it via `@scroll_offset.set` (or the `scroll_offset=` setter) and route through `apply_scroll`, which composites (updates `layer.scroll_offset`), optionally syncs the ScrollView, recenters (`update_visible_cells`), and marks render. The setter does NOT call `mark_needs_layout` — scroll never re-layouts.
 
 2. **Cells have fixed content-space positions**: Content cells are positioned at `ruler_offset + physical_cumulative[index]` and never move. The viewport_cache compositor handles viewport shifting. Only sticky cells need repositioning per frame.
 
-3. **Single update_visible_cells per frame**: Multiple scroll events are batched via `@pending_scroll_update`, flushed once in `pre_render_flush()`.
+3. **update_visible_cells is self-throttling**: It is called synchronously on each scroll event but, via the `@last_visible_key` cell-set gate, does no create/destroy work when the visible index set is unchanged, so per-event calls are inexpensive (the old `@pending_scroll_update` batching flag was removed). Per-cell content re-render is decided separately at render time by the Pull/SlotBuffer per-slot check.
 
 4. **Sticky cells use screen-space coordinates**: Sticky layers are non-viewport_cache. Cells on these layers must be manually positioned using true content positions minus scroll_offset (for the non-fixed dimension).
 
@@ -678,8 +742,9 @@ Per-scroll (creation/destruction regions):
 | Operation | Cost | Notes |
 |-----------|------|-------|
 | Initial layout | O(n) | Builds all caches, creates initial cells |
-| Smooth scroll (same indices) | O(log n) + O(sticky) | bsearch + early-exit + sticky reposition |
+| Smooth scroll (same indices) | O(log n) + O(sticky) + O(edge strip) | bsearch + cell-set gate + sticky reposition; only the newly-exposed edge re-renders (Pull/SlotBuffer) |
 | Scroll across boundary | O(log n) + O(visible) | bsearch + StickyMath + cell create/destroy |
+| Scrollbar thumb drag | O(visible) per **frame** | N queued mouse events coalesce to one `update_visible_cells` at `pre_render_flush` — not per event (else multi-second freeze) |
 | Cursor move | O(1) render-only | mark_cursor_overlay_dirty, no layout |
 | snap_to_cursor | O(visible) | May trigger update_visible_cells if scroll changed |
 | Resize drag (per move) | O(affected_cells) | Re-layout cells at/after resized dimension |
@@ -687,7 +752,7 @@ Per-scroll (creation/destruction regions):
 | Adapter cell invalidation | O(1) per cell | Deferred to pre_render_flush |
 | Adapter full invalidation | O(n) | Destroy all, rebuild dimension caches |
 | Size cache lookup | O(1) | Via cumulative arrays after O(n) build |
-| StickyMath.sticky() | O(n) | But cached by boundary key, amortized O(1) |
+| StickyMath.sticky_fast() | O(visible) | Per-boundary-key recompute; O(1) shifted-membership via cached inverse permutation (`scroll_rank`). `sticky()` (O(n)) is the reference impl / spec ground truth |
 
 ### Memory Model
 

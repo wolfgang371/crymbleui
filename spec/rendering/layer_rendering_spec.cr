@@ -1,12 +1,12 @@
 require "../spec_helper"
 require "../../src/testing/test_renderer"
 
-# Tests for layer-based rendering pipeline (Phase 2)
+# Tests for layer-based rendering pipeline
 # These tests verify that layers are rendered correctly to their textures
 # and composited to the window in the correct order.
 
-describe "Layer Rendering (Phase 2)" do
-  describe "Phase 2.1: Single Layer Backend Management" do
+describe "Layer Rendering" do
+  describe "Single Layer Backend Management" do
     it "layer starts with no backend" do
       app = TestApp.new
       layer = CrymbleUI::Layer.new("test", CrymbleUI::Rect.new(0, 0, 200, 150), z_index: 0)
@@ -58,7 +58,7 @@ describe "Layer Rendering (Phase 2)" do
     end
   end
 
-  describe "Phase 2.2: Multi-Layer Compositing" do
+  describe "Multi-Layer Compositing" do
     it "Window.collect_all_layers returns layers sorted by z_index" do
       app = TestApp.new
       window = CrymbleUI::Window.new("Test", 800, 600)
@@ -110,7 +110,7 @@ describe "Layer Rendering (Phase 2)" do
     end
   end
 
-  describe "Phase 2.3: Selective Layer Rendering" do
+  describe "Selective Layer Rendering" do
     it "layer reports needs_render when state is NeedsRender" do
       app = TestApp.new
       layer = CrymbleUI::Layer.new("test", CrymbleUI::Rect.zero, z_index: 0)

@@ -67,6 +67,19 @@ module CrymbleUI
       @flash_controller.transfer_widget(old_widget, new_widget)
     end
 
+    # Reconcile focus after a rebuild. A reconciled widget already had focus
+    # carried over by transfer_focus; but a widget that was REMOVED (no
+    # counterpart in the new tree — e.g. a closed dialog) leaves @focused_widget
+    # dangling on an orphan. An orphan still receives keys (handle_key_down sends
+    # to @focused_widget regardless of attachment), so a stale TextInput would
+    # swallow Alt+Left and the panel shortcut would never fire until the user
+    # clicked back in. Drop focus when the focused widget is no longer in `root`.
+    def reconcile_focus(root : Widget)
+      if w = @focused_widget
+        clear_focus unless w.widget_in_tree?(root)
+      end
+    end
+
     # === FOCUS CYCLING (Tab / Shift+Tab) ===
 
     # Cycle focus through focusable widgets in tab order

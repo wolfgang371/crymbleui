@@ -3,7 +3,7 @@ require "../../src/widgets/virtual_matrix"
 require "../../src/widgets/text_input"
 require "../../src/testing/test_renderer"
 
-# T-009: spreadsheet Tab / Shift+Tab. A focused VirtualMatrix round-robins its
+# spreadsheet Tab / Shift+Tab. A focused VirtualMatrix round-robins its
 # cell cursor — Tab advances (wrapping end-of-row to the next row's column 0,
 # and the very last cell back to {0,0}); Shift+Tab reverses — and NEVER moves
 # keyboard focus out of the matrix.
@@ -68,7 +68,7 @@ private def build_matrix_with_sibling(rows : Int32, cols : Int32, adapter = nil)
   {app, matrix, sibling}
 end
 
-describe "VirtualMatrix Tab/Shift+Tab round-robin (T-009)" do
+describe "VirtualMatrix Tab/Shift+Tab round-robin" do
   it "Tab advances the cursor and keeps focus inside the matrix" do
     app, matrix, _sibling = build_matrix_with_sibling(3, 3)
     CrymbleUI::Widget.focus_manager.focus(matrix)

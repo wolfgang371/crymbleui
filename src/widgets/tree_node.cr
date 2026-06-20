@@ -17,17 +17,21 @@ module CrymbleUI
 
     @header : String
     @expanded : Bool
-    @text_color : Color
-    @indicator_color : Color
+
+    # Theme colors resolve live (nil = follow Theme.current; explicit value wins)
+    theme_property text_color, text_default
+    theme_property indicator_color, text_default
 
     def initialize(
       @header : String,
       @expanded : Bool,
       font_scale : Int32 = 0,
-      @text_color : Color = Theme.current.text_default,
-      @indicator_color : Color = Theme.current.text_default
+      text_color : ThemeColor? = nil,
+      indicator_color : ThemeColor? = nil
     )
-      @font_scale = font_scale
+      @text_color = text_color
+      @indicator_color = indicator_color
+      @font_scale.set(font_scale)
       super(id: nil)
     end
 
@@ -66,7 +70,7 @@ module CrymbleUI
             Vec2.new(tri_cx - TRIANGLE_SIZE/2, tri_cy - TRIANGLE_SIZE/3),
             Vec2.new(tri_cx + TRIANGLE_SIZE/2, tri_cy - TRIANGLE_SIZE/3),
             Vec2.new(tri_cx, tri_cy + TRIANGLE_SIZE/2),
-            @indicator_color
+            indicator_color
           )
         else
           # Right-pointing triangle (collapsed)
@@ -74,14 +78,14 @@ module CrymbleUI
             Vec2.new(tri_cx - TRIANGLE_SIZE/3, tri_cy - TRIANGLE_SIZE/2),
             Vec2.new(tri_cx + TRIANGLE_SIZE/2, tri_cy),
             Vec2.new(tri_cx - TRIANGLE_SIZE/3, tri_cy + TRIANGLE_SIZE/2),
-            @indicator_color
+            indicator_color
           )
         end
 
         # Header text
         text_x = INDENT
         text_y = HEADER_PADDING
-        draw_text(@header, Vec2.new(text_x, text_y), @text_color, @font_scale)
+        draw_text(@header, Vec2.new(text_x, text_y), text_color, font_scale)
       end
     end
 
@@ -127,14 +131,11 @@ module CrymbleUI
     @header : String
 
     # Whether the node is expanded (children visible)
-    @[Reconcile]
-    property expanded : Bool
+    reactive_property expanded : Bool = false, reconcile: true
 
-    # Text color
-    @text_color : Color
-
-    # Triangle/indicator color
-    @indicator_color : Color
+    # Theme colors resolve live (nil = follow Theme.current; explicit value wins)
+    theme_property text_color, text_default
+    theme_property indicator_color, text_default
 
     # Click callback for toggle
     property on_toggle_callback : Proc(Nil)?
@@ -144,21 +145,27 @@ module CrymbleUI
 
     def initialize(
       @header : String,
-      @expanded : Bool = false,
+      expanded : Bool = false,
       id : String? = nil,
       font_scale : Int32 = 0,
-      @text_color : Color = Theme.current.text_default,
-      @indicator_color : Color = Theme.current.text_default,
+      text_color : ThemeColor? = nil,
+      indicator_color : ThemeColor? = nil,
       on_toggle : Proc(Nil)? = nil
     )
-      @font_scale = font_scale
+      @expanded = Source(Bool).new(expanded)
+      @_build_expanded = expanded
+      @text_color = text_color
+      @indicator_color = indicator_color
+      @font_scale.set(font_scale)
       super(id: id)
       @on_toggle_callback = on_toggle
 
-      # Create header as first child - it renders the triangle + header text
+      # Create header as first child - it renders the triangle + header text.
+      # Forward the nullable ivars (not the getters) so a nil stays nil and the
+      # header resolves the theme color LIVE itself (snapshot-drop).
       @header_widget = TreeNodeHeader.new(
         @header,
-        @expanded,
+        expanded,
         font_scale: font_scale,
         text_color: @text_color,
         indicator_color: @indicator_color
@@ -186,7 +193,7 @@ module CrymbleUI
       total_height = header_height
       max_width = header_width
 
-      if @expanded
+      if expanded
         dsl_children.each do |child|
           child_constraints = BoxConstraints.loose(Size.new(
             (constraints.max_width - INDENT).clamp(0.0, constraints.max_width),
@@ -212,10 +219,10 @@ module CrymbleUI
       header_height = @header_widget.bounds.height
 
       # Sync expanded state to header for triangle rendering
-      @header_widget.expanded = @expanded
+      @header_widget.expanded = expanded
 
       # Layout DSL children below header with indentation (positions relative to TreeNode)
-      if @expanded
+      if expanded
         y_offset = header_height
         remaining_height = size.height - header_height
         dsl_children.each do |child|
@@ -245,7 +252,7 @@ module CrymbleUI
 
     # Toggle expansion (called by TreeNodeHeader.on_click)
     def toggle
-      @expanded = !@expanded
+      self.expanded = !expanded
       @on_toggle_callback.try &.call
       mark_needs_layout
     end

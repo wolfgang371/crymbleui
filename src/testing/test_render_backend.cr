@@ -29,6 +29,8 @@ module CrymbleUI
       # SFML allows this (renders partial sprite), TestRenderBackend clips it
       # Used to detect layer-level clipping bugs in ScrollView
       getter negative_blit_count : Int32 = 0
+      getter blit_count : Int32 = 0             # full-texture blits (harness)
+      getter blit_region_count : Int32 = 0      # partial-region blits — "1 slot re-blit" oracle
 
       # Clip stack for scissor-test simulation (matches SFML behavior)
       @clip_stack : Array(Rect) = [] of Rect
@@ -88,6 +90,8 @@ module CrymbleUI
         @draw_text_count = 0
         @clear_count = 0
         @negative_blit_count = 0
+        @blit_count = 0
+        @blit_region_count = 0
       end
 
       # Get pixel color at (x, y)
@@ -545,6 +549,7 @@ module CrymbleUI
       # Blit entire source backend to this backend at specified position
       # Uses COPY mode (matches SFML's BlendNone) for widget backend restoration
       def blit(source : RenderBackend, dest_x : Int32, dest_y : Int32)
+        @blit_count += 1
         # Track negative blit destinations (indicates missing layer-level clipping)
         # SFML would render partial sprite; TestRenderBackend clips via set_pixel bounds check
         if dest_x < 0 || dest_y < 0
@@ -621,6 +626,7 @@ module CrymbleUI
       # Blit rectangular region from source backend to this backend
       # Copies pixels from (src_x, src_y, width, height) to (dest_x, dest_y)
       def blit_region(source : RenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32)
+        @blit_region_count += 1
         if source.is_a?(TestRenderBackend)
           # Copy pixel region
           height.times do |dy|

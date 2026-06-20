@@ -31,7 +31,7 @@ Layer "panel_<id>" (WindowPanel's internal layer)
 
 **Layer structure (`layer.widgets`):**
 - WindowPanel creates an internal layer (`@internal_layer`)
-- During layout, WindowPanel populates `layer.widgets` with its internal `Chrome` and `Content` widgets (window_panel.cr lines 456-458)
+- During layout, WindowPanel populates `layer.widgets` with its internal `Chrome` and `Content` widgets (see `WindowPanel#perform_layout` in window_panel.cr)
 - User-added children live under `Content`; they are NOT explicitly added to `layer.widgets`
 - User children are collected recursively during rendering via `collect_all_widgets_recursive`
 
@@ -56,7 +56,7 @@ Layer "panel_<id>" (WindowPanel's internal layer)
 - Each WindowPanel creates its own layer
 - Each MenuBar creates its own layer
 
-**Layout logic (lines 43-81):**
+**Layout logic** (see `Window#perform_layout`, window.cr):
 ```crystal
 # Separate children
 menubar = children.find { |c| c.is_a?(MenuBar) }
@@ -74,7 +74,7 @@ content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(WindowPanel) }
 - `@internal_layer` - Layer for panel chrome + content
 - `@children` - child widgets (content)
 
-**Layout logic (lines 441-472):**
+**Layout logic** (see `WindowPanel#perform_layout`, window_panel.cr):
 ```crystal
 # Populate layer.widgets with internal chrome and content widgets
 layer.widgets.clear
@@ -89,10 +89,10 @@ layer.widgets << @content  # Content container renders second
 # recursively from @content during rendering (prevents double-rendering)
 ```
 
-**to_primitives (line 544):**
+**to_primitives:**
 - WindowPanel itself is a pure container: returns `[] of DrawPrimitive`
-- Chrome rendering (title bar, close button, etc.) is handled by `Chrome#to_primitives` (line 181)
-- Content rendering (background, user children) is handled by `Content#to_primitives` (returns empty — pure container)
+- Chrome rendering (title bar, close button, etc.) is handled by `Chrome#to_primitives` (window_panel.cr)
+- Content rendering (background, user children) is handled by `Content#to_primitives` (window_panel.cr — returns empty, pure container)
 
 ## Rendering Process (src/rendering/layer_renderer.cr)
 
@@ -120,7 +120,11 @@ widgets_to_render = all_widgets.select { |w| dirty_set.includes?(w) }
 
 **Critical:** Selective render filters to dirty widgets but **preserves parent-first order** from recursive collection.
 
-### collect_all_widgets_recursive (lines 1311-1340)
+> **Note:** This dirty-widget path applies to ordinary (push-style) layers only. `viewport_cache`
+> layers (the matrix/VirtualMatrix content) bypass `dirty_widgets` entirely — they re-evaluate
+> per-slot every frame (Pull / SlotBuffer), so don't over-generalize the dirty-set filtering above to them.
+
+### collect_all_widgets_recursive (see `LayerRenderer#collect_all_widgets_recursive`, layer_renderer.cr)
 ```crystal
 private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget), target_layer : Layer)
   result << widget        # Add parent first
@@ -158,11 +162,12 @@ widgets_to_render = [Chrome, Content, BlackRectWidget].select { |w| dirty_set.in
                   = [Chrome]  # Content and BlackRectWidget filtered out!
 ```
 
-**This is the bug:** Chrome renders alone, blits its background over where BlackRectWidget should be.
+**This *was* the bug** (historical — now FIXED): Chrome rendered alone and blitted its background over where BlackRectWidget should be. The fix (parent-first ordering + `invalidate_children_backgrounds`, below) is in place; this section is kept as the worked example of *why* the ordering invariant exists, not a description of current behaviour.
 
 ## Why Parent-First Order Exists
 
-Comment in layer_renderer.cr:1498-1499:
+Comment in `LayerRenderer` (layer_renderer.cr), in the selective-render branch of the
+widget-collection method:
 ```crystal
 # Selective render: only dirty widgets, but MUST preserve parent-first order!
 # CRITICAL: If child renders before parent, it captures wrong (old) background

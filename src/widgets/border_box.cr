@@ -18,15 +18,17 @@ module CrymbleUI
   class BorderBox < Widget
     include PrimitiveBuilder
 
-    # Border properties
-    @border_color : Color?
-    @border_width : Float64
+    # Border properties (Source-backed; getter auto-captures, setter re-layouts)
+    reactive_property border_color : Color?, layout: true
+    reactive_property border_width : Float64 = 2.0, layout: true
 
     def initialize(
-      @border_color : Color? = nil,
-      @border_width : Float64 = 2.0,
+      border_color : Color? = nil,
+      border_width : Float64 = 2.0,
       id : String? = nil
     )
+      @border_color = Source(Color?).new(border_color)
+      @border_width = Source(Float64).new(border_width)
       super(id: id)
     end
 
@@ -34,31 +36,9 @@ module CrymbleUI
       "border_box"
     end
 
-    # Border color getter/setter
-    def border_color : Color?
-      @border_color
-    end
-
-    def border_color=(color : Color?)
-      @border_color = color
-      mark_needs_layout  # Border affects padding/layout
-      mark_needs_render
-    end
-
-    # Border width getter/setter
-    def border_width : Float64
-      @border_width
-    end
-
-    def border_width=(width : Float64)
-      @border_width = width
-      mark_needs_layout
-      mark_needs_render
-    end
-
     # Padding for border (border line + visual padding inside)
     private def border_padding : Float64
-      @border_color ? @border_width + 4.0 : 0.0
+      border_color ? border_width + 4.0 : 0.0
     end
 
     # Measure: child size + border padding
@@ -108,9 +88,9 @@ module CrymbleUI
 
     # Draw border as 4 filled rectangles (inside bounds, not clipped)
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-      if color = @border_color
+      if color = border_color
         primitives do
-          w = @border_width
+          w = border_width
           # Top edge
           fill_rect(Rect.new(0.0, 0.0, bounds.width, w), color)
           # Bottom edge

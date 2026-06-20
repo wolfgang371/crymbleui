@@ -245,7 +245,7 @@ describe CrymbleUI::VirtualMatrix do
       matrix.cursor_rc.should eq({3, 4})
     end
 
-    it "click on merged cell stores exact cell, not top-left (WU4)" do
+    it "click on merged cell stores exact cell, not top-left" do
       adapter = MergeableTestAdapter.new(10, 10)
       adapter.add_merge({0, 3}, {0, 4})
       matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "cursor_exact")

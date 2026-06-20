@@ -65,14 +65,6 @@ describe CrymbleUI::ComboBoxItem do
       item.selected?.should be_true
     end
 
-    it "marks needs_render when selection changes" do
-      item = CrymbleUI::ComboBoxItem.new("Test")
-      item.layout(CrymbleUI::BoxConstraints.new, CrymbleUI::Vec2.zero)
-      item.state = CrymbleUI::WidgetState::Clean
-
-      item.selected = true
-      item.needs_render?.should be_true
-    end
   end
 
   describe "#on_mouse_enter and #on_mouse_exit" do

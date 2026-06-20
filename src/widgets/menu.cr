@@ -24,25 +24,19 @@ module CrymbleUI
 
         # Dynamic default height (fallback when not constrained by menubar)
         def default_height : Float64
-            FontSizing.calculate_size(@font_scale) + 14.0
+            FontSizing.calculate_size(font_scale) + 14.0
         end
 
-        # Menu label
-        @label : String
-        def label_text : String
-            @label
-        end
-
-        def label_text=(value : String)
-            @label = value
-            mark_needs_render
-        end
+        # Menu label — reactive so it re-renders on change.
+        # NOTE: the accessor is `label_text` (not `label`); `def label` below is the
+        # path_id label and intentionally returns the literal "menu".
+        reactive_property label_text : String
 
         # Visual properties
-        render_property text_color : Color
-        render_property background_color : Color
-        render_property hover_color : Color
-        layout_property padding : Float64
+        theme_property text_color, menu_text
+        theme_property background_color, menu_background
+        theme_property hover_color, menu_hover
+        reactive_property padding : Float64, layout: true
 
         # State (managed internally)
         @open : Bool = false
@@ -81,14 +75,18 @@ module CrymbleUI
             label : String,
             id : String? = nil,
             font_scale : Int32 = 0,
-            @text_color : Color = Theme.current.menu_text,
-            @background_color : Color = Theme.current.menu_background,
-            @hover_color : Color = Theme.current.menu_hover,
-            @padding : Float64 = 10.0
+            text_color : Color? = nil,
+            background_color : Color? = nil,
+            hover_color : Color? = nil,
+            padding : Float64 = 10.0
         )
-            @font_scale = font_scale
+            @padding = Source(Float64).new(padding)
+            @font_scale.set(font_scale)
             super(id: id)
-            @label = label
+            @text_color = text_color
+            @background_color = background_color
+            @hover_color = hover_color
+            @label_text = Source(String).new(label)
         end
 
         # Override label for path_id generation
@@ -99,8 +97,8 @@ module CrymbleUI
         # Measure menu size based on text width
         def measure(constraints : BoxConstraints) : Size
             # Use proper text measurement (pure geometry query, no rendering)
-            text_width = measure_text(@label, font_size).width
-            width = text_width + @padding * 2
+            text_width = measure_text(label_text, font_size).width
+            width = text_width + padding * 2
             height = constraints.max_height.finite? ? constraints.max_height : default_height
             Size.new(width, height)
         end
@@ -322,7 +320,7 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
 
             # Determine background color based on hover/open state
-            bg_color = (@hovered || @open) ? @hover_color : @background_color
+            bg_color = (@hovered || @open) ? hover_color : background_color
 
             # Background rect (leave space at bottom for menubar border)
             bg_rect = Rect.new(0.0, 0.0, bounds.width, bounds.height - MenuBar::BORDER_WIDTH)
@@ -339,7 +337,7 @@ module CrymbleUI
             end
 
             # Text position (centered)
-            text_x = 0.0 + @padding
+            text_x = 0.0 + padding
             text_y = 0.0 + (bounds.height - font_size) / 2.0
             text_position = Vec2.new(text_x, text_y)
 
@@ -351,7 +349,7 @@ module CrymbleUI
                 fill_rect(border_rect, border_color)
 
                 # Draw label text
-                draw_text(@label, text_position, @text_color, @font_scale)
+                draw_text(label_text, text_position, text_color, font_scale)
             end
         end
     end

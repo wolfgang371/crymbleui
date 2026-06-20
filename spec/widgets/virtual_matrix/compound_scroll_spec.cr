@@ -59,7 +59,7 @@ private def setup_compound_matrix(adapter, viewport_width = 600.0, viewport_heig
 end
 
 describe CrymbleUI::VirtualMatrix do
-  describe "Dynamic Handle Cell (WU2)" do
+  describe "Dynamic Handle Cell" do
     it "merged cell handle is top-left when no scroll" do
       # Merged cell (0,2)-(0,3): spans cols 2 and 3 in row 0
       merges = [{ {0, 2}, {0, 3} }]
@@ -576,7 +576,7 @@ describe CrymbleUI::VirtualMatrix do
     end
   end
 
-  describe "Compound Cell Visible Size + pos_clipped (WU3)" do
+  describe "Compound Cell Visible Size + pos_clipped" do
     it "compound cell has full width when no scroll" do
       # Compound spans cols 2+3 (each ~103px)
       merges = [{ {0, 2}, {0, 3} }]

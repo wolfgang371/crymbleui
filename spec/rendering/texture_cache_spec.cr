@@ -78,9 +78,10 @@ describe "Texture caching behavior" do
             btn.needs_render?.should be_true
             btn.state = CrymbleUI::WidgetState::Clean
 
-            btn.text = "Changed"
-            btn.needs_render?.should be_true
-            btn.state = CrymbleUI::WidgetState::Clean
+            # NOTE: `text` is now a reactive_property (Source-backed) — a change is detected by
+            # AUTO-CAPTURE via the primitives node, not the @state push this test asserts, so for an
+            # un-rendered button needs_render? is node-derived. Its render behaviour (change → re-render,
+            # same value → idle) is covered user-visibly in spec/rendering/phase2_render_source_spec.cr.
 
             btn.font_scale = 3
             btn.needs_render?.should be_true

@@ -331,6 +331,13 @@ module CrymbleUI
       # Will be re-detected on next layout+update_hover or mouse move
       @hovered_widget = nil
 
+      # Reconcile keyboard focus to the new tree. A reconciled widget already had
+      # focus transferred in reconcile() above; but a widget that was REMOVED
+      # (e.g. a closed dialog) leaves focus dangling on an orphan that keeps
+      # eating key events (a stale TextInput swallows Alt+Left so the panel
+      # shortcut never fires). Mirrors the @hovered_widget reset.
+      Widget.focus_manager?.try &.reconcile_focus(new_root)
+
       # Update mouse_down_widget to point to corresponding widget in new tree
       # Critical for dragging to continue working after rebuild (e.g., ScrollView scrollbar dragging)
       if mouse_down_widget_path_id

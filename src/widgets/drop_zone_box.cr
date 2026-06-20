@@ -22,17 +22,20 @@ module CrymbleUI
 
     @accept_types : Array(String)
     @on_drop_handler : Proc(DragData, Vec2, Nil)?
-    @background_color : Color?
-    @hover_color : Color
+    # Live theme by default (follows Theme.set); explicit nil keeps the "draw NO background" semantic.
+    @background_color : ThemeColor?
+
+    theme_property hover_color, dropzone_hover
 
     def initialize(
       @accept_types : Array(String),
       @on_drop_handler : Proc(DragData, Vec2, Nil)? = nil,
-      @background_color : Color? = Theme.current.dropzone_background,
-      @hover_color : Color = Theme.current.dropzone_hover,
+      @background_color : ThemeColor? = Theme.ref(&.dropzone_background),
+      hover_color : ThemeColor? = nil,
       id : String? = nil
     )
       super(id: id)
+      @hover_color = hover_color
     end
 
     def accepts_drop?(data : DragData) : Bool
@@ -41,7 +44,7 @@ module CrymbleUI
 
     # Override to use configured hover_color for overlay highlight
     def highlight_color : Color
-      @hover_color
+      hover_color
     end
 
     def on_drop(data : DragData, position : Vec2)
@@ -65,7 +68,8 @@ module CrymbleUI
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       primitives do
         if bg = @background_color
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+          color = bg.is_a?(ThemeColorRef) ? bg.resolve : bg
+          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), color)
         end
       end
     end

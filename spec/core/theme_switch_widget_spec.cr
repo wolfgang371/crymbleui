@@ -4,6 +4,7 @@ require "../../src/widgets/text_input"
 require "../../src/widgets/virtual_matrix"
 require "../../src/widgets/window"
 require "../../src/widgets/window_panel"
+require "../../src/widgets/cpu_monitor"
 require "../../src/testing/test_renderer"
 require "../../src/rendering/layer_renderer"
 
@@ -69,7 +70,7 @@ describe "Theme switch widget colors" do
 
     # Light theme: TreeNode text should be dark
     tn = app.find("section").as(CrymbleUI::TreeNode)
-    light_text = tn.@header_widget.@text_color
+    light_text = tn.@header_widget.text_color # getter: resolves live (ivar is now a nullable override store)
     light_text.r.should be < 100  # dark text on light theme
 
     # Switch to dark
@@ -80,7 +81,7 @@ describe "Theme switch widget colors" do
 
     # Dark theme: TreeNode text should be light
     tn = app.find("section").as(CrymbleUI::TreeNode)
-    dark_text = tn.@header_widget.@text_color
+    dark_text = tn.@header_widget.text_color # getter: resolves live (ivar is now a nullable override store)
     dark_text.r.should be > 150  # light text on dark theme
   end
 
@@ -157,5 +158,50 @@ describe "Theme switch widget colors" do
     cell.should_not be_nil
     dark_bg = cell.not_nil!.as(CrymbleUI::TextInput).background_color
     dark_bg.r.should be < 100  # dark
+  end
+end
+
+# Snapshot-drop, layer-held + remaining widgets. These assert LIVE theming with NO rebuild
+# (the stricter contract): after Theme.set the widget/layer reflects the new theme immediately,
+# without app.request_rebuild. Layer-held colors (panel/matrix/sticky backgrounds) need the
+# pull-based Layer#background_color (mirrors compute_bounds_for_layer).
+describe "Live theme without rebuild (snapshot-drop tail)" do
+  before_each { CrymbleUI::Theme.set(:light) }
+  after_each { CrymbleUI::Theme.set(:light) }
+
+  it "WindowPanel title_bar_color follows Theme.set live (no rebuild)" do
+    app = ThemeSwitchTestApp.new
+    app.build_tree
+    renderer = CrymbleUI::Testing::TestRenderer.new(600, 400)
+    renderer.settle_rendering(app)
+    panel = app.find("panel").as(CrymbleUI::WindowPanel)
+    CrymbleUI::Theme.set(:dark)
+    panel.title_bar_color.should eq CrymbleUI::Theme.current.panel_title_bar # live, no rebuild
+  end
+
+  it "WindowPanel panel-layer background follows Theme.set live (pull-based layer bg)" do
+    app = ThemeSwitchTestApp.new
+    app.build_tree
+    renderer = CrymbleUI::Testing::TestRenderer.new(600, 400)
+    renderer.settle_rendering(app)
+    panel = app.find("panel").as(CrymbleUI::WindowPanel)
+    CrymbleUI::Theme.set(:dark)
+    panel.layer.not_nil!.background_color.should eq CrymbleUI::Theme.current.panel_background # pull → live
+  end
+
+  it "VirtualMatrix content-layer background follows Theme.set live (pull-based layer bg)" do
+    app = ThemeSwitchMatrixApp.new
+    app.build_tree
+    renderer = CrymbleUI::Testing::TestRenderer.new(600, 400)
+    renderer.settle_rendering(app)
+    matrix = app.find("matrix").as(CrymbleUI::VirtualMatrix)
+    CrymbleUI::Theme.set(:dark)
+    matrix.content_layer.not_nil!.background_color.should eq CrymbleUI::Theme.current.grid_content_background
+  end
+
+  it "CPUMonitor text_color follows Theme.set live" do
+    m = CrymbleUI::CPUMonitor.new
+    CrymbleUI::Theme.set(:dark)
+    m.text_color.should eq CrymbleUI::Theme.current.text_default
   end
 end

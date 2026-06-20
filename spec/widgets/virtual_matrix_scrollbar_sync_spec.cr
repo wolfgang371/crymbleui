@@ -14,6 +14,37 @@ require "../../src/rendering/layer_renderer"
 # - Wheel scroll from initial position shows black areas (visible cells not updated)
 # - Scrollbar drag calls update_visible_cells excessively (performance)
 
+# Faithful minimal copy of tut-22's adapter: 2 sticky rows + 2 sticky cols, scale-factor sizes
+# (sticky 1.5×, data 1.0×; cols 3×/5×). Used to reproduce the page-jump-too-much bug at scale.
+class PageJumpTutAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter
+
+  def initialize(@data_rows : Int32, @data_cols : Int32)
+    @total_rows = 2 + @data_rows
+    @total_cols = 2 + @data_cols
+  end
+
+  def row_count : Int32
+    @total_rows
+  end
+
+  def col_count : Int32
+    @total_cols
+  end
+
+  def get_scrollorder : {Array(Int32), Array(Int32)}
+    {(2...@total_rows).to_a + [1, 0], (2...@total_cols).to_a + [1, 0]}
+  end
+
+  def get_sizes : {Array(Float64), Array(Float64)}
+    {Array.new(@total_rows) { |r| r < 2 ? 1.5 : 1.0 }, Array.new(@total_cols) { |c| c < 2 ? 3.0 : 5.0 }}
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    CrymbleUI::Text.new("#{row},#{col}")
+  end
+end
+
 describe "VirtualMatrix scrollbar sync" do
   # Reset instrumentation counter before each test
   Spec.before_each do
@@ -550,55 +581,49 @@ describe "VirtualMatrix scrollbar sync" do
   # === BUG: Scrollbar drag calls update_visible_cells excessively ===
 
   describe "scrollbar drag performance" do
-    it "scrollbar drag does not call update_visible_cells excessively" do
-      # Bug: Every on_mouse_move during scrollbar drag calls sync_from_scroll_view,
-      # which calls update_visible_cells. For 60 mouse move events, that's 60 calls.
-      # Should be throttled to a reasonable number (e.g., only when visible set changes).
+    it "coalesces cell updates to once-per-frame during a multi-event thumb drag" do
+      # The freeze (5e2f3ee): during scrollbar thumb drag, sync_from_scroll_view ran
+      # update_visible_cells on EVERY mouse event (~125Hz). When several events queue before a
+      # repaint, that is N expensive cell updates with no frame between — the multi-second
+      # freeze at large grids. The deferred path coalesces queued events to ONE update at the
+      # next frame. (This test used to render after every move and assert `<= 30 moves`, which
+      # passes even with NO coalescing — green while the feature is broken. Strengthened here to
+      # the event-queue-backup scenario: many events, NO repaint between them.)
       renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
       app = TestApp.new
-
-      matrix = CrymbleUI::VirtualMatrix.new(rows: 100, cols: 10, id: "drag_perf")
-
+      matrix = CrymbleUI::VirtualMatrix.new(rows: 1000, cols: 10, id: "drag_coalesce")
       app.root_widget = matrix
       app.build_tree
-
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
       matrix.layout(constraints, CrymbleUI::Vec2.zero)
-      renderer.render_frame(app)
+      renderer.settle_rendering(app)
 
       scroll_view = matrix.content_scroll_view.not_nil!
       sv_bounds = scroll_view.absolute_bounds
-
-      # Start thumb drag: click on thumb
-      thumb_x = sv_bounds.x + sv_bounds.width - 8.0  # Middle of scrollbar
-      thumb_y = sv_bounds.y + 20.0  # Near top where thumb starts
-
-      # Reset counter before simulating drag
-      CrymbleUI::VirtualMatrix.reset_update_visible_cells_counter
-
-      # Simulate drag: mouse down on thumb
+      thumb_x = sv_bounds.x + sv_bounds.width - 8.0
+      thumb_y = sv_bounds.y + 20.0
       scroll_view.on_mouse_down(CrymbleUI::Vec2.new(thumb_x, thumb_y))
 
-      # Simulate 30 mouse move events (typical drag)
-      move_count = 30
-      move_count.times do |i|
-        new_y = thumb_y + i * 5.0  # Move 5 pixels per step
-        scroll_view.on_mouse_move(CrymbleUI::Vec2.new(thumb_x, new_y))
-        renderer.render_frame(app)
+      CrymbleUI::VirtualMatrix.reset_update_visible_cells_counter
+
+      # Event-queue backup: 10 drag events arrive BEFORE the next repaint (NO render between).
+      10.times do |i|
+        scroll_view.on_mouse_move(CrymbleUI::Vec2.new(thumb_x, thumb_y + (i + 1) * 12.0))
       end
+      matrix.scroll_offset.y.should be > 0.0 # sanity: the drag actually scrolled far
 
-      # Mouse up
-      scroll_view.on_mouse_up(CrymbleUI::Vec2.new(thumb_x, thumb_y + move_count * 5.0))
+      # Coalescing: the 10 queued events must NOT each run a full cell update.
+      during = CrymbleUI::VirtualMatrix.update_visible_cells_call_count
+      during.should be <= 1,
+        "thumb-drag ran cell updates #{during}× across 10 queued events before any repaint — " \
+        "that per-event work is the multi-second freeze (5e2f3ee); expected coalescing to once-per-frame."
+
+      # The deferred work flushes on the next frame, showing the final scroll position.
       renderer.render_frame(app)
+      CrymbleUI::VirtualMatrix.update_visible_cells_call_count.should be >= 1
+      matrix.visible_cell_indices[:rows].max.should be > 100 # cells reflect where the thumb ended up
 
-      # Check: update_visible_cells should NOT be called 30+ times
-      # Acceptable: ~5-10 times (when visible set actually changes)
-      call_count = CrymbleUI::VirtualMatrix.update_visible_cells_call_count
-
-      # Counter only increments when new cells are created (visible set changes).
-      # With incremental StickyMath cache, each call is O(log n) — cheap.
-      # Bound: at most one cell-creation event per mouse move (30 moves → ≤ 30).
-      call_count.should be <= 30, "update_visible_cells created cells #{call_count} times during drag (expected <= 30)"
+      scroll_view.on_mouse_up(CrymbleUI::Vec2.new(thumb_x, thumb_y + 120.0))
     end
   end
 
@@ -710,6 +735,49 @@ describe "VirtualMatrix scrollbar sync" do
       # ScrollView should be synced
       scroll_view = matrix.content_scroll_view.not_nil!
       scroll_view.scroll_offset.x.should eq matrix.scroll_offset.x
+    end
+  end
+
+  # === BUG: track-click page-jump scrolls ~double in large grids ===
+
+  describe "scrollbar track-click page jump" do
+    it "pages by the data viewport (viewport minus the pinned sticky region), not the full viewport" do
+      # Bug: a track-click page jump scrolled the FULL viewport height. But the sticky headers
+      # + ruler are pinned inside that viewport and do not scroll — only the data area below
+      # them does. Paging the full viewport overshoots by the sticky-region height, skipping the
+      # rows that sat behind the headers (reported live in tut-22 at 10000²).
+      renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+      app = TestApp.new
+      matrix = CrymbleUI::VirtualMatrix.new(adapter: PageJumpTutAdapter.new(10000, 10000), id: "pagejump")
+      app.root_widget = matrix
+      app.build_tree
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+      renderer.settle_rendering(app)
+
+      scroll_view = matrix.content_scroll_view.not_nil!
+      sv_bounds = scroll_view.absolute_bounds
+      viewport_h = scroll_view.viewport_size.height
+      sticky_h = scroll_view.sticky_row_height
+      sticky_h.should be > 0.0 # sanity: there IS a pinned region (2 sticky rows + ruler)
+      initial = matrix.scroll_offset.y
+      initial.should eq 0.0
+
+      # Click the vertical track well below the thumb (thumb sits at the top at scroll=0).
+      track_x = sv_bounds.x + sv_bounds.width - 8.0
+      track_y = sv_bounds.y + 250.0
+      app.handle_mouse_down(CrymbleUI::Vec2.new(track_x, track_y))
+      app.handle_mouse_up(CrymbleUI::Vec2.new(track_x, track_y))
+
+      jump = matrix.scroll_offset.y - initial
+      # Scrollable data viewport = full viewport − the horizontal scrollbar (10000² has both
+      # bars) − the pinned sticky region. Paging more than this skips rows behind the headers.
+      sbw = CrymbleUI::ScrollView::SCROLLBAR_WIDTH
+      expected = viewport_h - sbw - sticky_h
+      jump.should be_close(expected, 2.0),
+        "page-jump scrolled #{jump.round(1)}px, but the scrollable data viewport is only " \
+        "#{expected.round(1)}px (viewport #{viewport_h.round(1)} − scrollbar #{sbw} − sticky #{sticky_h.round(1)}) — " \
+        "it skips #{(jump - expected).round(1)}px of rows"
     end
   end
 

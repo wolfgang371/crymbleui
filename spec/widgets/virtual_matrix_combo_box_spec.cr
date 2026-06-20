@@ -515,7 +515,7 @@ describe "on_key_down 4-param dispatch (signature regression)" do
   end
 end
 
-# T-015: a ComboBox dropdown open in a VMatrix cell must, on Tab/Shift+Tab, COMMIT
+# a ComboBox dropdown open in a VMatrix cell must, on Tab/Shift+Tab, COMMIT
 # the highlighted value and advance/retreat the cell cursor (the spreadsheet Tab) —
 # never discard the highlight and let focus escape the matrix. These drive Tab through
 # the REAL dispatch (press_tab -> FocusManager#handle_tab_key) and assert observable
@@ -592,7 +592,7 @@ private def open_combo_popup(matrix, renderer, app, fm, ch : Char)
   matrix.active_cells[{0, 1}]?.as(CrymbleUI::ComboBox)
 end
 
-describe "VirtualMatrix ComboBox Tab/Shift+Tab (T-015)" do
+describe "VirtualMatrix ComboBox Tab/Shift+Tab" do
   it "Tab with popup open commits the highlighted item and advances the cursor" do
     adapter = ComboBoxRecordingAdapter.new
     matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "combo_matrix")

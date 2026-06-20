@@ -1,3 +1,5 @@
+require "./cached"
+
 module CrymbleUI
   # FontSizing provides relative font scaling with global zoom support.
   #
@@ -51,8 +53,10 @@ module CrymbleUI
     # Index of 1.0 (100%) in ZOOM_LEVELS
     DEFAULT_ZOOM_INDEX = 5
 
-    # Current zoom level index
-    @@zoom_index : Int32 = DEFAULT_ZOOM_INDEX
+    # Current zoom level index, held in a tracked Source so a Cached node that READS zoom (via
+    # zoom_factor / calculate_size / measure_text) during its recompute AUTO-CAPTURES the zoom edge
+    # Reading it outside a recompute just returns the value — zero behaviour change.
+    @@zoom_index_source : Source(Int32) = Source(Int32).new(DEFAULT_ZOOM_INDEX)
 
     # Zoom epoch counter - increments on every zoom change
     # Used for DEBUG_ZOOM instrumentation to detect stale cached primitives
@@ -72,7 +76,7 @@ module CrymbleUI
 
     # Get current zoom level index
     def self.zoom_index : Int32
-      @@zoom_index
+      @@zoom_index_source.get
     end
 
     # Get current zoom epoch (increments on every zoom change)
@@ -82,7 +86,7 @@ module CrymbleUI
 
     # Get current zoom factor (from precomputed levels)
     def self.zoom_factor : Float64
-      ZOOM_LEVELS[@@zoom_index]
+      ZOOM_LEVELS[@@zoom_index_source.get]
     end
 
     # Calculate actual font size from scale value
@@ -93,9 +97,10 @@ module CrymbleUI
     # Zoom in by one level
     # Returns true if zoom changed, false if already at max
     def self.zoom_in : Bool
-      if @@zoom_index < ZOOM_LEVELS.size - 1
-        @@zoom_index += 1
-        @@zoom_epoch += 1  # Increment epoch for stale cache detection
+      idx = @@zoom_index_source.get
+      if idx < ZOOM_LEVELS.size - 1
+        @@zoom_index_source.set(idx + 1) # bumps the Source + marks captured dependents dirty
+        @@zoom_epoch += 1                # kept during migration for the hand-rolled cache key
         notify_zoom_change
         true
       else
@@ -106,9 +111,10 @@ module CrymbleUI
     # Zoom out by one level
     # Returns true if zoom changed, false if already at min
     def self.zoom_out : Bool
-      if @@zoom_index > 0
-        @@zoom_index -= 1
-        @@zoom_epoch += 1  # Increment epoch for stale cache detection
+      idx = @@zoom_index_source.get
+      if idx > 0
+        @@zoom_index_source.set(idx - 1)
+        @@zoom_epoch += 1
         notify_zoom_change
         true
       else
@@ -118,8 +124,8 @@ module CrymbleUI
 
     # Reset zoom to 100%
     def self.reset_zoom
-      @@zoom_index = DEFAULT_ZOOM_INDEX
-      @@zoom_epoch += 1  # Increment epoch for stale cache detection
+      @@zoom_index_source.set(DEFAULT_ZOOM_INDEX)
+      @@zoom_epoch += 1
       notify_zoom_change
     end
 

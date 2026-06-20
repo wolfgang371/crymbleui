@@ -1,5 +1,6 @@
 require "json"
 require "./types"
+require "./cached"
 
 module CrymbleUI
   # Immutable theme data parsed from JSON.
@@ -250,12 +251,29 @@ module CrymbleUI
     end
   end
 
+  # A LIVE theme-color reference: wraps a ThemeData accessor and resolves it against
+  # Theme.current at READ time. Pass `Theme.ref(&.ruler_label)` where a call site needs a theme color
+  # whose key differs from the widget's own default — it follows Theme.set, unlike a snapshotted
+  # Theme.current.<key> argument (which becomes a sticky override).
+  struct ThemeColorRef
+    def initialize(@accessor : ThemeData -> Color)
+    end
+
+    def resolve : Color
+      @accessor.call(Theme.current)
+    end
+  end
+
+  # What a theme-aware color property accepts: a concrete Color (sticky override) or a live ThemeColorRef.
+  alias ThemeColor = Color | ThemeColorRef
+
   # Global theme registry and singleton accessor.
   #
   # Usage:
   #   Theme.current.button_background  # => Color (from active theme)
   #   Theme.set(:dark)                 # Switch to dark theme
   #   Theme.register(:custom, data)    # Register custom theme
+  #   Theme.ref(&.ruler_label)         # => a live reference resolved at read time
   module Theme
     # Compile-time embedded JSON (zero runtime I/O)
     LIGHT_JSON = {{ read_file("#{__DIR__}/../../resources/themes/light.json") }}
@@ -267,17 +285,32 @@ module CrymbleUI
       :dark  => ThemeData.from_json_string(DARK_JSON),
     }
 
-    # Current active theme (defaults to light)
-    @@current : ThemeData = @@themes[:light]
+    # Current active theme (defaults to light), held in a tracked Source so a Cached node that READS
+    # Theme.current during its recompute AUTO-CAPTURES the theme edge. Reading it
+    # outside a recompute (CacheNode.current == nil) just returns the value — zero behaviour change.
+    @@current_source : Source(ThemeData) = Source(ThemeData).new(@@themes[:light])
+    @@current_name : Symbol = :light # the active theme's registry name (for a live toggle)
 
     def self.current : ThemeData
-      @@current
+      @@current_source.get
+    end
+
+    # The active theme's registry name (e.g. :light / :dark).
+    def self.current_name : Symbol
+      @@current_name
+    end
+
+    # Build a live theme-color reference: `Theme.ref(&.ruler_label)` resolves Theme.current.ruler_label
+    # at read time (follows Theme.set), for call sites needing a key other than a widget's own default.
+    def self.ref(&accessor : ThemeData -> Color) : ThemeColorRef
+      ThemeColorRef.new(accessor)
     end
 
     def self.set(name : Symbol)
       theme = @@themes[name]?
       raise "Unknown theme: #{name}" unless theme
-      @@current = theme
+      @@current_source.set(theme) # bumps the Source version + marks auto-captured dependents dirty
+      @@current_name = name
     end
 
     def self.register(name : Symbol, theme : ThemeData)

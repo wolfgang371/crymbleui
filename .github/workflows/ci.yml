@@ -47,6 +47,35 @@ jobs:
           source setup.sh
           crystal spec -- --tag '~slow'
 
+  # Cache-coherency gate (T-028 Phase 0): build the matrix/ScrollView coherency specs with
+  # -Dcache_validation, which re-renders each content layer from scratch and pixel-compares it
+  # against the cached buffer — failing on the stale-cache ghost class (T-018/19/21). Separate
+  # job because it ~doubles render work and is incompatible with perf-counter specs.
+  cache-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install SFML 3 build + runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libopenal1 libfreetype6 \
+            libx11-6 libxrandr2 libxcursor1 libxi6 libudev1 \
+            libvorbisfile3 libflac12
+
+      - name: shards install
+        run: shards install
+
+      - name: Cache-coherency gate (dual renderer)
+        run: |
+          source setup.sh
+          ./scripts/cv-coherency.sh
+
   windows:
     runs-on: windows-latest
     steps:

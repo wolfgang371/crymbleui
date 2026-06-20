@@ -29,8 +29,12 @@ module CrymbleUI
         super(id: id)
       end
 
+      # Dynamic (was Never) so the primitives node AUTO-CAPTURES matrix.scroll_offset
+      # (a Source, read in to_primitives) — a scroll then enqueues this ruler SELECTIVELY via the node's
+      # on_dirty callback, instead of the old per-scroll-site mark_ruler_widgets_dirty. (Size changes
+      # aren't Sources, so the resize path still marks explicitly — see mark_ruler_widgets_dirty.)
       def cache_policy : CachePolicy
-        CachePolicy::Never
+        CachePolicy::Dynamic
       end
 
       def measure(constraints : BoxConstraints) : Size

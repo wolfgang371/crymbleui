@@ -40,7 +40,7 @@ describe "VirtualMatrix sticky header hit-testing" do
     renderer.settle_rendering(app)
 
     # Scroll down 200px (~8 content rows slide under sticky row 0)
-    # Use layout_property setter which calls mark_needs_layout
+    # Use reactive_property (… layout: true) setter which calls mark_needs_layout
     matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, 200.0)
     if layer = matrix.content_layer
       layer.scroll_offset = matrix.scroll_offset

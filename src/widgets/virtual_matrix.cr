@@ -30,12 +30,12 @@ module CrymbleUI
   # After initial layout, VirtualMatrix's size/position is constant. Scrolling and
   # cursor movement only change WHICH cells are visible — they must NEVER trigger
   # mark_needs_layout. Instead they should:
-  #   1. Update @scroll_offset (direct ivar write, NOT the layout_property setter)
+  #   1. Update scroll_offset via the canonical path (Source.set or self.scroll_offset=)
   #   2. Sync to ScrollView via set_scroll_offset_for_sync (NOT the setter)
   #   3. Update layer.scroll_offset for viewport_cache compositing
   #   4. Call update_visible_cells to refresh which cell widgets exist
   #   5. Call mark_needs_render (NOT mark_needs_layout)
-  # See on_mouse_wheel for the correct pattern.
+  # See apply_scroll / on_mouse_wheel for the correct pattern.
   #
   # Drag data for cell drag-and-drop within VirtualMatrix
   class CellDragData < DragData
@@ -159,12 +159,10 @@ module CrymbleUI
     end
 
     # Layers (reconciled to preserve layer state across DSL rebuilds)
-    @[Reconcile]
-    @content_layer : Layer?
-    @[Reconcile]
-    @cursor_overlay_layer : Layer?
-    @[Reconcile]
-    @cursor_overlay_widget : CursorOverlayWidget?
+    # OBJECT REFS — kept as plain ivars via reconcile_property (no Source-backing, no read sweep)
+    reconcile_property content_layer : Layer?
+    reconcile_property cursor_overlay_layer : Layer?
+    reconcile_property cursor_overlay_widget : CursorOverlayWidget?
 
     # Ruler widgets (rendered on sticky layers for column/row labels + resize handles)
     getter col_ruler_widget : ColumnRulerWidget? = nil
@@ -173,42 +171,55 @@ module CrymbleUI
     getter corner_row_strip_widget : CornerRowStripWidget? = nil
 
     # Ruler visibility (default on)
-    layout_property show_rulers : Bool = true
+    reactive_property show_rulers : Bool = true, layout: true
 
     # ScrollView for scrollbar chrome (overlays content area)
     @content_scroll_view : ScrollView?
 
     # Reconciliation properties
-    layout_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
+    # scroll_offset is a Source-backed reactive_property (reconcile: true).
+    # Getter auto-captures in to_primitives; setter notifies dependents.
+    # The custom setter below OVERRIDES the macro's: scroll is a COMPOSITING input,
+    # so setting it must call apply_scroll (composite + recenter), NOT mark_needs_layout.
+    reactive_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
+
+    # scroll_offset is a COMPOSITING input: the setter notifies auto-captured readers (Source.set) AND
+    # applies the scroll (apply_scroll = composite + recenter). NOT mark_needs_layout — scroll never re-layouts.
+    def scroll_offset=(value : Vec2) : Nil
+      return if scroll_offset == value
+      @scroll_offset.set(value)
+      apply_scroll
+    end
 
     # Track last synced scroll offset for bi-directional sync with ScrollView
     # This allows detecting which side (VirtualMatrix or ScrollView) changed
     # NOT reconciled: after rebuild the ScrollView is fresh (offset=0), so we need
     # the push branch to fire and seed it with our reconciled scroll_offset.
     @last_synced_scroll_offset : Vec2 = Vec2.zero
-    reconcile_property cursor_rc : Tuple(Int32, Int32) = {0, 0}
+    # Deferred scroll (5e2f3ee): scrollbar thumb drag fires sync_from_scroll_view per mouse
+    # event (~125Hz). Running update_visible_cells on each backs the event loop up into a
+    # multi-second freeze, so we only flag here and flush once per frame in pre_render_flush.
+    @pending_scroll_update : Bool = false
+    reactive_property cursor_rc : Tuple(Int32, Int32) = {0, 0}, reconcile: true
 
     # Public API: move cursor to a specific cell (e.g., after an external edit moved a row)
     def set_cursor(row : Int32, col : Int32)
-      @cursor_rc = {row, col}
+      self.cursor_rc = {row, col}
       mark_needs_render
     end
 
-    reconcile_property drag_index_rc : Tuple(Int32, Int32)? = nil
-    reconcile_property is_dragging : Bool = false
-
     # Interactive column/row resize state
-    reconcile_property resize_axis : ResizeAxis = ResizeAxis::None
-    reconcile_property resize_index : Int32 = 0
-    reconcile_property resize_start_mouse : Float64 = 0.0
-    reconcile_property resize_start_size : Float64 = 0.0
+    reactive_property resize_axis : ResizeAxis = ResizeAxis::None, reconcile: true
+    reactive_property resize_index : Int32 = 0, reconcile: true
+    reactive_property resize_start_mouse : Float64 = 0.0, reconcile: true
+    reactive_property resize_start_size : Float64 = 0.0, reconcile: true
 
     # Cursor highlight intensity. Positive = additive/brighten (dark themes),
     # negative = subtractive/darken (light themes). Magnitude = per-channel delta.
     @cursor_highlight_delta : Int32 = Theme.current.brightness_cursor_delta
 
     # Content layer background color (visible between cells)
-    @content_background_color : Color = Theme.current.grid_content_background
+    @content_background_color : Color? = nil # nil = follow Theme.current.grid_content_background live
 
     # Cursor flash state (managed via overlay layer with additive blend)
     @cursor_flash_timer_id : Int32? = nil
@@ -289,13 +300,20 @@ module CrymbleUI
     @cached_sticky_row_count : Int32? = nil
     @cached_sticky_col_count : Int32? = nil
 
+    # Shorthand for the lib's O(1) shifted-membership value (cached inverse permutation).
+    alias ShiftedSet = Widgets::VirtualMatrix::StickyMath::ShiftedSet
+
     # -- Group 3: Viewport sticky results (keyed on {num_shifted, index_beyond}) --
     @last_col_sticky_key : Tuple(Int32, Int32?)? = nil
     @last_row_sticky_key : Tuple(Int32, Int32?)? = nil
-    @last_col_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), Array(Int32))? = nil
-    @last_row_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), Array(Int32))? = nil
-    @cached_col_sorted_shifted : Array(Int32)? = nil
-    @cached_row_sorted_shifted : Array(Int32)? = nil
+    @last_col_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), ShiftedSet)? = nil
+    @last_row_sticky_result : Tuple(Int32, Hash(Int32, Int32), Int32, Array(Int32), ShiftedSet)? = nil
+    @cached_col_shifted : ShiftedSet? = nil
+    @cached_row_shifted : ShiftedSet? = nil
+    # Inverse of scroll_order (scroll_rank[physical] = its scroll-order position), built once
+    # per resize so ShiftedSet membership is O(1).
+    @cached_col_scroll_rank : Array(Int32)? = nil
+    @cached_row_scroll_rank : Array(Int32)? = nil
 
     # -- Group 4: Creation/destruction region caches --
     @last_creation_col_key : Tuple(Int32, Int32?)? = nil
@@ -328,7 +346,7 @@ module CrymbleUI
       adapter : Widgets::VirtualMatrix::MatrixAdapter,
       id : String? = nil,
       cursor_highlight_delta : Int32 = Theme.current.brightness_cursor_delta,
-      content_background_color : Color = Theme.current.grid_content_background
+      content_background_color : Color? = nil
     )
       @adapter = adapter
       row_order, col_order = adapter.get_scrollorder
@@ -359,11 +377,10 @@ module CrymbleUI
 
     # Proxy focus: the cell widget that currently has delegated focus
     # VirtualMatrix stays focused (owns grid nav), but forwards events to this widget
-    @[Reconcile]
-    @proxy_focused_widget : Widget? = nil
+    # OBJECT REF / transient proxy state — kept plain via reconcile_property (no Source-backing, no sweep)
+    reconcile_property proxy_focused_widget : Widget? = nil
     # Row/col of the proxy-focused cell (for commit_proxy_edit)
-    @[Reconcile]
-    @proxy_focused_rc : Tuple(Int32, Int32)? = nil
+    reconcile_property proxy_focused_rc : Tuple(Int32, Int32)? = nil
 
     # === THEME CONFIGURATION ===
 
@@ -375,12 +392,19 @@ module CrymbleUI
       @cursor_highlight_delta = value
     end
 
+    # Live theme: nil ivar → follow Theme.current; an explicit value overrides (snapshot-drop).
     def content_background_color : Color
-      @content_background_color
+      @content_background_color || Theme.current.grid_content_background
     end
 
-    def content_background_color=(value : Color)
+    def content_background_color=(value : Color?)
       @content_background_color = value
+    end
+
+    # Pull-based layer background: the content layer clears to the LIVE content background so
+    # a Theme.set recolors it without a rebuild. Other VM layers keep their cached color.
+    def compute_background_for_layer(layer : Layer) : Color?
+      layer == @content_layer ? content_background_color : nil
     end
 
     # === SIZE SETTERS/GETTERS ===
@@ -490,11 +514,11 @@ module CrymbleUI
 
     # Ruler dimensions in pixels (0 if rulers hidden)
     def ruler_row_height_pixels : Float64
-      @show_rulers ? (RULER_ROW_HEIGHT * frame_height) : 0.0
+      show_rulers ? (RULER_ROW_HEIGHT * frame_height) : 0.0
     end
 
     def ruler_col_width_pixels : Float64
-      @show_rulers ? (RULER_COL_WIDTH * frame_height) : 0.0
+      show_rulers ? (RULER_COL_WIDTH * frame_height) : 0.0
     end
 
     # === COMPOUND/MERGED CELLS ===
@@ -521,18 +545,18 @@ module CrymbleUI
 
     # Dynamic handle cell: first VISIBLE cell of a merged region.
     # When the top-left scrolls out, the first visible row/col takes over.
-    # Uses sorted_shifted arrays for O(log S) lookup instead of O(N) firsts array.
-    # Returns nil if merged region is entirely invisible.
+    # Finds a merged region's first visible constituent via ShiftedSet (O(1) membership).
+    # Returns nil if the merged region is entirely invisible.
     def dynamic_handle_cell(cell : Tuple(Int32, Int32),
-                            sorted_shifted_rows : Array(Int32),
-                            sorted_shifted_cols : Array(Int32)) : Tuple(Int32, Int32)?
+                            shifted_rows : ShiftedSet,
+                            shifted_cols : ShiftedSet) : Tuple(Int32, Int32)?
       bounding = get_bounding_box(cell)
       min_row = bounding[0][0]
       min_col = bounding[0][1]
 
-      # First visible row/col at or after the bounding box start — O(log S)
-      handle_row = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_row, sorted_shifted_rows, @rows)
-      handle_col = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_col, sorted_shifted_cols, @cols)
+      # First visible row/col at or after the bounding box start — O(shifted run)
+      handle_row = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_row, shifted_rows, @rows)
+      handle_col = Widgets::VirtualMatrix::StickyMath.first_visible_at_or_after(min_col, shifted_cols, @cols)
 
       # -1 means no visible element at or after this index
       return nil if handle_row == -1 || handle_col == -1
@@ -547,9 +571,9 @@ module CrymbleUI
 
     # Check if cell is the dynamic handle of its merged region
     def is_dynamic_handle_cell?(cell : Tuple(Int32, Int32),
-                                sorted_shifted_rows : Array(Int32),
-                                sorted_shifted_cols : Array(Int32)) : Bool
-      cell == dynamic_handle_cell(cell, sorted_shifted_rows, sorted_shifted_cols)
+                                shifted_rows : ShiftedSet,
+                                shifted_cols : ShiftedSet) : Bool
+      cell == dynamic_handle_cell(cell, shifted_rows, shifted_cols)
     end
 
     # Get cell at a given row/col (returns top-left for merged cells)
@@ -562,7 +586,8 @@ module CrymbleUI
       bounding = get_bounding_box(cell)
       row_range = bounding[0][0]..bounding[1][0]
       col_range = bounding[0][1]..bounding[1][1]
-      row_range.includes?(@cursor_rc[0]) && col_range.includes?(@cursor_rc[1])
+      rc = cursor_rc
+      row_range.includes?(rc[0]) && col_range.includes?(rc[1])
     end
 
     # === CELL ACCESSORS ===
@@ -613,8 +638,8 @@ module CrymbleUI
       cell_y = ruler_row_height_pixels + (0...row).sum { |r| row_height_pixels(r) }
 
       # Apply scroll offset
-      screen_x = content_x + cell_x - @scroll_offset.x
-      screen_y = content_y + cell_y - @scroll_offset.y
+      screen_x = content_x + cell_x - scroll_offset.x
+      screen_y = content_y + cell_y - scroll_offset.y
 
       Vec2.new(screen_x, screen_y)
     end
@@ -645,12 +670,12 @@ module CrymbleUI
 
     # Check if row is highlighted (cursor is in this row)
     def is_row_highlighted?(row : Int32) : Bool
-      @cursor_rc[0] == row
+      cursor_rc[0] == row
     end
 
     # Check if column is highlighted (cursor is in this column)
     def is_col_highlighted?(col : Int32) : Bool
-      @cursor_rc[1] == col
+      cursor_rc[1] == col
     end
 
     # === LAYER ACCESSORS ===
@@ -677,13 +702,7 @@ module CrymbleUI
       end
     end
 
-    def content_layer : Layer?
-      @content_layer
-    end
-
-    def cursor_overlay_layer : Layer?
-      @cursor_overlay_layer
-    end
+    # content_layer / cursor_overlay_layer accessors are generated by reconcile_property.
 
     # Removed: sticky_col_header_layer, sticky_row_header_layer, sticky_corner_layer
     # Headers are now data cells rendered via adapter cell_paint with styling
@@ -765,7 +784,7 @@ module CrymbleUI
       end
       setup_scroll_view(full_width, full_height)
       sync_scroll_offsets
-      @content_layer.not_nil!.scroll_offset = @scroll_offset
+      @content_layer.not_nil!.scroll_offset = scroll_offset
 
       # Invalidate sticky layers so rulers re-render at current viewport bounds
       if sv = @content_scroll_view
@@ -774,7 +793,7 @@ module CrymbleUI
         end
       end
 
-      if @show_rulers
+      if show_rulers
         create_ruler_widgets(@content_scroll_view.not_nil!)
       end
 
@@ -788,7 +807,7 @@ module CrymbleUI
       return if @last_zoom_factor == current_zoom
 
       zoom_ratio = current_zoom / @last_zoom_factor
-      @scroll_offset = Vec2.new(@scroll_offset.x * zoom_ratio, @scroll_offset.y * zoom_ratio)
+      @scroll_offset.set(Vec2.new(scroll_offset.x * zoom_ratio, scroll_offset.y * zoom_ratio))
       @last_zoom_factor = current_zoom
       invalidate_dimension_caches
       @cached_total_width = nil
@@ -830,21 +849,21 @@ module CrymbleUI
         "matrix_content_#{id}",
         content_bounds,
         z_index: base_z + CONTENT_LAYER_Z,
-        background_color: @content_background_color,
+        background_color: content_background_color, # getter (live); pull-based layer keeps it fresh
         owner_widget: self
       )
       {% if flag?(:DEBUG_BLIT) %}
         if is_new
           File.open("/tmp/blit_trace.log", "a") do |f|
-            f.puts ">>> NEW CONTENT LAYER CREATED (scroll=#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) active_cells=#{@active_cells.size}"
+            f.puts ">>> NEW CONTENT LAYER CREATED (scroll=#{scroll_offset.x.round(1)},#{scroll_offset.y.round(1)}) active_cells=#{@active_cells.size}"
           end
         end
       {% end %}
       @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
-      @content_layer.not_nil!.background_color = @content_background_color
+      @content_layer.not_nil!.background_color = content_background_color # cached fallback; pull keeps it live
       @content_layer.not_nil!.viewport_cache = true
       @content_layer.not_nil!.cache_extent = CACHE_EXTENT
-      @content_layer.not_nil!.scroll_offset = @scroll_offset
+      @content_layer.not_nil!.scroll_offset = scroll_offset
     end
 
     # Create or update the cursor overlay layer (non-scrolling highlight bands).
@@ -925,20 +944,20 @@ module CrymbleUI
       scroll_view = @content_scroll_view.not_nil!
 
       # Clamp scroll offset to valid range after resize
-      clamped_x = @scroll_offset.x.clamp(0.0, max_content_scroll_x)
-      clamped_y = @scroll_offset.y.clamp(0.0, max_content_scroll_y)
-      if clamped_x != @scroll_offset.x || clamped_y != @scroll_offset.y
-        @scroll_offset = Vec2.new(clamped_x, clamped_y)
+      clamped_x = scroll_offset.x.clamp(0.0, max_content_scroll_x)
+      clamped_y = scroll_offset.y.clamp(0.0, max_content_scroll_y)
+      if clamped_x != scroll_offset.x || clamped_y != scroll_offset.y
+        @scroll_offset.set(Vec2.new(clamped_x, clamped_y))
       end
 
-      if @scroll_offset != @last_synced_scroll_offset
+      if scroll_offset != @last_synced_scroll_offset
         # VirtualMatrix changed → push to ScrollView
-        scroll_view.set_scroll_offset_for_sync(@scroll_offset)
+        scroll_view.set_scroll_offset_for_sync(scroll_offset)
       elsif scroll_view.scroll_offset != @last_synced_scroll_offset
         # ScrollView changed (scrollbar interaction) → pull from ScrollView
-        @scroll_offset = scroll_view.scroll_offset
+        @scroll_offset.set(scroll_view.scroll_offset)
       end
-      @last_synced_scroll_offset = @scroll_offset
+      @last_synced_scroll_offset = scroll_offset
     end
 
     # Create ruler widgets on sticky layers (called from perform_layout)
@@ -1016,38 +1035,45 @@ module CrymbleUI
     # Re-add ruler widgets to sticky layers after widget lists are cleared.
     # Called from update_visible_cells and ensure_layer_widgets_synced.
     private def add_ruler_widgets_to_layers
-      return unless @show_rulers
+      return unless show_rulers
       sv = @content_scroll_view
       return unless sv
 
+      # render_layer routes each ruler's invalidation (the Dynamic node's on_dirty
+      # scroll-auto-capture enqueue) to its STICKY layer — the rulers live on the sticky layers but their
+      # parent is the matrix, so propagate_to_layer would otherwise mark the wrong layer. Re-set here (not
+      # just at creation) so it tracks the current sticky layer across rebuilds.
       if crw = @col_ruler_widget
         sv.sticky_row_layer.try do |l|
           l.widgets << crw unless l.widgets.includes?(crw)
+          crw.render_layer = l
         end
       end
       if rrw = @row_ruler_widget
         sv.sticky_col_layer.try do |l|
           l.widgets << rrw unless l.widgets.includes?(rrw)
+          rrw.render_layer = l
         end
       end
       if corner = @corner_ruler_widget
         sv.sticky_corner_layer.try do |l|
           l.widgets << corner unless l.widgets.includes?(corner)
+          corner.render_layer = l
         end
       end
       if strip = @corner_row_strip_widget
         sv.sticky_corner_layer.try do |l|
           l.widgets << strip unless l.widgets.includes?(strip)
+          strip.render_layer = l
         end
       end
     end
 
-    # Mark sticky layers dirty so ruler widgets re-render with new scroll offset.
-    # Ruler widgets read scroll_offset in to_primitives (CachePolicy::Never),
-    # but their parent is VirtualMatrix (not the sticky layer), so mark_needs_render
-    # on the widget propagates to the wrong layer. Mark the layers directly.
+    # Mark the ruler widgets dirty for a NON-scroll change (column/row resize — sizes aren't Sources, so
+    # the Dynamic rulers' auto-capture doesn't cover them). Scroll is handled by auto-capture now. Marks
+    # the sticky layers directly (belt-and-suspenders with the rulers' render_layer routing).
     private def mark_ruler_widgets_dirty
-      return unless @show_rulers
+      return unless show_rulers
       sv = @content_scroll_view
       return unless sv
       if (crw = @col_ruler_widget) && (rl = sv.sticky_row_layer)
@@ -1066,32 +1092,45 @@ module CrymbleUI
       end
     end
 
-    # Sync scroll offset from ScrollView when user scrolls via scrollbar.
-    # Called via ScrollView.on_scroll_changed callback (doesn't trigger layout).
-    # Uses the same direct update_visible_cells call as on_mouse_wheel —
-    # the early-exit optimization (O(log n) when visible indices unchanged)
-    # makes redundant calls per frame cheap.
-    private def sync_from_scroll_view(new_offset : Vec2)
-      return if @scroll_offset == new_offset
-
-      @scroll_offset = new_offset
-      @last_synced_scroll_offset = new_offset
-
-      # Sync layer scroll offset (compositor uses this for viewport shifting)
+    # The canonical scroll application. Every scroll-changing path writes scroll_offset
+    # then routes through here, so the application — composite (content layer) → optional ScrollView sync
+    # → spatial recenter (update_visible_cells) → render + cross-layer marks — can never diverge between
+    # paths (the duplicated inline blocks in wheel/snap/sync were the prior kludge). sync_to_sv=false for
+    # the inbound sync_from_scroll_view path: the offset came FROM the ScrollView, so syncing back loops.
+    private def apply_scroll(sync_to_sv : Bool = true) : Nil
+      @last_synced_scroll_offset = scroll_offset
       if layer = @content_layer
-        layer.scroll_offset = new_offset
+        layer.scroll_offset = scroll_offset
       end
-
-      # Update visible cells directly (same as on_mouse_wheel path)
-      vp_w = @content_layer.try(&.bounds.width) || bounds.width
-      vp_h = @content_layer.try(&.bounds.height) || bounds.height
-      if vp_w > 0 && vp_h > 0
-        update_visible_cells(vp_w, vp_h)
+      if sync_to_sv && (sv = @content_scroll_view)
+        sv.set_scroll_offset_for_sync(scroll_offset)
       end
+      vp_w = @content_layer.try(&.bounds.width) || @bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || @bounds.height
+      update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+      mark_needs_render
+      # Rulers (Dynamic) auto-capture scroll_offset → their nodes enqueue selectively via on_dirty, so
+      # no mark_ruler_widgets_dirty on scroll. The cursor overlay is Never (flash animation, no node) →
+      # still marked explicitly here.
+      mark_cursor_overlay_dirty
+    end
 
+    # Sync scroll offset from ScrollView when the user scrolls via the scrollbar (thumb drag /
+    # track). Called via ScrollView.on_scroll_changed — potentially on EVERY mouse-move event.
+    # DEFERRED (5e2f3ee): apply only the cheap compositing offset now and flag the expensive
+    # cell management for pre_render_flush, so a fast multi-event drag coalesces to ONE update
+    # per frame (for the only scroll position the user sees) instead of backing the event loop
+    # up into a multi-second freeze. The offset came FROM the ScrollView, so don't sync back.
+    private def sync_from_scroll_view(new_offset : Vec2)
+      return if scroll_offset == new_offset
+      @scroll_offset.set(new_offset)
+      @last_synced_scroll_offset = new_offset
+      if layer = @content_layer
+        layer.scroll_offset = new_offset # compositor shifts the cached content immediately
+      end
+      @pending_scroll_update = true      # cell create/destroy deferred to pre_render_flush
       mark_needs_render
       mark_cursor_overlay_dirty
-      mark_ruler_widgets_dirty
     end
 
     # === DEFERRED SCROLL FLUSH ===
@@ -1100,6 +1139,17 @@ module CrymbleUI
     # Flushes deferred scroll/invalidation updates so cells are created/destroyed once per frame,
     # not on every mouse event during scrollbar thumb drag.
     def pre_render_flush
+      # Deferred scroll flush (5e2f3ee): sync_from_scroll_view only flagged the change and
+      # shifted the compositor; run the expensive cell create/destroy here, once per frame —
+      # not once per queued mouse event. Must run BEFORE the change-animation scan below so it
+      # reads the up-to-date @visible_rows/@visible_cols.
+      if @pending_scroll_update
+        @pending_scroll_update = false
+        vp_w = @content_layer.try(&.bounds.width) || bounds.width
+        vp_h = @content_layer.try(&.bounds.height) || bounds.height
+        update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+      end
+
       # Change animation: call start_frame + scan visible cells for value changes
       if adapter = @adapter
         adapter.start_frame
@@ -1235,6 +1285,18 @@ module CrymbleUI
       col_scroll_order = @cached_col_scroll_order.not_nil!
       row_scroll_order = @cached_row_scroll_order.not_nil!
 
+      # Inverse permutation (physical → scroll-order position) for O(1) shifted-membership.
+      col_scroll_rank = @cached_col_scroll_rank ||= begin
+        inv = Array(Int32).new(col_scroll_order.size, 0)
+        col_scroll_order.each_with_index { |phys, i| inv[phys] = i }
+        inv
+      end
+      row_scroll_rank = @cached_row_scroll_rank ||= begin
+        inv = Array(Int32).new(row_scroll_order.size, 0)
+        row_scroll_order.each_with_index { |phys, i| inv[phys] = i }
+        inv
+      end
+
       # Build/use cached cumulative arrays (O(n) once per resize, O(1) thereafter)
       col_cumulative = @cached_col_cumulative ||= col_scroll_order.map { |el| col_sizes[el] }.accumulate { |x, y| x + y }
       row_cumulative = @cached_row_cumulative ||= row_scroll_order.map { |el| row_sizes[el] }.accumulate { |x, y| x + y }
@@ -1247,10 +1309,10 @@ module CrymbleUI
       # (no ruler), but scroll_offset is in content-space (includes ruler width/height).
       ruler_x = ruler_col_width_pixels.to_i32
       ruler_y = ruler_row_height_pixels.to_i32
-      min_x = {(@scroll_offset.x.floor.to_i32 - ruler_x), 0_i32}.max
-      max_x = {((@scroll_offset.x + viewport_width).ceil.to_i32 - ruler_x), 0_i32}.max
-      min_y = {(@scroll_offset.y.floor.to_i32 - ruler_y), 0_i32}.max
-      max_y = {((@scroll_offset.y + viewport_height).ceil.to_i32 - ruler_y), 0_i32}.max
+      min_x = {(scroll_offset.x.floor.to_i32 - ruler_x), 0_i32}.max
+      max_x = {((scroll_offset.x + viewport_width).ceil.to_i32 - ruler_x), 0_i32}.max
+      min_y = {(scroll_offset.y.floor.to_i32 - ruler_y), 0_i32}.max
+      max_y = {((scroll_offset.y + viewport_height).ceil.to_i32 - ruler_y), 0_i32}.max
 
       # O(log n) bsearch to determine boundary key
       col_num_shifted = col_cumulative.bsearch_index { |p| p >= min_x } || col_scroll_order.size
@@ -1263,25 +1325,25 @@ module CrymbleUI
 
       # Full sticky_fast() only when boundary key changes (column/row shifts in or out)
       if @last_col_sticky_key == col_sticky_key && (cached = @last_col_sticky_result)
-        col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted = cached
+        col_offset, col_positions, col_shifting_index, visible_cols, col_shifted = cached
       else
-        col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
-          col_sizes, col_scroll_order, col_num_shifted, col_cumulative, col_physical_cum,
+        col_offset, col_positions, col_shifting_index, visible_cols, col_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
+          col_sizes, col_scroll_order, col_scroll_rank, col_num_shifted, col_cumulative, col_physical_cum,
           min_x, max_x, sticky_col_count)
         @last_col_sticky_key = col_sticky_key
-        @last_col_sticky_result = {col_offset, col_positions, col_shifting_index, visible_cols, col_sorted_shifted}
-        @cached_col_sorted_shifted = col_sorted_shifted
+        @last_col_sticky_result = {col_offset, col_positions, col_shifting_index, visible_cols, col_shifted}
+        @cached_col_shifted = col_shifted
       end
 
       if @last_row_sticky_key == row_sticky_key && (cached = @last_row_sticky_result)
-        row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted = cached
+        row_offset, row_positions, row_shifting_index, visible_rows, row_shifted = cached
       else
-        row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
-          row_sizes, row_scroll_order, row_num_shifted, row_cumulative, row_physical_cum,
+        row_offset, row_positions, row_shifting_index, visible_rows, row_shifted = Widgets::VirtualMatrix::StickyMath.sticky_fast(
+          row_sizes, row_scroll_order, row_scroll_rank, row_num_shifted, row_cumulative, row_physical_cum,
           min_y, max_y, sticky_row_count)
         @last_row_sticky_key = row_sticky_key
-        @last_row_sticky_result = {row_offset, row_positions, row_shifting_index, visible_rows, row_sorted_shifted}
-        @cached_row_sorted_shifted = row_sorted_shifted
+        @last_row_sticky_result = {row_offset, row_positions, row_shifting_index, visible_rows, row_shifted}
+        @cached_row_shifted = row_shifted
       end
 
       # Public API: only report cols/rows physically within viewport (sticky always included)
@@ -1311,7 +1373,7 @@ module CrymbleUI
         # Log early-exit decisions
         File.open("/tmp/blit_trace.log", "a") do |f|
           cell_11_exists = @active_cells.has_key?({1, 1})
-          f.puts "UVC: scroll=#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)} changed=#{exact_indices_changed} cell_11=#{cell_11_exists}"
+          f.puts "UVC: scroll=#{scroll_offset.x.round(1)},#{scroll_offset.y.round(1)} changed=#{exact_indices_changed} cell_11=#{cell_11_exists}"
         end
       {% end %}
 
@@ -1320,7 +1382,7 @@ module CrymbleUI
         {% if flag?(:PERF_LOG) %}
           _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
           if _uvc_elapsed > 0.1
-            File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC EARLY-EXIT: #{_uvc_elapsed.round(2)}ms scroll=#{@scroll_offset.x.round(0)},#{@scroll_offset.y.round(0)} active=#{@active_cells.size} sync=#{@layer_widgets_need_sync}" }
+            File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC EARLY-EXIT: #{_uvc_elapsed.round(2)}ms scroll=#{scroll_offset.x.round(0)},#{scroll_offset.y.round(0)} active=#{@active_cells.size} sync=#{@layer_widgets_need_sync}" }
           end
         {% end %}
         {% if flag?(:CURSOR_PERF) %}
@@ -1350,17 +1412,17 @@ module CrymbleUI
       # Compute creation/destruction regions with hysteresis buffering.
       # Creation region (CREATION_BUFFER) ⊂ Destruction region (DESTRUCTION_BUFFER),
       # so cells are created before they become visible and only destroyed well past the edge.
-      creation_cols = compute_region_cached(CREATION_BUFFER, viewport_width, @scroll_offset.x,
-        col_cumulative, col_physical_cum, col_scroll_order, sticky_cols_val,
+      creation_cols = compute_region_cached(CREATION_BUFFER, viewport_width, scroll_offset.x,
+        col_cumulative, col_physical_cum, col_scroll_rank, sticky_cols_val,
         @last_creation_col_key, @last_creation_col_result) { |k, r| @last_creation_col_key = k; @last_creation_col_result = r }
-      creation_rows = compute_region_cached(CREATION_BUFFER, viewport_height, @scroll_offset.y,
-        row_cumulative, row_physical_cum, row_scroll_order, sticky_rows_val,
+      creation_rows = compute_region_cached(CREATION_BUFFER, viewport_height, scroll_offset.y,
+        row_cumulative, row_physical_cum, row_scroll_rank, sticky_rows_val,
         @last_creation_row_key, @last_creation_row_result) { |k, r| @last_creation_row_key = k; @last_creation_row_result = r }
-      destruction_cols = compute_region_cached(DESTRUCTION_BUFFER, viewport_width, @scroll_offset.x,
-        col_cumulative, col_physical_cum, col_scroll_order, sticky_cols_val,
+      destruction_cols = compute_region_cached(DESTRUCTION_BUFFER, viewport_width, scroll_offset.x,
+        col_cumulative, col_physical_cum, col_scroll_rank, sticky_cols_val,
         @last_destruction_col_key, @last_destruction_col_result) { |k, r| @last_destruction_col_key = k; @last_destruction_col_result = r }
-      destruction_rows = compute_region_cached(DESTRUCTION_BUFFER, viewport_height, @scroll_offset.y,
-        row_cumulative, row_physical_cum, row_scroll_order, sticky_rows_val,
+      destruction_rows = compute_region_cached(DESTRUCTION_BUFFER, viewport_height, scroll_offset.y,
+        row_cumulative, row_physical_cum, row_scroll_rank, sticky_rows_val,
         @last_destruction_row_key, @last_destruction_row_result) { |k, r| @last_destruction_row_key = k; @last_destruction_row_result = r }
 
       # Only manage cell widgets if we have an adapter AND indices changed
@@ -1413,7 +1475,7 @@ module CrymbleUI
               handle_cells << topleft if rows_intersect && cols_intersect
             else
               # Content (non-sticky) merged cells: use dynamic handle
-              handle = dynamic_handle_cell(cell, row_sorted_shifted, col_sorted_shifted)
+              handle = dynamic_handle_cell(cell, row_shifted, col_shifted)
               next unless handle  # Merged region entirely invisible
               next if handle_cells.includes?(handle)  # Already added
 
@@ -1436,7 +1498,7 @@ module CrymbleUI
             is_sticky = (bounding[0][0] < sticky_rows_val || bounding[0][1] < sticky_cols_val)
             if is_sticky
               keep_alive_handles << bounding[0]
-            elsif is_dynamic_handle_cell?(cell, row_sorted_shifted, col_sorted_shifted)
+            elsif is_dynamic_handle_cell?(cell, row_shifted, col_shifted)
               keep_alive_handles << cell
             end
           else
@@ -1453,13 +1515,13 @@ module CrymbleUI
           new_cells_set = handle_cells.reject { |h| @active_cells.has_key?(h) }
           if cells_to_remove.size > 0 || new_cells_set.size > 0
             File.open("/tmp/blit_trace.log", "a") do |f|
-              f.puts "CELL_CHANGE: scroll=#{@scroll_offset}"
+              f.puts "CELL_CHANGE: scroll=#{scroll_offset}"
               f.puts "  creating=#{new_cells_set.to_a.sort}" if new_cells_set.size > 0
               f.puts "  destroying=#{cells_to_remove.to_a.sort}" if cells_to_remove.size > 0
             end
           end
           # Log active cells at scroll=0
-          if @scroll_offset.x < 1.0
+          if scroll_offset.x < 1.0
             File.open("/tmp/blit_trace.log", "a") do |f|
               f.puts "ACTIVE_CELLS_AT_0: #{@active_cells.keys.to_a.sort}"
             end
@@ -1485,7 +1547,7 @@ module CrymbleUI
           col_sizes, row_sizes,
           col_offset, col_positions, col_shifting_index,
           row_offset, row_positions, row_shifting_index,
-          row_sorted_shifted, col_sorted_shifted)
+          row_shifted, col_shifted)
 
         # Create cells that are newly visible and are handle cells
         # Layout each cell inline when created (fixed content-space position)
@@ -1520,9 +1582,9 @@ module CrymbleUI
           y = ruler_row_height_pixels.to_i + row_physical_cum[canonical[0]]
           bounding = get_bounding_box(key)
 
-          # Use visible compound size if available (WU3: partial scroll shrinking)
+          # Use visible compound size if available (partial scroll shrinking)
           # Bug A fix: Content cells (non-sticky) use FIXED sizes in content space;
-          # only sticky cells need WU3 viewport-relative sizing.
+          # only sticky cells need viewport-relative sizing.
           is_content_cell = row >= sticky_row_count && col >= sticky_col_count
           if !is_content_cell && (compound_size = compound_visible_sizes[key]?)
             cell_width = compound_size[0]
@@ -1541,7 +1603,7 @@ module CrymbleUI
           {% if flag?(:DEBUG_BLIT) %}
             if key == {1, 1}
               File.open("/tmp/blit_trace.log", "a") do |f|
-                f.puts "CELL_LAYOUT(1,1): x=#{x} y=#{y} col_offset=#{creation_col_offset} col_positions[1]=#{creation_col_positions[1]?} scroll=#{@scroll_offset}"
+                f.puts "CELL_LAYOUT(1,1): x=#{x} y=#{y} col_offset=#{creation_col_offset} col_positions[1]=#{creation_col_positions[1]?} scroll=#{scroll_offset}"
               end
             end
           {% end %}
@@ -1594,7 +1656,7 @@ module CrymbleUI
           @content_layer.try(&.mark_needs_clear_and_render)
         end
 
-        # Re-layout existing COMPOUND cells with updated visible sizes (WU3)
+        # Re-layout existing COMPOUND cells with updated visible sizes
         # Only sticky compound cells need re-layout because their visible portion changes with scroll.
         # Content compound cells have FIXED sizes in content space; buffer_origin handles viewport shift.
         if compound_visible_sizes.any?
@@ -1649,7 +1711,7 @@ module CrymbleUI
       {% if flag?(:PERF_LOG) %}
         _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
         if _uvc_elapsed > 0.1
-          File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC FULL: #{_uvc_elapsed.round(2)}ms scroll=#{@scroll_offset.x.round(0)},#{@scroll_offset.y.round(0)} active=#{@active_cells.size} new=#{new_cells_count || 0}" }
+          File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC FULL: #{_uvc_elapsed.round(2)}ms scroll=#{scroll_offset.x.round(0)},#{scroll_offset.y.round(0)} active=#{@active_cells.size} new=#{new_cells_count || 0}" }
         end
       {% end %}
       {% if flag?(:CURSOR_PERF) %}
@@ -1702,10 +1764,10 @@ module CrymbleUI
       end
 
       {% if flag?(:DEBUG_BLIT) %}
-        if @scroll_offset.x < 1.0
+        if scroll_offset.x < 1.0
           File.open("/tmp/blit_trace.log", "a") do |f|
             content_count = content_layer.widgets.size
-            f.puts "FINAL_STATE: scroll=#{@scroll_offset} active=#{@active_cells.size} content_layer=#{content_count}"
+            f.puts "FINAL_STATE: scroll=#{scroll_offset} active=#{@active_cells.size} content_layer=#{content_count}"
             if cell_1_1 = @active_cells[{1, 1}]?
               f.puts "  CELL(1,1): bounds=#{cell_1_1.bounds} has_backend=#{!cell_1_1.widget_backend.nil?}"
             end
@@ -1781,14 +1843,14 @@ module CrymbleUI
     private def compute_region_cached(
         buffer : Float64, viewport_size : Float64, scroll_pos : Float64,
         cumulative : Array(Int32), physical_cum : Array(Int32),
-        scroll_order : Array(Int32), sticky_count : Int32,
+        scroll_rank : Array(Int32), sticky_count : Int32,
         last_key : Tuple(Int32, Int32?)?, last_result : Array(Int32)?,
         & : Tuple(Int32, Int32?), Array(Int32) ->
     ) : Array(Int32)
       min_pos = (scroll_pos - buffer).floor.to_i32.clamp(0, Int32::MAX)
       max_pos = (scroll_pos + viewport_size + buffer).ceil.to_i32
 
-      ns = cumulative.bsearch_index { |p| p >= min_pos } || scroll_order.size
+      ns = cumulative.bsearch_index { |p| p >= min_pos } || scroll_rank.size
       ib = cumulative.bsearch_index { |p| p > max_pos }
       key = {ns, ib}
 
@@ -1797,7 +1859,7 @@ module CrymbleUI
       end
 
       result = Widgets::VirtualMatrix::StickyMath.visible_indices_in_range(
-        physical_cum, scroll_order, ns, min_pos, max_pos, sticky_count)
+        physical_cum, scroll_rank, ns, min_pos, max_pos, sticky_count)
       result = result.select { |i| i < sticky_count || (physical_cum[i] < max_pos && physical_cum[i + 1] > min_pos) }
       yield key, result
       result
@@ -1816,7 +1878,7 @@ module CrymbleUI
       (min_row..max_row).sum { |r| row_sizes[r]? || row_height_pixels(r).to_i32 }.to_f64
     end
 
-    # === WU3: Compute visible compound sizes using viewport StickyMath ===
+    # === Compute visible compound sizes using viewport StickyMath ===
     #
     # Compound (merged) cells span multiple rows/columns. When partially scrolled
     # off-screen, their visible size shrinks. This computes {width, height} for each
@@ -1830,7 +1892,7 @@ module CrymbleUI
         col_sizes : Array(Int32), row_sizes : Array(Int32),
         col_offset : Int32, col_positions : Hash(Int32, Int32), col_shifting_index : Int32,
         row_offset : Int32, row_positions : Hash(Int32, Int32), row_shifting_index : Int32,
-        row_sorted_shifted : Array(Int32), col_sorted_shifted : Array(Int32)
+        row_shifted : ShiftedSet, col_shifted : ShiftedSet
     ) : {Hash(Tuple(Int32, Int32), {Float64, Float64}), Hash(Tuple(Int32, Int32), {Float64, Float64})}
       compound_visible_sizes = Hash(Tuple(Int32, Int32), {Float64, Float64}).new
       compound_clipped_pos = Hash(Tuple(Int32, Int32), {Float64, Float64}).new
@@ -1842,7 +1904,7 @@ module CrymbleUI
         bounding = get_bounding_box(handle_key)
         next if bounding[0] == bounding[1]  # Skip non-merged
 
-        handle = dynamic_handle_cell(handle_key, row_sorted_shifted, col_sorted_shifted)
+        handle = dynamic_handle_cell(handle_key, row_shifted, col_shifted)
         next unless handle
 
         w = 0.0
@@ -1855,7 +1917,7 @@ module CrymbleUI
           pos_x = (col_offset + (col_positions[ci]? || 0)).to_f64
           pos_clipped_x = pos_x
           if ci == col_shifting_index
-            pos_clipped_x = {@scroll_offset.x, pos_x}.max
+            pos_clipped_x = {scroll_offset.x, pos_x}.max
           end
 
           w += col_sizes[ci].to_f64 + (pos_x - pos_clipped_x)
@@ -1863,7 +1925,7 @@ module CrymbleUI
           if ci == handle[1]
             pos_clipped_y_for_handle = (row_offset + (row_positions[handle[0]]? || 0)).to_f64
             if handle[0] == row_shifting_index
-              pos_clipped_y_for_handle = {@scroll_offset.y, pos_clipped_y_for_handle}.max
+              pos_clipped_y_for_handle = {scroll_offset.y, pos_clipped_y_for_handle}.max
             end
             compound_clipped_pos[handle_key] = {pos_clipped_x, pos_clipped_y_for_handle}
           end
@@ -1876,7 +1938,7 @@ module CrymbleUI
           pos_y = (row_offset + (row_positions[ri]? || 0)).to_f64
           pos_clipped_y = pos_y
           if ri == row_shifting_index
-            pos_clipped_y = {@scroll_offset.y, pos_y}.max
+            pos_clipped_y = {scroll_offset.y, pos_y}.max
           end
 
           h += row_sizes[ri].to_f64 + (pos_y - pos_clipped_y)
@@ -1938,8 +2000,10 @@ module CrymbleUI
       @last_row_sticky_key = nil
       @last_col_sticky_result = nil
       @last_row_sticky_result = nil
-      @cached_col_sorted_shifted = nil
-      @cached_row_sorted_shifted = nil
+      @cached_col_shifted = nil
+      @cached_row_shifted = nil
+      @cached_col_scroll_rank = nil
+      @cached_row_scroll_rank = nil
       @last_creation_col_key = nil
       @last_creation_row_key = nil
       @last_creation_col_result = nil
@@ -2048,15 +2112,16 @@ module CrymbleUI
         @force_cell_update = true
 
         # Clamp cursor to new matrix size if needed
-        row = @cursor_rc[0].clamp(0, {@rows - 1, 0}.max)
-        col = @cursor_rc[1].clamp(0, {@cols - 1, 0}.max)
-        @cursor_rc = {row, col}
+        rc = cursor_rc
+        row = rc[0].clamp(0, {@rows - 1, 0}.max)
+        col = rc[1].clamp(0, {@cols - 1, 0}.max)
+        self.cursor_rc = {row, col}
 
         # Clamp scroll offset to new grid bounds (e.g. after switching to smaller adapter)
-        @scroll_offset = Vec2.new(
-          @scroll_offset.x.clamp(0.0, max_content_scroll_x),
-          @scroll_offset.y.clamp(0.0, max_content_scroll_y)
-        )
+        @scroll_offset.set(Vec2.new(
+          scroll_offset.x.clamp(0.0, max_content_scroll_x),
+          scroll_offset.y.clamp(0.0, max_content_scroll_y)
+        ))
 
         # Transfer pending invalidation (e.g. from a cross-owner data change that
         # fired on the old widget before reconciliation rebound the adapter callbacks).
@@ -2068,6 +2133,19 @@ module CrymbleUI
         if adapter = @adapter
           bind_adapter_invalidation(adapter)
         end
+
+        # Tear down the migrated proxy-focus pointer. auto_copy_reconcile_properties
+        # copied @proxy_focused_widget/@proxy_focused_rc from the old widget, but they point
+        # at a cell of the OLD tree — @active_cells is recreated fresh (@force_cell_update
+        # above), so the dead pointer can never match a live cell. Every clear-guard is
+        # `if @proxy_focused_widget == <live cell>`, and the re-establish in update_visible_cells
+        # is gated `if @proxy_focused_widget.nil?` — so a non-nil dead pointer is never replaced,
+        # silently routing forwarded text/keys to the orphan (lost edits). clear_proxy_focus
+        # commits the in-flight edit to the (just-rebound) adapter — matching the other proxy
+        # teardown paths (flush_invalidate_all, flush_cell_invalidations, zoom) — stops the
+        # orphan's blink timer, and nils the pointers so proxy re-derives onto the live cursor
+        # cell on the next update_visible_cells.
+        clear_proxy_focus
 
         # Transfer cursor flash: cancel old timer, restart on new instance if focused.
         # Without this, invalidate_all! → rebuild orphans the timer on the dead instance.

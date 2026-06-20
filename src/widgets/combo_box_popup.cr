@@ -80,6 +80,20 @@ module CrymbleUI
     @flash_timer_id : Int32?
     @flash_state : Bool = true
 
+    # Checkable mode (opt-in; default off → inert for single-select ComboBox)
+    # When non-nil: provider returns current checked state for a given original index
+    @checked_provider : (Int32 -> Bool)?
+    # Called when a gutter is clicked; the argument is the ORIGINAL item index
+    property on_toggle : Proc(Int32, Nil)?
+    # Called when tristate header is clicked (toggle all/none over ALL items)
+    property on_toggle_all : Proc(Bool, Nil)?
+    # Tristate header item (real child widget, inserted when checkable mode is enabled)
+    @header_item : ComboBoxItem?
+
+    def checkable? : Bool
+      !@checked_provider.nil?
+    end
+
     # Callbacks
     property on_select : Proc(Int32, String, Nil)?
     property on_cancel : Proc(Nil)?
@@ -112,13 +126,54 @@ module CrymbleUI
       @highlighted_index
     end
 
+    # Enable checkable mode by supplying a function that returns the current
+    # checked state for a given ORIGINAL item index.
+    # Also rebuilds the items with checkable state and inserts a tristate header.
+    # Call before layout (i.e., before the popup is added to the window overlays).
+    def checked_provider=(provider : Int32 -> Bool)
+      @checked_provider = provider
+      rebuild_items   # re-build items now that the provider is set
+      rebuild_header
+    end
+
+    # Update the checked_provider WITHOUT rebuilding items (for use in copy_state_from
+    # when items already exist with valid layout/bounds). Only updates the provider
+    # reference so future refreshes use the new closure; callers should follow up
+    # with refresh_checked_states to update visual state.
+    def update_checked_provider(provider : Int32 -> Bool)
+      @checked_provider = provider
+    end
+
+    # Update the checked state shown in all currently-built item widgets.
+    # Called by MultiComboBox after a toggle so the popup reflects the new state
+    # without closing and reopening.
+    def refresh_checked_states
+      provider = @checked_provider
+      return unless provider
+
+      @item_widgets.each_with_index do |item, idx|
+        original_index = @all_items.index(@filtered_items[idx]?) || 0
+        item.checked = provider.call(original_index)
+        item.mark_needs_render
+      end
+
+      # Refresh the header tristate state
+      refresh_header_state
+      mark_needs_render
+    end
+
+    # Expose the header item for testing
+    def header_item : ComboBoxItem?
+      @header_item
+    end
+
     def initialize(
       items : Array(String) = [] of String,
       selected_index : Int32 = 0,
       max_height : Float64? = nil,
       width : Float64? = nil,
-      background_color : Color = Theme.current.popup_background,
-      border_color : Color = Theme.current.popup_border,
+      background_color : Color? = nil,
+      border_color : Color? = nil,
       padding : Float64 = 4.0,
       id : String? = nil,
       @text_background_color : Color? = nil,
@@ -135,6 +190,10 @@ module CrymbleUI
       @text_input = TextInput.new(value: "", width: width)
       @vstack = VStack.new
       @scroll_view = ScrollView.new
+      @checked_provider = nil
+      @on_toggle = nil
+      @on_toggle_all = nil
+      @header_item = nil
 
       super(
         width: width,
@@ -166,8 +225,8 @@ module CrymbleUI
     # Legacy constructor for compatibility
     def initialize(
       max_height : Float64? = nil,
-      background_color : Color = Theme.current.popup_background,
-      border_color : Color = Theme.current.popup_border,
+      background_color : Color? = nil,
+      border_color : Color? = nil,
       padding : Float64 = 0.0,
       id : String? = nil
     )
@@ -184,6 +243,10 @@ module CrymbleUI
       @text_background_color = nil
       @text_background_colors = nil
       @editable = false
+      @checked_provider = nil
+      @on_toggle = nil
+      @on_toggle_all = nil
+      @header_item = nil
 
       super(
         width: nil,
@@ -323,7 +386,8 @@ module CrymbleUI
       @on_select.try(&.call(original_index, value))
     end
 
-    # Rebuild item widgets from filtered items
+    # Rebuild item widgets from filtered items.
+    # In checkable mode the items get ✓/☐ gutters and on_toggle is wired.
     private def rebuild_items
       @vstack.children.clear
       @item_widgets.clear
@@ -342,6 +406,15 @@ module CrymbleUI
         item = ComboBoxItem.new(item_text, text_background_color: item_text_bg) do |_value|
           @on_select.try(&.call(original_index, item_text))
         end
+
+        # Checkable mode: set checked state + wire gutter toggle
+        if provider = @checked_provider
+          item.checked = provider.call(original_index)
+          item.on_toggle = -> {
+            @on_toggle.try(&.call(original_index))
+          }
+        end
+
         item.highlighted = (idx == @highlighted_index)
         item.parent = @vstack
         @vstack.children << item
@@ -350,6 +423,54 @@ module CrymbleUI
 
       # Mark children as needing layout
       @vstack.mark_needs_layout
+      mark_needs_layout
+    end
+
+    # ========== CHECKABLE MODE HELPERS ==========
+
+    # Height contributed by the header row (0 if not checkable)
+    private def header_item_height : Float64
+      @header_item ? ComboBoxItem::PADDING * 2 + FontSizing.calculate_size(0) : 0.0
+    end
+
+    # Build (or rebuild) the tristate "select all / none" header item.
+    # The header is a real child widget so it receives normal hit dispatch.
+    private def rebuild_header
+      # Remove any old header from @children
+      if old_hdr = @header_item
+        @children.delete(old_hdr)
+      end
+
+      all_checked = @all_items.size > 0 && @all_items.each_index.all? do |i|
+        @checked_provider.try(&.call(i)) || false
+      end
+
+      hdr = ComboBoxItem.new("(select all)", text_background_color: nil) do |_|
+        # body-click on the header: toggle all/none
+        new_all = !all_checked
+        @on_toggle_all.try(&.call(new_all))
+      end
+      hdr.checked = all_checked
+
+      # Gutter click on the header also toggles all/none
+      hdr.on_toggle = -> {
+        new_all = !all_checked
+        @on_toggle_all.try(&.call(new_all))
+      }
+
+      hdr.parent = self
+      # Insert header as the second child (after TextInput, before ScrollView)
+      # Find TextInput position and insert after it
+      ti_idx = @children.index(@text_input) || 0
+      @children.insert(ti_idx + 1, hdr)
+      @header_item = hdr
+    end
+
+    # Update the header tristate state after a toggle by rebuilding it.
+    private def refresh_header_state
+      return unless @header_item
+      return unless @checked_provider
+      rebuild_header
       mark_needs_layout
     end
 
@@ -389,9 +510,12 @@ module CrymbleUI
       ))
       vstack_size = @vstack.measure(vstack_constraints)
 
+      # Header height (checkable mode only)
+      header_h = header_item_height
+
       # Total size
-      width = @explicit_width || [text_input_size.width, vstack_size.width].max + @padding * 2
-      height = text_input_size.height + vstack_size.height + @padding * 2
+      width = @explicit_width || [text_input_size.width, vstack_size.width].max + padding * 2
+      height = text_input_size.height + header_h + vstack_size.height + padding * 2
 
       # Respect max_height if set
       if max_h = @max_height
@@ -418,21 +542,31 @@ module CrymbleUI
 
       # Layout TextInput at top
       text_constraints = BoxConstraints.tight(Size.new(
-        @bounds.width - @padding * 2,
+        @bounds.width - padding * 2,
         text_input_height
       ))
-      @text_input.layout(text_constraints, Vec2.new(@padding, @padding))
+      @text_input.layout(text_constraints, Vec2.new(padding, padding))
 
-      # Layout ScrollView below TextInput
-      # Use ACTUAL text input height (from bounds) to avoid gap from formula mismatch
+      # Layout header (if checkable mode)
       actual_text_input_height = @text_input.bounds.height
-      scroll_top = @padding + actual_text_input_height
-      available_height = @bounds.height - scroll_top - @padding
+      header_top = padding + actual_text_input_height
+      header_h = header_item_height
+      if hdr = @header_item
+        hdr_constraints = BoxConstraints.tight(Size.new(
+          @bounds.width - padding * 2,
+          header_h
+        ))
+        hdr.layout(hdr_constraints, Vec2.new(padding, header_top))
+      end
+
+      # Layout ScrollView below TextInput (and below header if present)
+      scroll_top = header_top + header_h
+      available_height = @bounds.height - scroll_top - padding
       scroll_constraints = BoxConstraints.tight(Size.new(
-        @bounds.width - @padding * 2,
+        @bounds.width - padding * 2,
         available_height
       ))
-      @scroll_view.layout(scroll_constraints, Vec2.new(@padding, scroll_top))
+      @scroll_view.layout(scroll_constraints, Vec2.new(padding, scroll_top))
 
       # Scroll to show highlighted item (important on initial open)
       ensure_highlighted_visible

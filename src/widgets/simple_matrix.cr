@@ -138,7 +138,7 @@ module CrymbleUI
     # later if needed.
     def header(*labels : String)
       @header_count += 1
-      row = labels.map { |l| Text.new(l, color: Theme.current.ruler_label).as(Widget) }.to_a
+      row = labels.map { |l| Text.new(l, color: Theme.ref(&.ruler_label)).as(Widget) }.to_a # live theme
       @rows << row
     end
 

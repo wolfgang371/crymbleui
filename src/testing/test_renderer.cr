@@ -3,6 +3,7 @@ require "../core/scheduler"
 require "../rendering/renderer"
 require "../rendering/draw_primitive"
 require "../rendering/layer_renderer"
+require "../rendering/render_trigger"
 require "../widgets/window_panel"
 require "../widgets/popup"
 require "./test_render_backend"
@@ -43,6 +44,8 @@ module CrymbleUI
 
       @running : Bool = false
       @app : App?  # Store app for event simulation methods
+      # The shared pull decision (same seam the SFML loop uses) — drives render_frame_if_needed.
+      @render_trigger = RenderTrigger.new
 
       # Track all layer backends for primitive counting
       @layer_backends : Array(TestRenderBackend) = [] of TestRenderBackend
@@ -125,6 +128,23 @@ module CrymbleUI
           if primitive_count == prev_primitive_count && backend_clear_count == prev_clear_count
             break
           end
+        end
+        # Baseline the pull trigger to the settled state, so render_frame_if_needed idles until a
+        # real change moves the aggregate.
+        @render_trigger.record(app)
+      end
+
+      # Render a frame ONLY if the pull trigger says to (the same decision the SFML loop makes via
+      # RenderTrigger), and report whether it rendered. This is the seam that makes the loop's
+      # "render this frame?" decision spec-testable: drive an interaction through App.handle_*, then
+      # assert render_frame_if_needed — true when the change should repaint, false on an idle no-op.
+      def render_frame_if_needed(app : App) : Bool
+        if @render_trigger.should_render?(app)
+          render_frame(app)
+          @render_trigger.record(app)
+          true
+        else
+          false
         end
       end
 

@@ -1,8 +1,8 @@
 # Layer-Based Rendering Architecture
 
 **Status**: IMPLEMENTED ✅
-**Last Updated**: 2025-11-15
-**Related**: See `ARCHITECTURE.md` for DrawPrimitive architecture
+**Related**: See `ARCHITECTURE.md` for DrawPrimitive architecture, and `REACTIVITY.md` for the
+canonical reactive-invalidation model (auto-capture, version counting, the pull render trigger).
 
 ## Overview
 
@@ -343,8 +343,19 @@ Clean ──content_change──> NeedsRender ──render()──> Clean
 
 ### State Propagation Rules
 
+**Content invalidation is no longer pushed through `mark_needs_render`.** A reactive value (a
+`reactive_property`, see `REACTIVITY.md`) read in `to_primitives` is auto-captured as a dependency of the
+widget's cached primitives node; changing it moves a version counter, which marks the node stale and enqueues
+the widget for re-render. The author never wires this up, and the edge cannot be forgotten because *reading*
+the value is what declares it.
+
+`mark_needs_render` survives only as a **structural** signal — for state that is not paint content expressed
+as a `Source`: `visible`/`enabled`/`focus_highlighted`, drag/reflow transitions, and the like. It still does
+the layer bookkeeping below (add to `dirty_widgets`), but it is no longer the channel for "the color/text
+changed."
+
 ```crystal
-# Marking a widget changes its state AND propagates to layer
+# Structural re-render request (NOT used for ordinary content changes anymore)
 widget.mark_needs_render
   → widget.state = WidgetState::NeedsRender
   → widget.layer.mark_needs_render(widget)  # Add to dirty_widgets
@@ -359,6 +370,10 @@ widget.mark_needs_layout
   → widget.layer.state = WidgetState::NeedsLayout
   → DOES NOT propagate to parent layers  # Layout is confined to single layer
 ```
+
+> Layout stays an imperative pass (not a pull node), so a field that affects size/position still pokes
+> `mark_needs_layout` explicitly — via the `reactive_property ... layout: true` setter. Only *render*
+> invalidation moved to auto-capture.
 
 **Layout Scope and Isolation (as of 2025-11-30)**
 
@@ -569,6 +584,27 @@ end
 ```
 
 **Key Insight**: Empty `dirty_widgets` set means "all dirty" (full render). Non-empty means "only these widgets dirty" (selective render).
+
+### The Version-Keyed Fast Path
+
+Before any of the above runs, a per-widget **version gate** decides whether a widget needs to be visited at
+all. Each widget exposes a primitives version (the fold of its cached node's `local_rev` plus the versions of
+every dependency it auto-captured, plus a `slot_rev` for its cache slot). A widget whose version is unchanged
+since it was last rendered is skipped outright — no `to_primitives`, no blit. This is the render-side
+counterpart of the frame trigger described in `REACTIVITY.md`: identity by version, never by deep comparison.
+`dirty_widgets` is still consulted for non-`viewport_cache` layers, but the version gate is the authority on
+*whether the work is actually needed*; an unchanged widget in the dirty set still costs nothing.
+
+### viewport_cache Layers: the Pull / SlotBuffer Model
+
+`viewport_cache` layers (the VirtualMatrix viewport) do **not** use the `dirty_widgets` set. They run a
+**pull, visit-all-visible** model: each frame the renderer walks every currently-visible cell, and for each
+one compares its version against the version recorded in the slot it occupies in the buffer (`slot_rev`). A
+cell whose version matches its slot is **slot-skipped** — its cached pixels are already correct and stay put.
+Only cells whose version moved (a value edit) are re-rendered into their slot. Scrolling is mostly *spatial
+coherence* (re-blit the buffer at a new offset; slots keep their versions), distinct from a value edit which
+is *dependency freshness* — see the "two orthogonal axes" section of `REACTIVITY.md`. This keeps a scrolling
+or idle matrix at near-zero render work while still catching a single edited cell.
 
 ## Coordinate Systems
 
@@ -1045,7 +1081,7 @@ def validate_sibling_bounds(widgets)
 end
 ```
 
-**Performance optimization**: Validation only runs on `first_render?` or `NeedsLayout`, not during scroll frames. Scroll doesn't change widget structure, so re-validating would be wasted O(n²) work.
+**Performance optimization**: Validation currently runs only on `first_render?`, not during scroll frames (scroll doesn't change widget structure, so re-validating would be wasted O(n²) work). Note: it is **not** re-run on a `NeedsLayout` re-render either, so an overlap introduced by a later layout change is not caught — re-enabling on layout is a deferred perf tradeoff.
 
 **Catches**: Layout bugs where children overlap, background corruption
 
@@ -1474,13 +1510,24 @@ layer.widgets << self     # Renders scrollbar via to_primitives
 
 ```crystal
 # Content changed (button text, color, etc.)
-widget.mark_needs_render
+# DON'T call mark_needs_render — declare a reactive_property and READ ITS GETTER in to_primitives.
+reactive_property color : Color = Color::White
+def to_primitives(bounds)
+  primitives { fill_rect(bounds, color) }   # reading `color` auto-captures it as a dependency
+end
+# Setting `self.color = ...` bumps the version → node stale → widget re-renders.
   → Triggers: Render (selective) + Composite
   → Cost: O(1) - one widget
   → Example: Button hover
 
+# Structural state changed (visible/enabled/focus highlight, drag/reflow)
+widget.mark_needs_render
+  → For state that ISN'T paint content backed by a Source. The escape hatch, not the default.
+  → Triggers: Render (selective) + Composite
+  → Cost: O(1) - one widget
+
 # Size changed (widget resized)
-widget.mark_needs_layout
+widget.mark_needs_layout         # or a reactive_property declared `layout: true`
   → Triggers: Layout (full) + Render (full) + Composite
   → Cost: O(n) - entire tree
   → Example: Panel resize
@@ -1494,6 +1541,10 @@ layer.bounds = new_bounds  # If widget has layer
   → Cost: O(layers) - very few
   → Example: Panel drag
 ```
+
+**Author contract**: the default for content is *not* a method call — declare a `reactive_property` and read
+its getter in `to_primitives`; the change invalidates automatically (see `REACTIVITY.md`). Reserve
+`mark_needs_render` for structural state that isn't expressed as a `Source`.
 
 ### Testing Performance
 

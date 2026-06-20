@@ -5,13 +5,13 @@ require "./render_backend"
 module CrymbleUI
   module CacheValidation
     enum CacheLevel
-      ImmediateMode  # Phase 1: painter's algorithm via to_primitives() vs cached buffer
-      BlitShift      # Phase 1: overlap copy during recenter
-      DirtyTracking  # Phase 2: selective render vs full render
-      WidgetFastPath # Phase 2: skip re-render for clean widgets
-      PrimitiveCache # Phase 3: cached DrawPrimitive arrays
-      BlitPlan       # Phase 3: pre-computed sticky positions
-      LayoutCache    # Phase 3: skip layout on same constraints
+      ImmediateMode  # painter's algorithm via to_primitives() vs cached buffer
+      BlitShift      # overlap copy during recenter
+      DirtyTracking  # selective render vs full render
+      WidgetFastPath # skip re-render for clean widgets
+      PrimitiveCache # cached DrawPrimitive arrays
+      BlitPlan       # pre-computed sticky positions
+      LayoutCache    # skip layout on same constraints
     end
 
     record Failure,
@@ -29,6 +29,19 @@ module CrymbleUI
     @@failures = [] of Failure
     @@frame_counter : Int32 = 0
     @@tolerance : Int32 = 2 # per-channel pixel tolerance
+
+    # Suite gate: the global spec_helper after_each calls assert_no_failures!
+    # ONLY when this is true. The validator's own self-tests (cache_validation_spec) deliberately
+    # record failures to prove detection works, so they set this false in their before_each.
+    @@suite_gate : Bool = true
+
+    def self.suite_gate : Bool
+      @@suite_gate
+    end
+
+    def self.suite_gate=(value : Bool)
+      @@suite_gate = value
+    end
 
     def self.enable(level : CacheLevel)
       @@enabled.add(level)

@@ -82,10 +82,10 @@ module CrymbleUI
       corner_render = [] of Widget
 
       # Add ruler widgets to render-after lists
-      row_render << @col_ruler_widget.not_nil! if @col_ruler_widget && @show_rulers
-      col_render << @row_ruler_widget.not_nil! if @row_ruler_widget && @show_rulers
-      corner_render << @corner_ruler_widget.not_nil! if @corner_ruler_widget && @show_rulers
-      corner_render << @corner_row_strip_widget.not_nil! if @corner_row_strip_widget && @show_rulers
+      row_render << @col_ruler_widget.not_nil! if @col_ruler_widget && show_rulers
+      col_render << @row_ruler_widget.not_nil! if @row_ruler_widget && show_rulers
+      corner_render << @corner_ruler_widget.not_nil! if @corner_ruler_widget && show_rulers
+      corner_render << @corner_row_strip_widget.not_nil! if @corner_row_strip_widget && show_rulers
 
       @active_cells.each do |key, widget|
         row, col = key
@@ -145,14 +145,14 @@ module CrymbleUI
         # smaller than one column. Sticky layers aren't viewport_cache, so they carry the scroll.)
         if !is_sticky_col
           content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-          new_x = ruler_x_offset + content_x - @scroll_offset.x.to_i.to_f64
+          new_x = ruler_x_offset + content_x - scroll_offset.x.to_i.to_f64
         else
           new_x = ruler_x_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
         end
 
         if !is_sticky_row
           content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-          new_y = ruler_y_offset + content_y - @scroll_offset.y.to_i.to_f64
+          new_y = ruler_y_offset + content_y - scroll_offset.y.to_i.to_f64
         else
           new_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
         end
@@ -217,8 +217,8 @@ module CrymbleUI
         return unless cc && rc
         rx = ruler_col_width_pixels
         ry = ruler_row_height_pixels
-        sx = @scroll_offset.x.to_i.to_f64
-        sy = @scroll_offset.y.to_i.to_f64
+        sx = scroll_offset.x.to_i.to_f64
+        sy = scroll_offset.y.to_i.to_f64
         @active_cells.each do |key, w|
           row, col = key
           next unless row < srows || col < scols
@@ -229,7 +229,7 @@ module CrymbleUI
           if (w.bounds.x - exp_x).abs > 1.0 || (w.bounds.y - exp_y).abs > 1.0
             STDERR.puts "[VERIFY_BOUNDS] matrix##{@id}: sticky cell #{key} at " \
                         "(#{w.bounds.x.round(1)},#{w.bounds.y.round(1)}) expected " \
-                        "(#{exp_x.round(1)},#{exp_y.round(1)}) scroll=(#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)})"
+                        "(#{exp_x.round(1)},#{exp_y.round(1)}) scroll=(#{scroll_offset.x.round(1)},#{scroll_offset.y.round(1)})"
           end
         end
       end
@@ -250,8 +250,8 @@ module CrymbleUI
         ruler_x_offset : Float64, ruler_y_offset : Float64,
         sticky_rows : Int32, sticky_cols : Int32)
       return unless col_cum && row_cum
-      scroll_x_i = @scroll_offset.x.to_i.to_f64
-      scroll_y_i = @scroll_offset.y.to_i.to_f64
+      scroll_x_i = scroll_offset.x.to_i.to_f64
+      scroll_y_i = scroll_offset.y.to_i.to_f64
       violations = [] of String
       @active_cells.each do |key, widget|
         row, col = key
@@ -282,7 +282,7 @@ module CrymbleUI
       # Log every frame (trace) plus register a cv failure when violations
       # exist — the latter makes the failure visible to test assertions.
       File.open("/tmp/crymble_cv_trace.log", "a") do |f|
-        f.puts "--- compute_sticky_blit_plans frame=#{CacheValidation.frame_counter} scroll=(#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) active=#{@active_cells.size} violations=#{violations.size}"
+        f.puts "--- compute_sticky_blit_plans frame=#{CacheValidation.frame_counter} scroll=(#{scroll_offset.x.round(1)},#{scroll_offset.y.round(1)}) active=#{@active_cells.size} violations=#{violations.size}"
         violations.each { |v| f.puts "    !!! BOUNDS-STALE #{v}" }
       end
       if violations.any?
@@ -328,7 +328,7 @@ module CrymbleUI
         (bb_c1..bb_c2).each do |ci|
           next if ci >= col_sizes.size
           true_ci_x = ruler_x_offset + (col_cum ? col_cum[ci].to_f64 : (0...ci).sum { |c| col_sizes[c] }.to_f64)
-          unclamped_scr_x = true_ci_x - @scroll_offset.x.to_i.to_f64
+          unclamped_scr_x = true_ci_x - scroll_offset.x.to_i.to_f64
           col_right = unclamped_scr_x + col_sizes[ci].to_f64
           next if col_right <= sticky_col_w
           next if unclamped_scr_x >= viewport_right
@@ -356,7 +356,7 @@ module CrymbleUI
           # off-screen content position — so returning from scroll-right leaves
           # them parked instead of restoring their original layout.
           last_col_right = ruler_x_offset + (col_cum ? col_cum[bb_c2 + 1].to_f64 : (0..bb_c2).sum { |c| col_sizes[c] }.to_f64)
-          if last_col_right - @scroll_offset.x.to_i.to_f64 <= sticky_col_w
+          if last_col_right - scroll_offset.x.to_i.to_f64 <= sticky_col_w
             new_x = OFFSCREEN_PARK
             compound_w = 0.0
           else
@@ -379,7 +379,7 @@ module CrymbleUI
         (bb_r1..bb_r2).each do |ri|
           next if ri >= row_sizes.size
           true_ri_y = ruler_y_offset + (row_cum ? row_cum[ri].to_f64 : (0...ri).sum { |r| row_sizes[r] }.to_f64)
-          unclamped_scr_y = true_ri_y - @scroll_offset.y.to_i.to_f64
+          unclamped_scr_y = true_ri_y - scroll_offset.y.to_i.to_f64
           row_bottom = unclamped_scr_y + row_sizes[ri].to_f64
           next if row_bottom <= sticky_row_h
           next if unclamped_scr_y >= viewport_bottom
@@ -402,7 +402,7 @@ module CrymbleUI
         else
           # Mirror of the column path above for rows (row-scroll case).
           last_row_bottom = ruler_y_offset + (row_cum ? row_cum[bb_r2 + 1].to_f64 : (0..bb_r2).sum { |r| row_sizes[r] }.to_f64)
-          if last_row_bottom - @scroll_offset.y.to_i.to_f64 <= sticky_row_h
+          if last_row_bottom - scroll_offset.y.to_i.to_f64 <= sticky_row_h
             new_y = OFFSCREEN_PARK
             compound_h = 0.0
           else

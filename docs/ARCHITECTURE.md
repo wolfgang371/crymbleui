@@ -63,9 +63,11 @@
 └─────────────────────────────────────────────────┘
 ```
 
-### 2. Explicit Change Tracking
+### 2. Reactive Change Tracking
 
-Widgets propagate state changes by calling `mark_needs_render` or `mark_needs_layout` on themselves. The property macros (`render_property`, `layout_property`) do this automatically on setter. Parent changes cascade to children; the renderer skips widgets that are clean.
+A widget's visual output is a memoized **pull node**: reactive fields (declared with `reactive_property`) are `Source` cells, and *reading one in `to_primitives` auto-captures it as a dependency*. Changing the value moves its version, the node goes stale, and the widget re-renders — no setter has to remember to call `mark_needs_render`. Layout is an imperative pass (not a pull node), so layout-affecting changes still poke `mark_needs_layout` explicitly. Parent changes cascade to children; the renderer skips widgets whose primitives are still fresh.
+
+See `docs/REACTIVITY.md` for the full model (auto-capture, version counting, the pull render trigger).
 
 ### 3. The Rebuild Cycle (DSL Apps)
 
@@ -170,19 +172,14 @@ end
 
 ### Cache Invalidation Rules
 
-Clear, explicit rules prevent bugs. Widgets call `mark_needs_render` or `mark_needs_layout`; the renderer propagates changes through the tree:
+Invalidation is **pull-based and mostly automatic**. A widget's primitives live in a memoized cache node; the reactive values it reads while painting (`reactive_property` fields, theme, zoom) are auto-captured as dependencies. When one of those values changes its version moves, the node is stale, and the widget re-renders on the next frame — nothing pushes `mark_needs_render`.
 
-```crystal
-class Widget
-  # Called when state changes (via property macro setters)
-  def on_state_change
-    # Self-only invalidation (render_property)
-    mark_needs_render
-    # Or layout invalidation (layout_property)
-    # mark_needs_layout  # propagates to parent and children
-  end
-end
-```
+The remaining explicit signals are for things that aren't expressed as captured reactive reads:
+
+- **`mark_needs_layout`** — a layout-affecting change (size/padding). Layout is an imperative pass, not a pull node, so it must be poked. Propagates to parent and children.
+- **`mark_needs_render`** — kept only for structural widget *state* (`visible`/`enabled`/`focus_highlighted`) and a few method-level marks (drag/reflow), which are gates rather than paint content.
+
+See `docs/REACTIVITY.md` for how auto-capture and version counting answer "is this stale?" cheaply.
 
 ## DrawPrimitive: Backend-Agnostic Rendering
 
@@ -295,175 +292,38 @@ class MenuItem < Widget
 end
 ```
 
-## Widget Property Macros: Automatic Invalidation
+## Widget Property Macros
 
-### The Problem
+Widget fields are declared with macros that wire up reactivity and reconciliation. The reactive model behind them — auto-capture, version counting, the pull render trigger — is documented in `docs/REACTIVITY.md`; this section only catalogs the macros and when to reach for each. (The old `render_property` / `layout_property` macros, which pushed `mark_needs_render`/`mark_needs_layout` from the setter, have been **removed**; see `docs/MIGRATION.md` for the before/after.)
 
-Widget properties need to trigger appropriate invalidation when changed:
-- Visual properties (color, text) → `mark_needs_render` (selective render)
-- Layout properties (size, padding) → `mark_needs_layout` (full layout + render)
+### The three macros
 
-Without macros, every property requires 4 lines of boilerplate:
+The `Widget` base class (`src/core/widget.cr`) provides:
 
-```crystal
-# Manual approach (before macros)
-@background_color : Color
-def background_color : Color; @background_color end
-def background_color=(value : Color); @background_color = value; mark_needs_render end
-```
-
-For a widget with 5 properties, that's 20 lines of repetitive code!
-
-### The Solution: Property Macros
-
-The `Widget` base class provides three macros that eliminate boilerplate:
-
-```crystal
-# Widget base class (src/core/widget.cr)
-abstract class Widget
-  # Macro for visual properties (triggers render only)
-  # Optional reconcile parameter adds @[Reconcile] annotation for auto-copy
-  macro render_property(declaration, reconcile = false)
-    {% if reconcile %}
-      @[Reconcile]
-    {% end %}
-    {% if declaration.is_a?(TypeDeclaration) %}
-      {% if !declaration.value.is_a?(Nop) %}
-        @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
-      {% else %}
-        @{{declaration.var}} : {{declaration.type}}
-      {% end %}
-
-      def {{declaration.var}} : {{declaration.type}}
-        @{{declaration.var}}
-      end
-
-      def {{declaration.var}}=(value : {{declaration.type}})
-        @{{declaration.var}} = value
-        mark_needs_render
-      end
-    {% end %}
-  end
-
-  # Macro for layout properties (triggers layout + render)
-  # Optional reconcile parameter adds @[Reconcile] annotation for auto-copy
-  macro layout_property(declaration, reconcile = false)
-    {% if reconcile %}
-      @[Reconcile]
-    {% end %}
-    {% if declaration.is_a?(TypeDeclaration) %}
-      {% if !declaration.value.is_a?(Nop) %}
-        @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
-      {% else %}
-        @{{declaration.var}} : {{declaration.type}}
-      {% end %}
-
-      def {{declaration.var}} : {{declaration.type}}
-        @{{declaration.var}}
-      end
-
-      def {{declaration.var}}=(value : {{declaration.type}})
-        @{{declaration.var}} = value
-        mark_needs_layout
-      end
-    {% end %}
-  end
-
-  # Macro for reconcile-only properties (no invalidation, always adds @[Reconcile])
-  macro reconcile_property(declaration)
-    @[Reconcile]
-    {% if declaration.is_a?(TypeDeclaration) %}
-      {% if !declaration.value.is_a?(Nop) %}
-        @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
-      {% else %}
-        @{{declaration.var}} : {{declaration.type}}
-      {% end %}
-
-      def {{declaration.var}} : {{declaration.type}}
-        @{{declaration.var}}
-      end
-
-      def {{declaration.var}}=(value : {{declaration.type}})
-        @{{declaration.var}} = value
-      end
-    {% end %}
-  end
-end
-```
-
-**The `reconcile` parameter**: When `reconcile: true` is passed to `render_property` or `layout_property`, the macro adds `@[Reconcile]` annotation. Properties with this annotation are automatically copied during widget reconciliation via `auto_copy_reconcile_properties()`. Use this for state that must persist across DSL rebuilds (e.g., scroll_offset, selected colors).
-
-### Usage in Widgets
-
-Widgets use these macros to declare properties with automatic invalidation:
+| macro | what it gives you | use it for |
+|---|---|---|
+| **`reactive_property name : T`** | a `Source(T)` field + a getter that **auto-captures** when read in `to_primitives`, and a setter that notifies dependents | any reactive value — **the default** |
+| **`reconcile_property name : T`** | a *plain* ivar (no `Source`) carried across a DSL rebuild via `@[Reconcile]` | a managed `Layer`/`Widget` ref — infrastructure, never painted |
+| **`theme_property name, key`** | a getter that resolves the global `Theme` color live (an explicit override wins) | a color that should follow the theme |
 
 ```crystal
 class Button < Widget
   include PrimitiveBuilder
 
-  # Font scale (uses FontSizing module for computed font_size)
-  @font_scale : Int32 = 0
-  def font_scale=(v); @font_scale = v; mark_needs_layout; end
-  def font_size : Float64; FontSizing.calculate_size(@font_scale); end
-
-  # Visual properties (mark_needs_render when changed)
-  render_property text_color : Color
-  render_property background_color : Color
-  render_property border_color : Color
-
-  # Layout properties (mark_needs_layout when changed)
-  layout_property padding : Float64
+  reactive_property text_color : Color           # read in to_primitives → change re-renders
+  reactive_property background_color : Color
+  reactive_property padding : Float64, layout: true  # also re-layouts on change
 end
 ```
 
-```crystal
-class StatusBar < Widget
-  include PrimitiveBuilder
+**Two flags refine `reactive_property`:**
 
-  # Font scale (default -1 for smaller text)
-  @font_scale : Int32 = -1
-  def font_scale=(v); @font_scale = v; mark_needs_layout; end
-  def font_size : Float64; FontSizing.calculate_size(@font_scale); end
+- **`layout: true`** — the setter *also* calls `mark_needs_layout`. Use when the field changes the widget's size/position. Layout is an imperative pass (not a pull node), so a layout-affecting change must poke it explicitly; auto-capture alone won't.
+- **`reconcile: true`** — the value survives a DSL rebuild (`@[Reconcile]` plus a plain build-shadow that the reconciler compares by `==`). Use for state that must persist across rebuilds (e.g. `scroll_offset`, a selected color).
 
-  # Visual properties
-  render_property text_color : Color
-  render_property background_color : Color
-  render_property border_color : Color
+**Rule of thumb: Source-back what renders.** Read the field's *getter* (`text_color`, never the `@text_color` ivar — that's the raw `Source` object) inside `to_primitives`, and a change re-renders automatically. A field never read while painting doesn't earn a `Source`: a managed object uses `reconcile_property`, and a handful of structural state fields (`visible`/`enabled`/`focus_highlighted`) keep an explicit `mark_needs_render` because they're gates, not paint content.
 
-  # Layout properties
-  layout_property height : Float64
-  layout_property padding : Float64
-end
-```
-
-### Benefits
-
-1. **Consistent invalidation**: All properties use the same pattern
-2. **Clear semantics**:
-   - `render_property` = visual change only
-   - `layout_property` = structural change
-3. **Less boilerplate**: ~75% code reduction (from 4 lines to 1 line per property)
-4. **Automatic cache invalidation**: Properties trigger `mark_needs_render` or `mark_needs_layout`, which the base `Widget` class uses to invalidate primitive caches
-5. **Type-safe**: Full Crystal type checking preserved
-6. **Default values**: Supports default values via type declaration syntax
-
-### Integration with Primitive Caching
-
-The property macros integrate seamlessly with the primitive caching system:
-
-```crystal
-# When a render_property changes:
-widget.background_color = Color.red  # Calls mark_needs_render
-# → Widget.state = WidgetState::NeedsRender
-# → Next get_primitives() call regenerates cached primitives
-
-# When a layout_property changes:
-widget.padding = 20.0  # Calls mark_needs_layout
-# → Widget.state = WidgetState::NeedsLayout
-# → Widget.invalidate_last_constraints() called
-# → Next layout() call recalculates bounds (can't skip - constraints invalidated)
-# → Next get_primitives() call regenerates cached primitives
-```
+See `docs/REACTIVITY.md` for *why* this works (reading a value is what declares the dependency, so an edge can never be forgotten) and for the one case where you reach for a bare `Source(T)` (a global signal with no widget to hang a property on).
 
 ### Layout Template Method Pattern
 
@@ -496,31 +356,7 @@ See `GRACEFUL_DEGRADATION.md` for render-time exception handling and recovery.
 
 ### When NOT to Use Property Macros
 
-Some properties need custom logic beyond simple invalidation:
-
-```crystal
-class Text < Widget
-  # Text property with custom setter logic
-  @text : String
-  def text : String
-    @text
-  end
-
-  def text=(value : String)
-    @text = value
-    # Custom logic: also update label
-    mark_needs_render
-  end
-
-  # Font scale with computed font_size
-  @font_scale : Int32 = 0
-  def font_scale=(v); @font_scale = v; mark_needs_layout; end
-  def font_size : Float64; FontSizing.calculate_size(@font_scale); end
-
-  # Simple properties can use macros
-  render_property color : Color
-end
-```
+`reactive_property` is the default. Reach for a hand-written setter only when a write needs *extra* logic — clamping, re-deriving a sibling field, restarting a timer. Even then, prefer to keep the value in a `Source` (declared via `reactive_property`) so the dependency is still auto-captured; do the extra work in an overriding setter that delegates to it. A plain ivar with a manual `mark_needs_render` is reserved for the few structural-state fields that are gates rather than paint content.
 
 ## Layered Widget Composition
 
@@ -641,41 +477,26 @@ end
 ### Base Widget Class Manages ALL Caching
 
 **Critical Design**: Widget subclasses NEVER touch cache code. Base class handles everything.
+`cache_policy` selects how the primitives are cached:
+
+- **`Never`** — always regenerate (menus, popups, animations). No node.
+- **`Dynamic`** (the default) — primitives live in a **memoized pull node** (`Cached(Array(DrawPrimitive))`, `src/core/cached.cr`) whose recompute is `to_primitives`. The node auto-captures the reactive values it reads while painting and is validated by **version**, not by a dirty flag: a clean node returns its memoized result with no `to_primitives` call; a change to a captured `Source` (or a `touch` from `mark_needs_layout`/content) moves the version, and the next read re-derives. Correct by construction — a value the widget reads can't be forgotten.
+- **`Static`** — cache the primitives once, forever (window chrome).
 
 ```crystal
-# Widget base class (widget.cr)
+# Widget base class (widget.cr) — sketch; see src/core/widget.cr for the real thing
 abstract class Widget
-  # Cache storage (base class only)
-  @cached_primitives : Array(DrawPrimitive)?
+  @primitives_node : Cached(Array(DrawPrimitive))?   # Dynamic policy
+  @cached_primitives : Array(DrawPrimitive)?         # Static policy
 
-  # Public API: Get primitives (may be cached)
-  # Renderer calls this method
   def get_primitives(bounds : Rect) : Array(DrawPrimitive)
     case cache_policy
-    when CachePolicy::Never
-      # Always generate fresh (menus, popups)
-      to_primitives(bounds)
-
-    when CachePolicy::Dynamic
-      # Cache primitives, invalidate on state change (buttons, text)
-      if needs_render? || @cached_primitives.nil?
-        @cached_primitives = to_primitives(bounds)
-      else
-        @cached_primitives.not_nil!
-      end
-
-    when CachePolicy::Static
-      # Cache primitives forever (window chrome)
-      @cached_primitives ||= to_primitives(bounds)
+    when CachePolicy::Never   then to_primitives(bounds)
+    when CachePolicy::Dynamic then (@primitives_node ||= make_node).get  # version-keyed, auto-capturing
+    when CachePolicy::Static  then @cached_primitives ||= to_primitives(bounds)
     end
   end
 
-  # Invalidate primitive cache (called on state changes)
-  def invalidate_primitive_cache
-    @cached_primitives = nil
-  end
-
-  # Subclasses declare policy (default: Dynamic)
   def cache_policy : CachePolicy
     CachePolicy::Dynamic
   end
@@ -684,6 +505,8 @@ abstract class Widget
   abstract def to_primitives(bounds : Rect) : Array(DrawPrimitive)
 end
 ```
+
+`needs_render?` for a node-backed widget is derived from the node (`!node.valid?`), not a flag — see `docs/REACTIVITY.md` for the version-counting that makes this cheap.
 
 ### Subclasses: Just Describe, Don't Cache
 
@@ -791,60 +614,15 @@ class WindowPanel::Chrome < Widget
 end
 ```
 
-## Migration Path
+## The Resulting Architecture
 
-**Strategy**: Incremental refactoring, one widget at a time. Keep everything working.
+The primitive-based pipeline is fully in place. The durable shape it settled into:
 
-### Phase 1: Introduce DrawPrimitive Infrastructure
+- **DrawPrimitive infrastructure**: a `DrawPrimitive` base with concrete structs (`FillRect`, `DrawText`, …) and the `PrimitiveBuilder` DSL mixin. Every widget implements `to_primitives(bounds)`; the old `render(context)`/`PaintContext` path is gone.
+- **Backend-only renderer**: `SFMLRenderer` executes primitives and knows nothing about widgets.
+- **Cache policies**: a `CachePolicy` enum (`Never`/`Dynamic`/`Static`) on `Widget`, with `Dynamic` the default. Menus and popups are `Never`; window chrome is `Static`. There is no ad-hoc per-widget cache-skipping (`is_a?(Popup)` checks) — policy plus the version-keyed node decide everything.
 
-1. Create `DrawPrimitive` base and concrete structs (`FillRect`, `DrawText`, etc.)
-2. Create `PrimitiveBuilder` mixin module with DSL methods
-3. Add `to_primitives(bounds)` method to `Widget` base class (default: call old render)
-4. Update `SFMLRenderer` to execute primitives
-5. Verify: Existing widgets still work via old render path
-
-### Phase 2: Migrate One Widget to Primitives
-
-Start with `Text` widget (simplest):
-
-1. Add `include PrimitiveBuilder` to `Text`
-2. Implement `to_primitives` using DSL
-3. Write unit tests asserting on primitive output
-4. Remove old `render` method
-5. Verify visual output unchanged
-
-### Phase 3: Add Cache Policies
-
-1. Add `CachePolicy` enum (Never, Dynamic, Static)
-2. Add `cache_policy` method to `Widget` base class (default: Dynamic)
-3. Override for specific widgets:
-   - `Menu` → Never
-   - `Popup` → Never
-   - `Button` → Dynamic
-   - `Text` → Dynamic
-4. Implement primitive caching in `Widget.get_primitives`
-5. Remove all ad-hoc cache skipping code (those `is_a?(Popup)` checks)
-
-### Phase 4: Migrate Remaining Widgets
-
-Continue pattern for all widgets:
-- Primitive widgets: Just `to_primitives`
-- Interactive widgets: `to_primitives` based on widget state
-- Containers: Aggregate child primitives
-
-### Phase 5: Remove Old Rendering Path
-
-1. Remove `render(context)` method from all widgets
-2. Remove `PaintContext` (replaced by primitives)
-3. Renderer only knows primitives, nothing about widgets
-4. Clean, separated architecture complete!
-
-### Phase 6: Advanced Optimizations (Optional)
-
-1. Texture caching for expensive widgets
-2. Dirty rectangle tracking
-3. Batched primitive rendering
-4. GPU acceleration via custom backends
+**Optional optimizations not all enabled by default**: texture caching for expensive widgets, dirty-rectangle tracking, batched primitive rendering, GPU acceleration via alternate backends.
 
 ## Testing Strategy
 

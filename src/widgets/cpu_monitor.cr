@@ -25,12 +25,12 @@ module CrymbleUI
         @@initialized : Bool = false
         @@current_instance : CPUMonitor? = nil  # Updated on each rebuild
 
-        # Visual properties
-        render_property text_color : Color = Theme.current.text_default
-        render_property background_color : Color = Color.new(255, 255, 255, 0)  # Transparent by default (alpha=0) for overlay use
+        # Visual properties — text_color resolves live (nil = follow Theme.current; explicit wins)
+        theme_property text_color, text_default
+        reactive_property background_color : Color = Color.new(255, 255, 255, 0)  # Transparent by default (alpha=0) for overlay use
 
-        def initialize(id : String? = nil, font_scale : Int32 = 0, text_color : Color = Theme.current.text_default)
-            @font_scale = font_scale
+        def initialize(id : String? = nil, font_scale : Int32 = 0, text_color : Color? = nil)
+            @font_scale.set(font_scale)
             super(id: id)
             @text_color = text_color
 
@@ -165,10 +165,10 @@ module CrymbleUI
 
             primitives do
                 # Fully opaque background covering full widget bounds
-                fill_rect(local_bounds, @background_color)
+                fill_rect(local_bounds, background_color)
 
                 # Text
-                draw_text(text, Vec2.new(text_x, text_y), @text_color, @font_scale)
+                draw_text(text, Vec2.new(text_x, text_y), text_color, font_scale)
             end
         end
 

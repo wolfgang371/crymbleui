@@ -2,12 +2,12 @@ require "../spec_helper"
 require "../../src/widgets/combo_box"
 require "../../src/widgets/combo_box_popup"
 
-# T-016: opt-in editable ComboBox. A normal ComboBox can only commit one of its
+# Opt-in editable ComboBox. A normal ComboBox can only commit one of its
 # list items; an *editable* one also commits free-typed text that is not in the
 # list (the merge-conflict resolver offers the candidate values but the resolved
 # value may be neither side). Default (non-editable) behaviour is unchanged:
 # typed text only filters, and an unmatched submit cancels.
-describe "ComboBox editable mode (T-016)" do
+describe "ComboBox editable mode" do
   describe "ComboBoxPopup#select_highlighted" do
     it "editable: a submitted value not in the list commits as custom (index -1)" do
       popup = CrymbleUI::ComboBoxPopup.new(items: ["Apple", "Banana"], editable: true)

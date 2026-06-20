@@ -2,6 +2,7 @@ require "../csfml3/wrapper"
 require "../core/types"
 require "../core/widget"
 require "../core/app"
+require "./render_trigger"
 require "../core/scheduler"
 require "../core/font_sizing"
 require "../input/shortcut_manager"
@@ -472,11 +473,18 @@ module CrymbleUI
       end
     end
 
-    # Check if any layer needs rendering (for timer-triggered redraws)
-    # Uses Layer registry for efficient O(k × d) lookup instead of tree traversal
+    # App-level PULL render-trigger: render a frame iff the version-keyed aggregate moved since
+    # the last render — the correct-by-construction replacement for the any_needs_render? dirty walk
+    # (which can MISS a change nobody marked, e.g. a theme swap). Preserves the event-driven 0%-idle:
+    # no versioned change → same aggregate → no frame. The decision itself lives in RenderTrigger, a
+    # shared headless seam so a spec can exercise it (TestRenderer#render_frame_if_needed) — the loop's
+    # pull decision is no longer un-testable. PRIMARY: the version-keyed aggregate; BACKSTOP: the dirty
+    # walk, kept until the aggregate's completeness is spec+interactively proven (removing it = final
+    # flag deletion).
+    @render_trigger = RenderTrigger.new
+
     private def any_layer_needs_render?(app : App) : Bool
-      return false unless root = app.root
-      Layer.any_needs_render?(root)
+      @render_trigger.should_render?(app)
     end
 
     # Clear window to background color
@@ -627,8 +635,9 @@ module CrymbleUI
             # App state changed - rebuild tree with reconciliation
             app.rebuild
             needs_redraw = true
-          elsif app.root.try(&.needs_layout?) || app.root.try(&.needs_render?) || any_layer_needs_render?(app)
-            # Layout or render needed (no rebuild)
+          elsif any_layer_needs_render?(app)
+            # Render needed (no rebuild) — decided by the aggregate-rev pull, which subsumes the old
+            # root.needs_layout? / needs_render? dirty checks (layout_rev/content_rev are in the aggregate).
             needs_redraw = true
           end
         end
@@ -636,6 +645,8 @@ module CrymbleUI
         # Render once per frame with latest state (after processing all events)
         if needs_redraw
           render_frame(app)
+          # Stamp the aggregate the frame was rendered at, so the next pull idles until it moves.
+          @render_trigger.record(app)
           needs_redraw = false
         elsif event_count > 0
           # Events processed but no redraw triggered - this is where we save CPU!

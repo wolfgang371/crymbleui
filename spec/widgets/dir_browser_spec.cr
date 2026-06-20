@@ -122,7 +122,7 @@ describe CrymbleUI::Widgets::DirBrowser::MatrixAdapter do
         end
     end
 
-    describe "double-click accept (Phase 3 trend-mode unrelated; UX request)" do
+    describe "double-click accept (UX request)" do
         # User report: double-clicking a file in the file browser should
         # auto-accept the selection (close the dialog with that file).
         # Today the widget treats every click as a single select; this

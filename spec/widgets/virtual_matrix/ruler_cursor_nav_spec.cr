@@ -67,10 +67,13 @@ describe CrymbleUI::VirtualMatrix do
       matrix.scroll_offset.y.should be > initial_scroll_y,
         "Cursor navigation should have scrolled down"
 
-      # The sticky_col_layer (row ruler) should be dirty BEFORE render
-      col_layer.dirty_widgets.size.should be > 0,
-        "sticky_col_layer should have dirty widgets after cursor key navigation " \
-        "(mark_ruler_widgets_dirty not called in snap_to_cursor)"
+      # The sticky_col_layer (row ruler) must re-render after the cursor-key scroll:
+      # the ruler (Dynamic) auto-captures scroll_offset, so it re-renders via the on_dirty enqueue OR
+      # (with sticky cells) the reposition render-all — either way the LAYER needs render. We assert that
+      # (needs_render?), not the old populated-dirty_widgets mechanism. The actual pixels-re-render is
+      # proven functionally in ruler_render_harness_spec.
+      col_layer.needs_render?.should be_true,
+        "sticky_col_layer should need render after cursor-key navigation (ruler must re-render on scroll)"
 
       renderer.settle_rendering(app)
     end
@@ -92,10 +95,11 @@ describe CrymbleUI::VirtualMatrix do
       matrix.scroll_offset.x.should be > initial_scroll_x,
         "Cursor navigation should have scrolled right"
 
-      # The sticky_row_layer (column ruler) should be dirty BEFORE render
-      row_layer.dirty_widgets.size.should be > 0,
-        "sticky_row_layer should have dirty widgets after cursor key navigation " \
-        "(mark_ruler_widgets_dirty not called in snap_to_cursor)"
+      # The sticky_row_layer (column ruler) must re-render after the cursor-key scroll (see the vertical
+      # case above for the rationale). needs_render? is the functional intent; the pixel-level
+      # re-render is proven in ruler_render_harness_spec.
+      row_layer.needs_render?.should be_true,
+        "sticky_row_layer should need render after cursor-key navigation (ruler must re-render on scroll)"
 
       renderer.settle_rendering(app)
     end

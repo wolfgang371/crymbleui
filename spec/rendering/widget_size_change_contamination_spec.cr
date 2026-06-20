@@ -5,16 +5,19 @@ require "../../src/testing/test_renderer"
 class PartialBox < CrymbleUI::Widget
   include CrymbleUI::PrimitiveBuilder
 
-  render_property color : CrymbleUI::Color
-  layout_property fixed_width : Float64
-  layout_property fixed_height : Float64
+  reactive_property color : CrymbleUI::Color
+  reactive_property fixed_width : Float64, layout: true
+  reactive_property fixed_height : Float64, layout: true
 
-  def initialize(@color : CrymbleUI::Color, @fixed_width : Float64, @fixed_height : Float64, id : String? = nil)
+  def initialize(color : CrymbleUI::Color, fixed_width : Float64, fixed_height : Float64, id : String? = nil)
+    @color = CrymbleUI::Source(CrymbleUI::Color).new(color)
+    @fixed_width = CrymbleUI::Source(Float64).new(fixed_width)
+    @fixed_height = CrymbleUI::Source(Float64).new(fixed_height)
     super(id: id)
   end
 
   def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
-    CrymbleUI::Size.new(@fixed_width, @fixed_height)
+    CrymbleUI::Size.new(fixed_width, fixed_height)
   end
 
   def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
@@ -25,7 +28,7 @@ class PartialBox < CrymbleUI::Widget
 
   def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
     half = (bounds.height / 2).to_i.to_f64
-    primitives { fill_rect(CrymbleUI::Rect.new(0.0, 0.0, bounds.width, half), @color) }
+    primitives { fill_rect(CrymbleUI::Rect.new(0.0, 0.0, bounds.width, half), color) }
   end
 end
 

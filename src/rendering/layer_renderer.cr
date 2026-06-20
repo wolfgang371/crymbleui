@@ -268,7 +268,11 @@ module CrymbleUI
       rendered_count = 0
       profile("render_layers") do
         layers.each do |layer|
-          if layer.needs_render?
+          # Pull: viewport_cache layers always RE-EVALUATE (no dirty-flag gate) — the per-slot
+          # skip in render_single_widget decides what actually re-renders, and render_layer must run
+          # each frame anyway to drive the buffer recenter check. Non-viewport_cache layers keep the
+          # push gate for now (their pull migration is a later stage).
+          if layer.viewport_cache || layer.needs_render?
             LayerRenderer.frame_layers_needing_render += 1 # Instrumentation
             LayerRenderer.rendered_layer_ids << layer.id
             render_layer(layer)
@@ -364,12 +368,10 @@ module CrymbleUI
 
         {% if flag?(:cache_validation) %}
           # CV: validate blit-plan output against immediate-mode fresh render.
-          # Without this, the blit-plan fast path is completely invisible to cv,
-          # so stale widget_backends blitted at wrong positions never trip the dual pipeline.
-          is_matrix_layer = layer.viewport_cache ||
-                            layer.id.starts_with?("sticky_col") ||
-                            layer.id.starts_with?("sticky_row") ||
-                            layer.id.starts_with?("sticky_corner")
+          # Viewport-cache content layers only — see the note at the other validate
+          # site: the immediate path mis-positions sticky cells, so sticky blit-plan validation is a
+          # false-positive source until the immediate path replicates sticky positioning.
+          is_matrix_layer = (layer.viewport_cache && !layer.id.starts_with?("sticky_")) || layer.cv_validate
           if CacheValidation.enabled?(:immediate_mode) && is_matrix_layer && backend.responds_to?(:capture_region_pixels)
             validate_immediate_mode(layer, backend, layer.bounds.x, layer.bounds.y)
           end
@@ -511,7 +513,7 @@ module CrymbleUI
                 has_wb = !w.widget_backend.nil?
                 f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} abs_y=#{ab.y} buf_y=#{buf_y} " \
                        "span=[#{buf_y}..#{buf_y + ab.height.to_i}] backend=#{has_wb} dirty=#{w.needs_render?} " \
-                       "prim_cache=#{w.has_valid_primitive_cache?} fresh_bg=#{w.needs_fresh_background?}"
+                       "prim_cache=#{w.has_valid_primitive_cache?}"
               end
               f.puts "--- ALL layer.widgets near buf boundary 815..845 ---"
               layer.widgets.each do |root_w|
@@ -530,9 +532,13 @@ module CrymbleUI
           end
         {% end %}
 
-        # Validate that siblings don't overlap (invariant check)
-        # OPTIMIZATION: Only validate on first render or layout pass, not on scroll frames
-        # Scroll doesn't change widget structure, so re-validating is wasted O(n²) work
+        # Validate that siblings don't overlap (invariant check).
+        # OPTIMIZATION: only on first_render? — re-validating every frame is wasted
+        # O(n²) work and scroll doesn't change structure.
+        # KNOWN GAP: this does NOT re-validate after a NeedsLayout re-render,
+        # so an overlap introduced by a later layout change is not caught (the guardrail
+        # is weaker than the docs once claimed). Re-enabling on layout is a perf tradeoff,
+        # deferred.
         if layer.first_render?
           validate_sibling_bounds(widgets_to_render)
         end
@@ -593,13 +599,21 @@ module CrymbleUI
 
       {% if flag?(:cache_validation) %}
         # Immediate mode validation: painter's algorithm via to_primitives() vs cached buffer.
-        # Runs on matrix_content (viewport-cached) and matrix sticky layers (non-viewport-cached
-        # but still blit-plan-prone). Skip unrelated panels — they have legitimate antialiasing
-        # jitter that would produce spurious cv failures without a real bug.
-        is_matrix_layer = layer.viewport_cache ||
-                          layer.id.starts_with?("sticky_col") ||
-                          layer.id.starts_with?("sticky_row") ||
-                          layer.id.starts_with?("sticky_corner")
+        # Runs on matrix_content (viewport-cached) layers only. Skip unrelated panels (legitimate
+        # antialiasing jitter → spurious failures).
+        #
+        # STICKY layers are intentionally EXCLUDED: render_layer_immediate
+        # (~:806) positions every widget by a uniform `- layer.scroll_offset`, which is correct
+        # for content cells but WRONG for sticky cells (they are screen-positioned via the sticky/
+        # blit-plan math — and a horizontally-scrolling sticky_row is itself viewport_cache, so
+        # the flag alone can't exclude it). So the immediate path mis-positions sticky cells and
+        # reports false positives (verified: black_rows spec's own window-pixel checks pass, yet cv
+        # diverged on sticky_col/sticky_row). Validate VIEWPORT-CACHE CONTENT layers (matrix content,
+        # ScrollView content) but NOT sticky layers (sticky_*) — exclude by id since a horiz-scrolling
+        # sticky_row is itself viewport_cache. Validating sticky needs the immediate path to replicate
+        # sticky positioning first. Trustworthy over content layers, where the off-viewport
+        # stale-cache "ghost" class of bugs (a culled dirty cell leaving a stale cached texture) lives.
+        is_matrix_layer = (layer.viewport_cache && !layer.id.starts_with?("sticky_")) || layer.cv_validate
         if CacheValidation.enabled?(:immediate_mode) && is_matrix_layer && backend.responds_to?(:capture_region_pixels)
           validate_immediate_mode(layer, backend, layer_offset_x, layer_offset_y)
         end
@@ -688,7 +702,7 @@ module CrymbleUI
                 next unless buf_y <= fm_buffer_y + 5 && buf_y + ab.height.to_i >= fm_buffer_y - 25
                 f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} bounds=#{w.bounds} abs=#{ab}"
                 f.puts "    buf_y=#{buf_y} span=[#{buf_y}..#{buf_y + ab.height.to_i}] has_backend=#{!w.widget_backend.nil?} dirty=#{w.needs_render?}"
-                f.puts "    prim_cache=#{w.has_valid_primitive_cache?} fresh_bg=#{w.needs_fresh_background?}"
+                f.puts "    prim_cache=#{w.has_valid_primitive_cache?}"
                 if wb = w.widget_backend
                   f.puts "    widget_backend: #{wb.width}x#{wb.height}"
                 end
@@ -976,10 +990,16 @@ module CrymbleUI
       if layer.viewport_cache
         if existing_backend = widget.widget_backend
           if existing_backend.width == widget_width && existing_backend.height == widget_height
-            # Widget has valid cached backend - check if content changed
-            # IMPORTANT: Also check needs_fresh_background - new cells replacing destroyed ones
-            # must go through full render path to capture clean background (fixes ghosting)
-            if widget.has_valid_primitive_cache? && !widget.needs_render? && !widget.needs_fresh_background?
+            # Pull/SlotBuffer SKIP: the buffer already holds this cell's current pixels at this
+            # buffer position (rev + buffer_pos unchanged since last blit) — nothing to do. The
+            # blit-shift keeps buffer_pos in lockstep with the pixels (shift_slot), so a stable scroll
+            # within the buffer skips; a recenter that actually moved this cell skips; a re-entering or
+            # reflowed cell has a stale buffer_pos (or a disposed backend) → falls through to re-render.
+            slot_buffer_pos = {layer_local_x, layer_local_y}
+            if !layer.buffer_just_cleared && widget.slot_fresh?(slot_buffer_pos)
+              return nil
+            end
+            if widget.has_valid_primitive_cache? && widget.slot_rev_matches?
               # Fast path: blit cached content, skip ALL other work including get_primitives
               {% if flag?(:DEBUG_RENDER) %}
                 puts "    [FAST_PATH] #{widget.class.name.split("::").last}##{widget.path_id} blitting to (#{layer_local_x}, #{layer_local_y})"
@@ -1013,6 +1033,7 @@ module CrymbleUI
               {% end %}
               backend.blit(existing_backend, layer_local_x, layer_local_y)
               widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
+              widget.stamp_slot(slot_buffer_pos)
               {% if flag?(:cache_validation) %}
                 # CV trace: verify buffer content AFTER fast-path blit
                 if layer.id.starts_with?("matrix_content") && layer_local_y >= 815 && layer_local_y <= 830
@@ -1047,7 +1068,7 @@ module CrymbleUI
               return
             else
               {% if flag?(:DEBUG_RENDER) %}
-                puts "    [NO_FAST_PATH] #{widget.class.name.split("::").last}##{widget.path_id} at (#{layer_local_x}, #{layer_local_y}) cache=#{widget.has_valid_primitive_cache?} needs_render=#{widget.needs_render?} needs_fresh=#{widget.needs_fresh_background?}"
+                puts "    [NO_FAST_PATH] #{widget.class.name.split("::").last}##{widget.path_id} at (#{layer_local_x}, #{layer_local_y}) cache=#{widget.has_valid_primitive_cache?} needs_render=#{widget.needs_render?}"
               {% end %}
             end
           else
@@ -1268,11 +1289,12 @@ module CrymbleUI
         # Without this, child widgets inside colored containers get flat grey backgrounds
         # instead of inheriting the parent's fill color.
         current_layer_pos = {layer_local_x, layer_local_y}
-        use_stale_background = widget.needs_fresh_background? ||
-          (widget.last_rendered_layer_position != current_layer_pos && !layer.buffer_just_cleared)
+        # needs_fresh_background was a vestigial channel (no producer ever set it true), so the
+        # stale-background protection is carried entirely by the position-change check below.
+        use_stale_background =
+          widget.last_rendered_layer_position != current_layer_pos && !layer.buffer_just_cleared
         if use_stale_background
           background_backend.clear(layer.background_color)
-          widget.needs_fresh_background = false
         else
           # CRITICAL: Finalize layer backend texture before reading from it!
           # SFML RenderTexture.getTexture() only reflects draws after display() is called.
@@ -1350,6 +1372,8 @@ module CrymbleUI
       # This prevents re-capturing background later (would capture own content!)
       widget.mark_rendered_to_layer!
       widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
+      # Pull/SlotBuffer: stamp the slot so the next frame's per-slot check can SKIP this cell.
+      widget.stamp_slot({layer_local_x, layer_local_y}) if layer.viewport_cache
     end
 
     # Execute primitive on widget's own backend (no coordinate offset needed)
@@ -1508,8 +1532,15 @@ module CrymbleUI
       widget_bounds = widget.absolute_bounds
 
       # Early exit: if widget is completely outside viewport, skip it AND all children
-      # This is the key optimization - we don't recurse into off-screen subtrees
-      unless viewport_intersects?(viewport, widget_bounds)
+      # This is the key optimization - we don't recurse into off-screen subtrees.
+      # EXCEPTION: an explicitly-dirtied widget must still be collected even when it
+      # has scrolled just out of the viewport (but is within the cache buffer). A full
+      # render would otherwise cull it, leaving it unpainted while the post-frame
+      # clear_render_state marks it Clean — stranding a stale cached texture that the
+      # fast path then blits when it scrolls back in. This is the general form of the
+      # QuickEntry Tab-wraparound ghost. dirty_widgets is normally empty during
+      # a full render, so this adds no work in the common case.
+      unless viewport_intersects?(viewport, widget_bounds) || target_layer.dirty_widgets.includes?(widget)
         return
       end
 
@@ -1663,7 +1694,10 @@ module CrymbleUI
     # Collect widgets to render based on render mode (full vs selective)
     # UNIFIED RENDERING: Always use per-widget textures (NEW path only)
     private def collect_widgets_to_render(layer : Layer, full_render : Bool) : Array(Widget)
-      if full_render
+      # Pull/SlotBuffer: viewport_cache layers ALWAYS visit every visible cell (no dirty_widgets
+      # filtering). The per-slot skip in render_single_widget then decides re-render vs skip by the
+      # {rev, buffer_pos} key — correct-by-construction (a change to any cell can't be missed).
+      if full_render || layer.viewport_cache
         # Full render: collect widgets recursively from layer.widgets
         all_widgets = [] of Widget
 
@@ -1679,11 +1713,15 @@ module CrymbleUI
         if layer.viewport_cache && layer.state != WidgetState::NeedsLayout && !layer.buffer_just_cleared
           # Calculate viewport bounds in content coordinates
           # Viewport is at scroll_offset, with size layer.bounds.width/height
+          # Pull/SlotBuffer: cull to the BUFFER (viewport + cache_extent), not just the viewport —
+          # the buffer holds a margin of cells, and they must keep their backends (so a cell scrolled
+          # into view already has its cached texture). Bounded by the buffer size.
+          ce = layer.cache_extent
           viewport = Rect.new(
-            layer.scroll_offset.x + layer.bounds.x, # Viewport left edge in content coords
-            layer.scroll_offset.y + layer.bounds.y, # Viewport top edge in content coords
-            layer.bounds.width,
-            layer.bounds.height
+            layer.scroll_offset.x + layer.bounds.x - ce, # Buffer left edge in content coords
+            layer.scroll_offset.y + layer.bounds.y - ce, # Buffer top edge in content coords
+            layer.bounds.width + 2.0 * ce,
+            layer.bounds.height + 2.0 * ce
           )
           layer.widgets.each do |widget|
             collect_visible_widgets_recursive(widget, all_widgets, layer, viewport)
@@ -1962,6 +2000,13 @@ module CrymbleUI
       # boundary and you scroll into it (cells composite over the layer background rather than
       # painting their own, so a transparent captured edge shows through). Nulling it forces a
       # fresh capture from the recentered buffer, matching clear_all_widget_backends.
+      # Pull/SlotBuffer LOCKSTEP: the blit-shift moved the OVERLAP block by (dest-src) buffer
+      # pixels. A cell FULLY inside that copied block had its pixels faithfully moved → shift its slot
+      # stamp by the same delta so it stays skippable. A cell NOT fully inside (boundary-clipped,
+      # newly-exposed, or scrolled-out) had its pixels NOT faithfully moved → dispose its backend so it
+      # re-renders fresh (also fixes the boundary background seam — see comment above).
+      shift_dx = dest_x - src_x
+      shift_dy = dest_y - src_y
       lo_x = layer.bounds.x.round.to_i
       lo_y = layer.bounds.y.round.to_i
       layer.widgets.each do |widget|
@@ -1971,7 +2016,19 @@ module CrymbleUI
         ob_y = (wabs.y.round.to_i - lo_y) - old_origin.y.to_i
         w_w = wabs.width.ceil.to_i
         w_h = wabs.height.ceil.to_i
-        if ob_y + w_h > buf_h || ob_y < 0 || ob_x + w_w > buf_w || ob_x < 0
+        fully_in_overlap = ob_x >= src_x && ob_y >= src_y &&
+                           ob_x + w_w <= src_x + overlap_w && ob_y + w_h <= src_y + overlap_h
+        fully_in_old_buffer = ob_x >= 0 && ob_y >= 0 && ob_x + w_w <= buf_w && ob_y + w_h <= buf_h
+        if fully_in_overlap
+          # pixels faithfully moved by the shift → keep the slot, move it in lockstep.
+          widget.shift_slot(shift_dx, shift_dy)
+        elsif fully_in_old_buffer
+          # backend is VALID (cell was fully rendered) but its pixels weren't copied to the new
+          # position → re-blit the cached backend (cheap, no re-render). Keep the backend.
+          widget.invalidate_slot
+        else
+          # partially clipped at the old boundary → backend holds truncated pixels → dispose so it
+          # re-renders fresh (also fixes the boundary background seam — see comment above).
           widget.widget_backend.try(&.dispose)
           widget.widget_backend = nil
           widget.background_backend.try(&.dispose)

@@ -9,7 +9,6 @@ module CrymbleUI
   # Features:
   # - Sparse cell storage (only visible cells exist as widgets)
   # - Cell lifecycle with hysteresis buffers (creation/destruction zones)
-  # - needs_fresh_background flag management for clean background capture
   # - Multi-layer cell assignment for sticky headers
   # - Scroll position tracking
   #

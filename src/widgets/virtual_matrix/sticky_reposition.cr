@@ -46,7 +46,7 @@ module CrymbleUI
 
         # For compound cells, compute BOTH screen-space position AND visible width
         # from constituent columns' viewport positions. This ensures:
-        # (a) correct screen-space position (not content-space from WU3)
+        # (a) correct screen-space position (not content-space)
         # (b) width shrinks as constituent columns shift out (prevents sibling overlap)
         compound_w = 0.0
         compound_h = 0.0
@@ -70,7 +70,7 @@ module CrymbleUI
             visible_col_count = 0
             single_col_x = 0.0
             single_col_size = 0.0
-            col_shifted = @cached_col_sorted_shifted
+            col_shifted = @cached_col_shifted
             (bb_c1..bb_c2).each do |ci|
               # Primary check: column is in the cached visible set (handles shift-out correctly)
               unless @viewport_col_positions.has_key?(ci)
@@ -78,13 +78,12 @@ module CrymbleUI
                 # physically within viewport bounds. The cache misses these because
                 # max_x changed (scroll) but the sticky cache key didn't update.
                 if shifted = col_shifted
-                  is_shifted = shifted.bsearch { |s| s >= ci }.try { |s| s == ci }
-                  next if is_shifted  # Column is shifted out — skip
+                  next if shifted.includes?(ci)  # Column is shifted out — skip
                 end
                 # Not shifted (or no shift data) — check physical screen visibility below
               end
               true_ci_x = ruler_x_offset + (col_cum ? col_cum[ci].to_f64 : (0...ci).sum { |c| col_sizes[c] }.to_f64)
-              unclamped_scr_x = true_ci_x - @scroll_offset.x.to_i.to_f64
+              unclamped_scr_x = true_ci_x - scroll_offset.x.to_i.to_f64
               col_right = unclamped_scr_x + col_sizes[ci].to_f64
               next if col_right <= sticky_col_w        # fully behind sticky header
               next if unclamped_scr_x >= viewport_right # right of viewport
@@ -110,7 +109,7 @@ module CrymbleUI
               # (behind sticky header) from not-yet-visible (right of viewport).
               sticky_col_w = sticky_col_width_pixels + ruler_col_width_pixels
               last_col_right = ruler_x_offset + (col_cum ? col_cum[bb_c2 + 1].to_f64 : (0..bb_c2).sum { |c| col_sizes[c] }.to_f64)
-              if last_col_right - @scroll_offset.x <= sticky_col_w
+              if last_col_right - scroll_offset.x <= sticky_col_w
                 # Scrolled past sticky header — park off-screen with zero size
                 new_x = OFFSCREEN_PARK
                 compound_w = 0.0
@@ -127,7 +126,7 @@ module CrymbleUI
             # StickyMath positions are recomputed only when a whole column crosses the boundary, so
             # they dropped the sub-column scroll and froze the cells whenever scroll < one column.
             content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-            new_x = ruler_x_offset + content_x - @scroll_offset.x.to_i.to_f64
+            new_x = ruler_x_offset + content_x - scroll_offset.x.to_i.to_f64
           end
         else
           new_x = true_x
@@ -150,7 +149,7 @@ module CrymbleUI
             single_row_size = 0.0
             (bb_r1..bb_r2).each do |ri|
               true_ri_y = ruler_y_offset + (row_cum ? row_cum[ri].to_f64 : (0...ri).sum { |r| row_sizes[r] }.to_f64)
-              unclamped_scr_y = true_ri_y - @scroll_offset.y.to_i.to_f64
+              unclamped_scr_y = true_ri_y - scroll_offset.y.to_i.to_f64
               row_bottom = unclamped_scr_y + row_sizes[ri].to_f64
               # Skip rows entirely behind the sticky header
               next if row_bottom <= sticky_row_h
@@ -177,7 +176,7 @@ module CrymbleUI
               # All constituent rows outside viewport. Distinguish scrolled-past
               # (behind sticky header) from not-yet-visible (below viewport).
               last_row_bottom = ruler_y_offset + (row_cum ? row_cum[bb_r2 + 1].to_f64 : (0..bb_r2).sum { |r| row_sizes[r] }.to_f64)
-              if last_row_bottom - @scroll_offset.y.to_i.to_f64 <= sticky_row_h
+              if last_row_bottom - scroll_offset.y.to_i.to_f64 <= sticky_row_h
                 new_y = OFFSCREEN_PARK
                 compound_h = 0.0
               else
@@ -189,7 +188,7 @@ module CrymbleUI
             # Non-compound: screen-space position = content position − live scroll (see the X path
             # above for why the cached @viewport_row_positions branch was a freeze bug).
             content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-            new_y = ruler_y_offset + content_y - @scroll_offset.y.to_i.to_f64
+            new_y = ruler_y_offset + content_y - scroll_offset.y.to_i.to_f64
           end
         else
           new_y = true_y

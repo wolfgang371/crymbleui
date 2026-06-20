@@ -24,7 +24,7 @@ module CrymbleUI
     property direction : ScrollDirection
 
     # Scroll state - all use reconcile macros for automatic copy_state_from
-    layout_property scroll_offset : Vec2 = Vec2.zero, reconcile: true
+    reactive_property scroll_offset : Vec2 = Vec2.zero, layout: true, reconcile: true
     reconcile_property viewport_size : Size = Size.zero
     reconcile_property content_size : Size = Size.zero
 
@@ -32,8 +32,7 @@ module CrymbleUI
     reconcile_property interaction_mode : ScrollbarInteractionMode = ScrollbarInteractionMode::Idle
     reconcile_property drag_start_offset : Vec2 = Vec2.zero  # Scroll offset when drag started
     reconcile_property drag_start_point : Vec2 = Vec2.zero   # Mouse position when drag started (absolute coords)
-    @[Reconcile]
-    @dragging_axis : Symbol? = nil         # Which axis is being dragged (:vertical or :horizontal)
+    reactive_property dragging_axis : Symbol? = nil, reconcile: true  # Which axis is being dragged (:vertical or :horizontal)
 
     @internal_layer : Layer?
     @scrollbar_layer : Layer?  # Separate layer for scrollbars (non-viewport_cache overlay)
@@ -49,7 +48,16 @@ module CrymbleUI
     property sticky_cols : Int32 = 0        # First N cols sticky at left
     property sticky_row_height : Float64 = 0.0  # Total pixel height of sticky rows
     property sticky_col_width : Float64 = 0.0   # Total pixel width of sticky cols
-    property sticky_background_color : Color = Theme.current.grid_content_background  # Background for sticky layers
+    # Sticky-layer background — live theme (nil = follow Theme.current.grid_content_background; explicit wins)
+    @sticky_background_color : Color? = nil
+
+    def sticky_background_color : Color
+      @sticky_background_color || Theme.current.grid_content_background
+    end
+
+    def sticky_background_color=(value : Color?)
+      @sticky_background_color = value
+    end
 
     # When true (set by an embedded shrink_to_content VirtualMatrix), layers clip
     # to the resizing ancestor's content rect during resize instead of shrinking
@@ -86,7 +94,7 @@ module CrymbleUI
     # Set scroll offset without triggering layout (for sync from parent like VirtualMatrix)
     # Use when scroll offset is being set externally and layout is handled elsewhere
     def set_scroll_offset_for_sync(offset : Vec2)
-      @scroll_offset = offset
+      @scroll_offset.set(offset)  # in-place: NO layout retrigger (method explicitly avoids mark_needs_layout)
       # Update layer scroll_offset for viewport_cache compositing
       if layer = @internal_layer
         layer.scroll_offset = offset
@@ -113,6 +121,17 @@ module CrymbleUI
 
     def layer : Layer?
       @internal_layer
+    end
+
+    # Pull-based layer background: the sticky layers clear to the LIVE sticky background so a
+    # Theme.set recolors them without a rebuild. Content/scrollbar layers keep their cached color.
+    def compute_background_for_layer(layer : Layer) : Color?
+      case layer
+      when @sticky_row_layer, @sticky_col_layer, @sticky_corner_layer
+        sticky_background_color
+      else
+        nil
+      end
     end
 
     # Pull-based layer bounds: dispatch by layer identity
@@ -367,7 +386,7 @@ module CrymbleUI
       layer.z_index = base_z + 1  # Update z_index each layout (parent may have changed)
       layer.viewport_cache = true  # Enable viewport_cache buffer for efficient scrolling
       layer.cache_extent = 100.0  # Pre-render 100px margin around viewport for smooth scrolling
-      layer.scroll_offset = @scroll_offset  # Sync layer scroll offset
+      layer.scroll_offset = scroll_offset  # Sync layer scroll offset
 
       # Create/update sticky layers if configured
       # Sticky layers render headers at fixed positions relative to scroll
@@ -414,7 +433,7 @@ module CrymbleUI
         )
 
         # Sync layer scroll_offset with widget scroll_offset
-        layer.scroll_offset = @scroll_offset
+        layer.scroll_offset = scroll_offset
 
         # Register content to layer for rendering
         @internal_layer.not_nil!.widgets.clear
@@ -458,14 +477,14 @@ module CrymbleUI
           "sticky_row_#{id}",
           Rect.new(row_layer_x, row_layer_y, row_layer_width, row_layer_height),
           z_index: base_z + 2,
-          background_color: @sticky_background_color,
+          background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_row_layer.not_nil!
         layer.z_index = base_z + 2
         layer.viewport_cache = false  # NOT cached - redraws on X-scroll
         # Sync X scroll offset only (Y is fixed at 0)
-        layer.scroll_offset = Vec2.new(@scroll_offset.x, 0.0)
+        layer.scroll_offset = Vec2.new(scroll_offset.x, 0.0)
       else
         @sticky_row_layer = nil
       end
@@ -483,14 +502,14 @@ module CrymbleUI
           "sticky_col_#{id}",
           Rect.new(col_layer_x, col_layer_y, col_layer_width, col_layer_height),
           z_index: base_z + 3,
-          background_color: @sticky_background_color,
+          background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_col_layer.not_nil!
         layer.z_index = base_z + 3
         layer.viewport_cache = false  # NOT cached - redraws on Y-scroll
         # Sync Y scroll offset only (X is fixed at 0)
-        layer.scroll_offset = Vec2.new(0.0, @scroll_offset.y)
+        layer.scroll_offset = Vec2.new(0.0, scroll_offset.y)
       else
         @sticky_col_layer = nil
       end
@@ -507,7 +526,7 @@ module CrymbleUI
           "sticky_corner_#{id}",
           Rect.new(corner_layer_x, corner_layer_y, corner_layer_width, corner_layer_height),
           z_index: base_z + 4,
-          background_color: @sticky_background_color,
+          background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_corner_layer.not_nil!
@@ -677,15 +696,15 @@ module CrymbleUI
 
     # Test helper: set scroll offset directly (for testing edge cases)
     def set_scroll_offset_for_test(offset : Vec2)
-      @scroll_offset = offset
+      @scroll_offset.set(offset)  # in-place: explicit mark_needs_layout follows on next line
       mark_needs_layout  # Trigger re-layout so content position updates
       update_visibility_on_scroll  # Update visibility and re-detect hover
     end
 
     # No manual copy_state_from needed - all state uses reconcile macros:
-    # - scroll_offset: layout_property (auto-reconcile + layout invalidation)
+    # - scroll_offset: reactive_property (layout: true, reconcile: true) — Source-backed + layout invalidation
     # - viewport_size, content_size: reconcile_property (auto-reconcile, no invalidation)
-    # - interaction_mode, drag_start_*: reconcile_property (auto-reconcile, no invalidation)
+    # - interaction_mode, drag_start_*, dragging_axis: auto-reconcile, no invalidation
 
     # Mouse wheel scrolling
     SCROLL_WHEEL_SPEED = 20.0  # Pixels per wheel notch
@@ -707,17 +726,18 @@ module CrymbleUI
       when ScrollDirection::Vertical
         # Only responds to vertical scroll (effective_delta.y)
         # Horizontal touchpad swipes are ignored
-        @scroll_offset = Vec2.new(@scroll_offset.x, @scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED)
+        # in-place set: scroll path must NOT trigger layout (viewport_cache, see below)
+        @scroll_offset.set(Vec2.new(scroll_offset.x, scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED))
       when ScrollDirection::Horizontal
         # Only responds to horizontal scroll (effective_delta.x)
         # Vertical touchpad swipes are ignored
-        @scroll_offset = Vec2.new(@scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED, @scroll_offset.y)
+        @scroll_offset.set(Vec2.new(scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED, scroll_offset.y))
       when ScrollDirection::Both
         # Responds to both axes independently
-        @scroll_offset = Vec2.new(
-          @scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED,
-          @scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED
-        )
+        @scroll_offset.set(Vec2.new(
+          scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED,
+          scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED
+        ))
       end
 
       # Clamp to valid range
@@ -726,7 +746,7 @@ module CrymbleUI
       # VIEWPORT_CACHE: Update layer scroll_offset instead of triggering layout
       # Widget positions don't change, only the viewport offset changes
       if layer = @internal_layer
-        layer.scroll_offset = @scroll_offset
+        layer.scroll_offset = scroll_offset
       end
 
       # Update visibility and render only scrollbar (no layout needed!)
@@ -735,16 +755,20 @@ module CrymbleUI
     end
 
     private def clamp_scroll_offset
-      @scroll_offset = Vec2.new(
-        @scroll_offset.x.clamp(0.0, max_scroll_x),
-        @scroll_offset.y.clamp(0.0, max_scroll_y)
-      )
+      # in-place set: clamp runs in scroll/layout paths that manage layout themselves; no retrigger
+      @scroll_offset.set(Vec2.new(
+        scroll_offset.x.clamp(0.0, max_scroll_x),
+        scroll_offset.y.clamp(0.0, max_scroll_y)
+      ))
     end
 
     # Mark self for re-render on scrollbar layer (for scrollbar primitives)
     # ScrollView is registered in @scrollbar_layer.widgets, so mark that layer dirty
     private def mark_scrollbar_needs_render
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
+      @primitives_node.try(&.touch) # invalidate the pull node directly (was bridged
+      # only by the get_primitives needs_render? combinator). Makes this the last widget-level @state
+      # writer to become node-touching, so that combinator is now redundant.
       if scrollbar_layer = @scrollbar_layer
         scrollbar_layer.mark_needs_render(self)
       end
@@ -783,13 +807,13 @@ module CrymbleUI
       # Calculate visible region (accounting for scrollbars)
       eff_height = effective_viewport_height
       eff_width = effective_viewport_width
-      visible_top = @scroll_offset.y
-      visible_bottom = @scroll_offset.y + eff_height
-      visible_left = @scroll_offset.x
-      visible_right = @scroll_offset.x + eff_width
+      visible_top = scroll_offset.y
+      visible_bottom = scroll_offset.y + eff_height
+      visible_left = scroll_offset.x
+      visible_right = scroll_offset.x + eff_width
 
-      new_scroll_x = @scroll_offset.x
-      new_scroll_y = @scroll_offset.y
+      new_scroll_x = scroll_offset.x
+      new_scroll_y = scroll_offset.y
 
       # Check vertical visibility (for Vertical and Both directions)
       if @direction == ScrollDirection::Vertical || @direction == ScrollDirection::Both
@@ -814,13 +838,13 @@ module CrymbleUI
       end
 
       # Only update if scroll actually changed
-      if new_scroll_x != @scroll_offset.x || new_scroll_y != @scroll_offset.y
-        @scroll_offset = Vec2.new(new_scroll_x, new_scroll_y)
+      if new_scroll_x != scroll_offset.x || new_scroll_y != scroll_offset.y
+        @scroll_offset.set(Vec2.new(new_scroll_x, new_scroll_y))  # in-place: scroll path, no layout retrigger
         clamp_scroll_offset
 
         # Update layer scroll offset for viewport_cache rendering
         if layer = @internal_layer
-          layer.scroll_offset = @scroll_offset
+          layer.scroll_offset = scroll_offset
         end
 
         update_visibility_on_scroll
@@ -852,7 +876,7 @@ module CrymbleUI
       # screen coords to content coords in viewport_cache mode
       # Content widgets have abs_bounds based on layout (not rendered position)
       # so we need to shift the test point to match content coordinate system
-      content_point = Vec2.new(point.x + @scroll_offset.x, point.y + @scroll_offset.y)
+      content_point = Vec2.new(point.x + scroll_offset.x, point.y + scroll_offset.y)
 
 
       # Check content children with adjusted point
@@ -920,7 +944,7 @@ module CrymbleUI
           scroll_ratio = max_scroll_y / thumb_travel
           scroll_delta = delta.y * scroll_ratio
 
-          @scroll_offset = Vec2.new(@scroll_offset.x, @drag_start_offset.y + scroll_delta)
+          @scroll_offset.set(Vec2.new(scroll_offset.x, @drag_start_offset.y + scroll_delta))  # in-place: scrollbar drag, no layout
         end
 
       when ScrollDirection::Horizontal
@@ -934,13 +958,13 @@ module CrymbleUI
           scroll_ratio = max_scroll_x / thumb_travel
           scroll_delta = delta.x * scroll_ratio
 
-          @scroll_offset = Vec2.new(@drag_start_offset.x + scroll_delta, @scroll_offset.y)
+          @scroll_offset.set(Vec2.new(@drag_start_offset.x + scroll_delta, scroll_offset.y))  # in-place: scrollbar drag, no layout
         end
 
       when ScrollDirection::Both
         # Handle both directions, but ONLY apply delta for the axis being dragged
         # This prevents horizontal jitter from affecting vertical scrollbar drag and vice versa
-        case @dragging_axis
+        case dragging_axis
         when :vertical
           # Only apply vertical delta
           v_track_height = effective_vertical_track_height
@@ -951,7 +975,7 @@ module CrymbleUI
             v_thumb_travel = v_available_track - v_thumb_height
             v_scroll_ratio = max_scroll_y / v_thumb_travel
             v_scroll_delta = delta.y * v_scroll_ratio
-            @scroll_offset = Vec2.new(@scroll_offset.x, @drag_start_offset.y + v_scroll_delta)
+            @scroll_offset.set(Vec2.new(scroll_offset.x, @drag_start_offset.y + v_scroll_delta))  # in-place: scrollbar drag, no layout
           end
 
         when :horizontal
@@ -964,7 +988,7 @@ module CrymbleUI
             h_thumb_travel = h_available_track - h_thumb_width
             h_scroll_ratio = max_scroll_x / h_thumb_travel
             h_scroll_delta = delta.x * h_scroll_ratio
-            @scroll_offset = Vec2.new(@drag_start_offset.x + h_scroll_delta, @scroll_offset.y)
+            @scroll_offset.set(Vec2.new(@drag_start_offset.x + h_scroll_delta, scroll_offset.y))  # in-place: scrollbar drag, no layout
           end
         end
       end
@@ -974,7 +998,7 @@ module CrymbleUI
 
       # VIEWPORT_CACHE: Update layer scroll_offset instead of triggering layout
       if layer = @internal_layer
-        layer.scroll_offset = @scroll_offset
+        layer.scroll_offset = scroll_offset
       end
 
       update_visibility_on_scroll
@@ -985,7 +1009,7 @@ module CrymbleUI
     def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       was_dragging = @interaction_mode == ScrollbarInteractionMode::DraggingThumb
       @interaction_mode = ScrollbarInteractionMode::Idle
-      @dragging_axis = nil
+      self.dragging_axis = nil
 
       # Do deferred full visibility update after drag ends
       if was_dragging
@@ -1104,7 +1128,7 @@ module CrymbleUI
 
       thumb_height = calculate_vertical_thumb_height
       # Thumb moves within [ARROW_SIZE, track_height - ARROW_SIZE - thumb_height]
-      ARROW_SIZE + (@scroll_offset.y / max_scroll_y) * (available_track - thumb_height)
+      ARROW_SIZE + (scroll_offset.y / max_scroll_y) * (available_track - thumb_height)
     end
 
     private def calculate_horizontal_thumb_x : Float64
@@ -1114,7 +1138,7 @@ module CrymbleUI
 
       thumb_width = calculate_horizontal_thumb_width
       # Thumb moves within [ARROW_SIZE, track_width - ARROW_SIZE - thumb_width]
-      ARROW_SIZE + (@scroll_offset.x / max_scroll_x) * (available_track - thumb_width)
+      ARROW_SIZE + (scroll_offset.x / max_scroll_x) * (available_track - thumb_width)
     end
 
     # Scrollbar click handlers (use widget-local coordinates for hit testing)
@@ -1123,8 +1147,8 @@ module CrymbleUI
       # Check thumb FIRST (it can overlap with arrows visually)
       if point_in_vertical_thumb?(local_point)
         @interaction_mode = ScrollbarInteractionMode::DraggingThumb
-        @dragging_axis = :vertical  # Track which axis for Both mode
-        @drag_start_offset = @scroll_offset
+        self.dragging_axis = :vertical  # Track which axis for Both mode
+        @drag_start_offset = scroll_offset
         @drag_start_point = abs_point  # Store absolute point for drag tracking
         return
       end
@@ -1158,8 +1182,8 @@ module CrymbleUI
       # Check thumb FIRST (it can overlap with arrows visually)
       if point_in_horizontal_thumb?(local_point)
         @interaction_mode = ScrollbarInteractionMode::DraggingThumb
-        @dragging_axis = :horizontal  # Track which axis for Both mode
-        @drag_start_offset = @scroll_offset
+        self.dragging_axis = :horizontal  # Track which axis for Both mode
+        @drag_start_offset = scroll_offset
         @drag_start_point = abs_point  # Store absolute point for drag tracking
         return
       end
@@ -1194,16 +1218,16 @@ module CrymbleUI
 
     private def scroll_by_line(direction : Int32, vertical : Bool)
       if vertical
-        @scroll_offset = Vec2.new(@scroll_offset.x, @scroll_offset.y + direction * LINE_SCROLL_AMOUNT)
+        @scroll_offset.set(Vec2.new(scroll_offset.x, scroll_offset.y + direction * LINE_SCROLL_AMOUNT))  # in-place: scroll path, no layout
       else
-        @scroll_offset = Vec2.new(@scroll_offset.x + direction * LINE_SCROLL_AMOUNT, @scroll_offset.y)
+        @scroll_offset.set(Vec2.new(scroll_offset.x + direction * LINE_SCROLL_AMOUNT, scroll_offset.y))  # in-place: scroll path, no layout
       end
 
       clamp_scroll_offset
 
       # VIEWPORT_CACHE: Update layer scroll_offset instead of triggering layout
       if layer = @internal_layer
-        layer.scroll_offset = @scroll_offset
+        layer.scroll_offset = scroll_offset
       end
 
       update_visibility_on_scroll
@@ -1212,19 +1236,23 @@ module CrymbleUI
 
     # Scroll by page (track click)
     private def scroll_by_page(direction : Int32, vertical : Bool)
+      # Page by the SCROLLABLE data area, not the full viewport. The opposite-axis scrollbar
+      # (effective_viewport_*) and any pinned sticky headers + ruler (@sticky_*) sit inside the
+      # viewport and do NOT scroll, so paging the full extent overshoots by that much and skips
+      # the rows/cols behind them. For a plain ScrollView both terms are 0 (full viewport).
       if vertical
-        page_amount = @viewport_size.height
-        @scroll_offset = Vec2.new(@scroll_offset.x, @scroll_offset.y + direction * page_amount)
+        page_amount = {effective_viewport_height - @sticky_row_height, 0.0}.max
+        @scroll_offset.set(Vec2.new(scroll_offset.x, scroll_offset.y + direction * page_amount))  # in-place: scroll path, no layout
       else
-        page_amount = @viewport_size.width
-        @scroll_offset = Vec2.new(@scroll_offset.x + direction * page_amount, @scroll_offset.y)
+        page_amount = {effective_viewport_width - @sticky_col_width, 0.0}.max
+        @scroll_offset.set(Vec2.new(scroll_offset.x + direction * page_amount, scroll_offset.y))  # in-place: scroll path, no layout
       end
 
       clamp_scroll_offset
 
       # VIEWPORT_CACHE: Update layer scroll_offset instead of triggering layout
       if layer = @internal_layer
-        layer.scroll_offset = @scroll_offset
+        layer.scroll_offset = scroll_offset
       end
 
       update_visibility_on_scroll
@@ -1242,8 +1270,8 @@ module CrymbleUI
 
       # Calculate viewport rectangle in content coordinates
       viewport = Rect.new(
-        @scroll_offset.x,
-        @scroll_offset.y,
+        scroll_offset.x,
+        scroll_offset.y,
         effective_viewport_width,
         effective_viewport_height
       )
@@ -1292,13 +1320,13 @@ module CrymbleUI
       # to the layer buffer at its buffer-relative position.
 
       # OPTIMIZATION: Skip if already updated at this scroll offset (dedup multiple calls per frame)
-      if @scroll_offset.x == @last_visibility_offset.x && @scroll_offset.y == @last_visibility_offset.y
+      if scroll_offset.x == @last_visibility_offset.x && scroll_offset.y == @last_visibility_offset.y
         return
       end
-      @last_visibility_offset = @scroll_offset
+      @last_visibility_offset = scroll_offset
 
       # Notify parent (e.g., VirtualMatrix) of scroll change
-      @on_scroll_changed.try(&.call(@scroll_offset))
+      @on_scroll_changed.try(&.call(scroll_offset))
 
       update_visibility_on_scroll_impl
     end
@@ -1309,8 +1337,8 @@ module CrymbleUI
 
       # Calculate new viewport rectangle
       viewport = Rect.new(
-        @scroll_offset.x,
-        @scroll_offset.y,
+        scroll_offset.x,
+        scroll_offset.y,
         effective_viewport_width,
         effective_viewport_height
       )

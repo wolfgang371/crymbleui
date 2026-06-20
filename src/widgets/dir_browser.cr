@@ -91,14 +91,14 @@ module CrymbleUI
 
           case col
           when 0
-            bg = Theme.current.input_background
             selected = @selected_filename == name && !info.directory?
-            btn_bg = selected ? Color.new(60_u8, 100_u8, 180_u8, 255_u8) : bg
+            # Live theme refs (input_background/text_default), except the selected highlight (a real override).
+            btn_bg = selected ? Color.new(60_u8, 100_u8, 180_u8, 255_u8) : Theme.ref(&.input_background)
             captured_name = name
             captured_is_dir = info.directory?
             Button.new(name, padding: 1.0,
-              background_color: btn_bg, border_color: bg,
-              text_color: Theme.current.text_default,
+              background_color: btn_bg, border_color: Theme.ref(&.input_background),
+              text_color: Theme.ref(&.text_default),
               text_align: TextAlign::Left,
               id: "dirbrowser_item_#{index}") do
               if captured_is_dir

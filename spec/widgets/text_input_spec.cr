@@ -4,6 +4,21 @@ require "../../src/widgets/window"
 require "../../src/core/scheduler"
 require "../../src/testing/test_renderer"
 
+# Test app for verifying Source-backed reactive_property invalidation
+class ValueRenderApp < CrymbleUI::App
+    def build : CrymbleUI::Widget
+        window = CrymbleUI::Window.new("Test", 200, 50)
+        input = CrymbleUI::TextInput.new(
+            id: "ti",
+            value: "initial",
+            width: 100.0
+        )
+        window.children << input
+        input.parent = window
+        window
+    end
+end
+
 # Test app for border pixel test
 class BorderTestApp < CrymbleUI::App
     def build : CrymbleUI::Widget
@@ -223,12 +238,23 @@ describe CrymbleUI::TextInput do
             input.value.should eq("new")
         end
 
-        it "marks widget as needing render" do
-            input = CrymbleUI::TextInput.new
-            input.state = CrymbleUI::WidgetState::Clean
+        it "marks widget as needing render (via Source auto-capture after first render)" do
+            # Value is a Source-backed reactive_property. Setting it does NOT
+            # push @state — the primitives node is invalidated via the reactive graph instead.
+            # Verify via the node-derived path: render once (creating @primitives_node), then
+            # set value and confirm needs_render? returns true because the node is now stale.
+            renderer = CrymbleUI::Testing::TestRenderer.new(200, 50)
+            app = ValueRenderApp.new
+            app.build_tree
+            renderer.render_frame(app)
+
+            input = app.find("ti").as(CrymbleUI::TextInput)
+            # After first render the primitives node exists and is valid
+            input.needs_render?.should be_false
 
             input.value = "changed"
 
+            # Source.set() invalidated the node — needs re-render
             input.needs_render?.should be_true
         end
     end
@@ -1190,12 +1216,12 @@ describe CrymbleUI::TextInput do
         end
     end
 
-    # T-006: cell-keyboard ops live in embrace, registered as cursor-scoped
+    # Cell-keyboard ops live in embrace, registered as cursor-scoped
     # panel shortcuts. TextInput gates ONLY the keys with a competing cell-op
     # (Ctrl+X cut, Ctrl+V paste, bare Delete delete-record) to FullEdit, so in
     # QuickEntry they bubble (return false) to the owner. Keys with no cell-op
     # counterpart (Ctrl+C, Backspace, Ctrl+A) stay editor-handled in both modes.
-    describe "CNP mode gating (T-006)" do
+    describe "CNP mode gating" do
         it "QuickEntry Ctrl+X is not consumed — bubbles to the cell-cut shortcut" do
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
             input.on_key_down(SF::Keyboard::Key::X, true, false).should be_false

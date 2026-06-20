@@ -24,6 +24,7 @@ require "../widgets/scroll_view"
 require "../widgets/expanded"
 require "../widgets/combo_box_item"
 require "../widgets/combo_box"
+require "../widgets/multi_combo_box"
 require "../layout/recursive_grid"
 require "../widgets/border_box"
 require "../widgets/tree_node"
@@ -257,6 +258,55 @@ module CrymbleUI
                 widget
             end
 
+            # Multi-select combo box — `selected` is a Set(Int32).
+            # `selected` is REQUIRED (no default) so a bare `combo_box(items: …)`
+            # stays unambiguously the Int32 path.
+            # The block receives `(index : Int32, now_on : Bool)`.
+            def combo_box(
+                items : Array(String),
+                selected : Set(Int32),
+                width : Float64? = nil,
+                id : String? = nil,
+                summary : (Set(Int32) -> String)? = nil,
+                &block : Int32, Bool -> Nil
+            )
+                ensure_container_stack
+                widget = MultiComboBox.new(
+                    items: items,
+                    selected: selected,
+                    width: width,
+                    id: id,
+                    summary: summary,
+                    &block
+                )
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(widget)
+                end
+                widget
+            end
+
+            # Multi-select combo box without callback
+            def combo_box(
+                items : Array(String),
+                selected : Set(Int32),
+                width : Float64? = nil,
+                id : String? = nil,
+                summary : (Set(Int32) -> String)? = nil
+            )
+                ensure_container_stack
+                widget = MultiComboBox.new(
+                    items: items,
+                    selected: selected,
+                    width: width,
+                    id: id,
+                    summary: summary
+                )
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(widget)
+                end
+                widget
+            end
+
             # Create an expanded wrapper that fills remaining space in HStack/VStack
             #
             # Example:
@@ -360,7 +410,7 @@ module CrymbleUI
                 content : String,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                color : Color = Theme.current.text_default
+                color : Color? = nil
             )
                 widget = Text.new(content, id: id, font_scale: font_scale, color: color)
                 current_container.add_child(widget)
@@ -377,9 +427,9 @@ module CrymbleUI
                 shortcut : String? = nil,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.button_text,
-                background_color : Color = Theme.current.button_background,
-                border_color : Color = Theme.current.button_border,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
                 text_align : TextAlign = TextAlign::Center,
                 padding : Float64 = 10.0,
                 user_data : Hash(Symbol, String)? = nil,
@@ -426,9 +476,9 @@ module CrymbleUI
                 text : String = "Ready",
                 id : String? = nil,
                 font_scale : Int32 = -1,
-                text_color : Color = Theme.current.statusbar_text,
-                background_color : Color = Theme.current.statusbar_background,
-                border_color : Color = Theme.current.statusbar_border,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
                 height : Float64 = 24.0,
                 padding : Float64 = 5.0
             )
@@ -472,10 +522,10 @@ module CrymbleUI
                 checked : Bool,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.checkbox_text,
+                text_color : Color? = nil,
                 box_scale : Int32 = 0,
-                box_color : Color = Theme.current.checkbox_box,
-                check_color : Color = Theme.current.checkbox_check,
+                box_color : Color? = nil,
+                check_color : Color? = nil,
                 spacing : Float64 = 8.0,
                 &block : -> Nil
             )
@@ -511,10 +561,10 @@ module CrymbleUI
                 state : CheckState,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.checkbox_text,
+                text_color : Color? = nil,
                 box_scale : Int32 = 0,
-                box_color : Color = Theme.current.checkbox_box,
-                check_color : Color = Theme.current.checkbox_check,
+                box_color : Color? = nil,
+                check_color : Color? = nil,
                 spacing : Float64 = 8.0,
                 &block : -> Nil
             )
@@ -562,11 +612,11 @@ module CrymbleUI
                 width : Float64? = nil,
                 placeholder : String = "",
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.input_text,
-                background_color : Color = Theme.current.input_background,
-                border_color : Color = Theme.current.input_border,
-                focused_border_color : Color = Theme.current.input_border_focused,
-                placeholder_color : Color = Theme.current.input_placeholder,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
+                focused_border_color : Color? = nil,
+                placeholder_color : Color? = nil,
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
@@ -606,11 +656,11 @@ module CrymbleUI
                 width : Float64? = nil,
                 placeholder : String = "",
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.input_text,
-                background_color : Color = Theme.current.input_background,
-                border_color : Color = Theme.current.input_border,
-                focused_border_color : Color = Theme.current.input_border_focused,
-                placeholder_color : Color = Theme.current.input_placeholder,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
+                focused_border_color : Color? = nil,
+                placeholder_color : Color? = nil,
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
@@ -643,11 +693,11 @@ module CrymbleUI
                 width : Float64? = nil,
                 placeholder : String = "",
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.input_text,
-                background_color : Color = Theme.current.input_background,
-                border_color : Color = Theme.current.input_border,
-                focused_border_color : Color = Theme.current.input_border_focused,
-                placeholder_color : Color = Theme.current.input_placeholder,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
+                focused_border_color : Color? = nil,
+                placeholder_color : Color? = nil,
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil
@@ -879,8 +929,8 @@ module CrymbleUI
                 width : Float64? = nil,
                 height : Float64? = nil,
                 padding : Float64 = 10.0,
-                background_color : Color = Theme.current.popup_background,
-                border_color : Color = Theme.current.popup_border,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
                 z_index : Int32 = 1000,
                 id : String? = nil,
                 &block
@@ -1017,8 +1067,8 @@ module CrymbleUI
             def drop_zone(
                 accept_types : Array(String),
                 on_drop : Proc(DragData, Vec2, Nil)? = nil,
-                background_color : Color = Theme.current.dropzone_background,
-                hover_color : Color = Theme.current.dropzone_hover,
+                background_color : ThemeColor? = Theme.ref(&.dropzone_background), # live; pass nil for no bg
+                hover_color : ThemeColor? = nil,
                 id : String? = nil,
                 &block
             )
@@ -1068,8 +1118,8 @@ module CrymbleUI
                 expanded : Bool = false,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.text_default,
-                indicator_color : Color = Theme.current.text_default,
+                text_color : Color? = nil,
+                indicator_color : Color? = nil,
                 &block
             )
                 ensure_container_stack
@@ -1122,7 +1172,7 @@ module CrymbleUI
                 content : String,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                color : Color = Theme.current.text_default
+                color : Color? = nil
             ) : Widget
                 Text.new(content, id: id, font_scale: font_scale, color: color)
             end
@@ -1133,9 +1183,9 @@ module CrymbleUI
                 shortcut : String? = nil,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.button_text,
-                background_color : Color = Theme.current.button_background,
-                border_color : Color = Theme.current.button_border,
+                text_color : Color? = nil,
+                background_color : Color? = nil,
+                border_color : Color? = nil,
                 text_align : TextAlign = TextAlign::Center,
                 padding : Float64 = 10.0,
                 user_data : Hash(Symbol, String)? = nil,
@@ -1163,10 +1213,10 @@ module CrymbleUI
                 checked : Bool,
                 id : String? = nil,
                 font_scale : Int32 = 0,
-                text_color : Color = Theme.current.checkbox_text,
+                text_color : Color? = nil,
                 box_scale : Int32 = 0,
-                box_color : Color = Theme.current.checkbox_box,
-                check_color : Color = Theme.current.checkbox_check,
+                box_color : Color? = nil,
+                check_color : Color? = nil,
                 spacing : Float64 = 8.0,
                 &block : -> Nil
             ) : Widget

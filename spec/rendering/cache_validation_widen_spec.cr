@@ -47,6 +47,7 @@ end
 
 describe "Cache Validation — column widen" do
   before_each do
+    CrymbleUI::CacheValidation.suite_gate = false # self-tests assert on failures themselves
     CrymbleUI::CacheValidation.clear_failures!
     CrymbleUI::CacheValidation.enable(:immediate_mode)
   end

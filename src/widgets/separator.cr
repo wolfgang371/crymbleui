@@ -25,13 +25,14 @@ module CrymbleUI
         LINE_MARGIN = 4.0      # Horizontal margin on each side
         LINE_THICKNESS = 1.0   # Line height in pixels
 
-        # Visual properties
-        render_property color : Color
+        # Visual properties — live theme color (nil = follow Theme.current; explicit wins)
+        theme_property color, separator_color
 
         def initialize(
             id : String? = nil,
-            @color : Color = Theme.current.separator_color
+            color : Color? = nil
         )
+            @color = color
             super(id: id)
         end
 
@@ -84,7 +85,7 @@ module CrymbleUI
             line_rect = Rect.new(LINE_MARGIN, line_y, bounds.width - LINE_MARGIN * 2, LINE_THICKNESS)
 
             primitives do
-                fill_rect(line_rect, @color)
+                fill_rect(line_rect, color)
             end
         end
     end

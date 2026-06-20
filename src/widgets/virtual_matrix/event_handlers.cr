@@ -5,7 +5,7 @@ module CrymbleUI
     def on_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false) : Bool
       return false unless absolute_bounds.contains_point(point)
 
-      old_offset = @scroll_offset
+      old_offset = scroll_offset
       new_offset = old_offset
 
       if shift
@@ -23,45 +23,12 @@ module CrymbleUI
       end
 
       if new_offset != old_offset
-        @scroll_offset = new_offset
-        @last_synced_scroll_offset = new_offset
         {% if flag?(:DEBUG_BLIT) %}
           File.open("/tmp/blit_trace.log", "a") do |f|
-            f.puts ">>> MOUSE_WHEEL: (#{old_offset.x.round(1)},#{old_offset.y.round(1)}) → (#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)}) delta=(#{delta.x},#{delta.y})"
+            f.puts ">>> MOUSE_WHEEL: (#{old_offset.x.round(1)},#{old_offset.y.round(1)}) → (#{new_offset.x.round(1)},#{new_offset.y.round(1)}) delta=(#{delta.x},#{delta.y})"
           end
         {% end %}
-
-        # VIEWPORT_CACHE: Update layer scroll_offset for smooth panning
-        # Widget positions don't change, only the viewport offset changes
-        if layer = @content_layer
-          layer.scroll_offset = @scroll_offset
-        end
-
-        # Sync to ScrollView (for scrollbar thumb position)
-        # Use silent setter to avoid triggering layout (scroll is O(1) compositing)
-        if sv = @content_scroll_view
-          sv.set_scroll_offset_for_sync(@scroll_offset)
-        end
-
-        # Always call update_visible_cells to check for new cells at viewport edges
-        # The function has early-exit optimization when indices don't change
-        # Use content layer dimensions (excludes scrollbar width) to match sync_from_scroll_view
-        vp_w = @content_layer.try(&.bounds.width) || bounds.width
-        vp_h = @content_layer.try(&.bounds.height) || bounds.height
-        if vp_w > 0 && vp_h > 0
-          update_visible_cells(vp_w, vp_h)
-        end
-
-        # Mark for render to display the updated viewport
-        mark_needs_render
-        mark_cursor_overlay_dirty
-
-        # Mark ruler widgets dirty so sticky layers re-render with new scroll offset.
-        # reposition_sticky_cells only marks layers when sticky data cells change,
-        # but rulers (CachePolicy::Never) read scroll_offset in to_primitives and
-        # need their layers re-rendered even with no sticky data cells.
-        mark_ruler_widgets_dirty
-
+        self.scroll_offset = new_offset  # custom setter: Source.set + apply_scroll
         return true
       end
 
@@ -94,8 +61,8 @@ module CrymbleUI
       screen_y = point.y - content_y
 
       # Clicks in ruler strips don't select cells
-      return nil if screen_y < ruler_row_height_pixels && @show_rulers
-      return nil if screen_x < ruler_col_width_pixels && @show_rulers
+      return nil if screen_y < ruler_row_height_pixels && show_rulers
+      return nil if screen_x < ruler_col_width_pixels && show_rulers
 
       # Subtract ruler offsets to get data-area coordinates
       data_x = screen_x - ruler_col_width_pixels
@@ -106,8 +73,8 @@ module CrymbleUI
       in_sticky_col = data_x < sticky_col_width_pixels && sticky_col_count > 0
       in_sticky_row = data_y < sticky_row_height_pixels && sticky_row_count > 0
 
-      local_x = in_sticky_col ? data_x : data_x + @scroll_offset.x
-      local_y = in_sticky_row ? data_y : data_y + @scroll_offset.y
+      local_x = in_sticky_col ? data_x : data_x + scroll_offset.x
+      local_y = in_sticky_row ? data_y : data_y + scroll_offset.y
       return nil if local_x < 0 || local_y < 0
 
       # Find column — O(log N) binary search on cached physical cumulative array
@@ -177,7 +144,7 @@ module CrymbleUI
         ancestor_scroll = ancestor_scroll_offset
         content_point = Vec2.new(point.x + ancestor_scroll.x, point.y + ancestor_scroll.y)
         if sv = @content_scroll_view
-          @scroll_offset = sv.scroll_offset
+          @scroll_offset.set(sv.scroll_offset)
         end
         if cell_rc = point_to_cell(content_point)
           if widget = @active_cells[cell_rc]?
@@ -222,10 +189,10 @@ module CrymbleUI
       ruler_w = ruler_col_width_pixels
 
       # Column borders: only in column ruler strip (top ruler_h pixels)
-      if @show_rulers && sy < ruler_h
+      if show_rulers && sy < ruler_h
         # local_x is in grid space (subtract ruler_w offset, then handle scroll)
         grid_x = sx - ruler_w
-        local_x = (grid_x < sticky_col_width_pixels && sticky_col_count > 0) ? grid_x : grid_x + @scroll_offset.x
+        local_x = (grid_x < sticky_col_width_pixels && sticky_col_count > 0) ? grid_x : grid_x + scroll_offset.x
         acc = 0.0
         (0...@cols).each do |c|
           acc += col_width_pixels(c)
@@ -235,10 +202,10 @@ module CrymbleUI
       end
 
       # Row borders: only in row ruler strip (left ruler_w pixels)
-      if @show_rulers && sx < ruler_w
+      if show_rulers && sx < ruler_w
         # local_y is in grid space (subtract ruler_h offset, then handle scroll)
         grid_y = sy - ruler_h
-        local_y = (grid_y < sticky_row_height_pixels && sticky_row_count > 0) ? grid_y : grid_y + @scroll_offset.y
+        local_y = (grid_y < sticky_row_height_pixels && sticky_row_count > 0) ? grid_y : grid_y + scroll_offset.y
         acc = 0.0
         (0...@rows).each do |r|
           acc += row_height_pixels(r)
@@ -270,7 +237,7 @@ module CrymbleUI
       if button == MouseButton::Right
         content_point = Vec2.new(point.x + ancestor_scroll_offset.x, point.y + ancestor_scroll_offset.y)
         if sv = @content_scroll_view
-          @scroll_offset = sv.scroll_offset
+          @scroll_offset.set(sv.scroll_offset)
         end
         if cell = point_to_cell(content_point)
           set_cursor_from_cell(cell)
@@ -288,7 +255,7 @@ module CrymbleUI
 
       # Sync scroll offset from ScrollView (user may have scrolled via scrollbar)
       if sv = @content_scroll_view
-        @scroll_offset = sv.scroll_offset
+        @scroll_offset.set(sv.scroll_offset)
       end
 
       # Check resize edge first
@@ -299,11 +266,11 @@ module CrymbleUI
         sy = content_point.y - absolute_bounds.y
         if edge[0] == ResizeAxis::Col
           grid_x = sx - ruler_col_width_pixels
-          self.resize_start_mouse = grid_x + (grid_x >= sticky_col_width_pixels ? @scroll_offset.x : 0.0)
+          self.resize_start_mouse = grid_x + (grid_x >= sticky_col_width_pixels ? scroll_offset.x : 0.0)
           self.resize_start_size = get_col_width(edge[1])
         else
           grid_y = sy - ruler_row_height_pixels
-          self.resize_start_mouse = grid_y + (grid_y >= sticky_row_height_pixels ? @scroll_offset.y : 0.0)
+          self.resize_start_mouse = grid_y + (grid_y >= sticky_row_height_pixels ? scroll_offset.y : 0.0)
           self.resize_start_size = get_row_height(edge[1])
         end
         return true
@@ -353,13 +320,13 @@ module CrymbleUI
 
       if resize_axis == ResizeAxis::Col
         grid_x = sx - ruler_col_width_pixels
-        current = grid_x + (grid_x >= sticky_col_width_pixels ? @scroll_offset.x : 0.0)
+        current = grid_x + (grid_x >= sticky_col_width_pixels ? scroll_offset.x : 0.0)
         delta_pixels = current - resize_start_mouse
         new_width = (resize_start_size + delta_pixels / frame_height).clamp(MIN_COL_WIDTH, Float64::MAX)
         set_col_width_for_drag(resize_index, new_width)
       else
         grid_y = sy - ruler_row_height_pixels
-        current = grid_y + (grid_y >= sticky_row_height_pixels ? @scroll_offset.y : 0.0)
+        current = grid_y + (grid_y >= sticky_row_height_pixels ? scroll_offset.y : 0.0)
         delta_pixels = current - resize_start_mouse
         new_height = (resize_start_size + delta_pixels / frame_height).clamp(MIN_ROW_HEIGHT, Float64::MAX)
         set_row_height_for_drag(resize_index, new_height)
@@ -461,7 +428,7 @@ module CrymbleUI
       # close popup). Panel-scoped Escape shortcuts (dialog close) are handled
       # BEFORE focus dispatch in the SFML renderer. Cancelling a pending cell
       # cut is an app-level concern (the owner's handle_escape) — the matrix no
-      # longer carries cell-op vocabulary (T-006).
+      # longer carries cell-op vocabulary.
       if key == SF::Keyboard::Key::Escape
         if proxy = @proxy_focused_widget
           proxy.on_key_down(key, control, shift)
@@ -486,7 +453,7 @@ module CrymbleUI
           # App-level activation (e.g. drill-down) gets priority over the
           # proxy's default Enter/Space handler. If on_cell_activate returns
           # true, skip proxy forward entirely.
-          if @on_cell_activate.try(&.call(@cursor_rc))
+          if @on_cell_activate.try(&.call(cursor_rc))
             return true
           end
           if proxy.on_key_down(key, control, shift)
@@ -530,7 +497,7 @@ module CrymbleUI
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
           _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
-          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_UP: #{_kd_ms.round(2)}ms cursor=#{@cursor_rc} scroll=#{@scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
+          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_UP: #{_kd_ms.round(2)}ms cursor=#{cursor_rc} scroll=#{scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
         {% end %}
         true
       when SF::Keyboard::Key::Down
@@ -540,7 +507,7 @@ module CrymbleUI
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
           _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
-          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_DOWN: #{_kd_ms.round(2)}ms cursor=#{@cursor_rc} scroll=#{@scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
+          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_DOWN: #{_kd_ms.round(2)}ms cursor=#{cursor_rc} scroll=#{scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
         {% end %}
         true
       when SF::Keyboard::Key::Left
@@ -582,7 +549,7 @@ module CrymbleUI
       # App-level activation (e.g. drill-down on aggregate cells) takes
       # priority over edit mode. If on_cell_activate returns true, the first
       # typed character opens the drilled view instead of seeding edit text.
-      if @on_cell_activate.try(&.call(@cursor_rc))
+      if @on_cell_activate.try(&.call(cursor_rc))
         return true
       end
 
@@ -605,8 +572,8 @@ module CrymbleUI
           min_r, min_c = bb[0]
           max_r, max_c = bb[1]
           abs = absolute_bounds
-          x = abs.x + ruler_col_width_pixels + (0...min_c).sum { |c| col_width_pixels(c) } - @scroll_offset.x
-          y = abs.y + ruler_row_height_pixels + (0...min_r).sum { |r| row_height_pixels(r) } - @scroll_offset.y
+          x = abs.x + ruler_col_width_pixels + (0...min_c).sum { |c| col_width_pixels(c) } - scroll_offset.x
+          y = abs.y + ruler_row_height_pixels + (0...min_r).sum { |r| row_height_pixels(r) } - scroll_offset.y
           w = (min_c..max_c).sum { |c| col_width_pixels(c) }
           h = (min_r..max_r).sum { |r| row_height_pixels(r) }
           Rect.new(x, y, w, h)

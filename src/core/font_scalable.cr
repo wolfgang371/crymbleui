@@ -25,12 +25,12 @@ module CrymbleUI
   module FontScalable
     macro included
       # Font scale (relative sizing: 0 = base, +1 = larger, -1 = smaller)
-      layout_property font_scale : Int32 = 0
+      reactive_property font_scale : Int32 = 0, layout: true
     end
 
     # Calculated font size in pixels (respects global zoom)
     def font_size : Float64
-      FontSizing.calculate_size(@font_scale)
+      FontSizing.calculate_size(font_scale)
     end
   end
 end

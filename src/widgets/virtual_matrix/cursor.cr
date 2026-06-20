@@ -6,18 +6,18 @@ module CrymbleUI
     # Stores the exact clicked cell, not the top-left of merged region.
     # This allows cursor to be at any cell within a compound region.
     def set_cursor_from_cell(cell : Tuple(Int32, Int32))
-      old_cursor = @cursor_rc
-      @cursor_rc = cell
+      old_cursor = cursor_rc
+      self.cursor_rc =cell
       clamp_cursor
       mark_cursor_overlay_dirty
-      start_cursor_flash if @cursor_rc != old_cursor
-      update_proxy_focus if @cursor_rc != old_cursor
+      start_cursor_flash if cursor_rc != old_cursor
+      update_proxy_focus if cursor_rc != old_cursor
     end
 
     # Move cursor in direction with optional modifiers
     def move_cursor(direction : Symbol, ctrl : Bool = false, shift : Bool = false)
-      old_cursor = @cursor_rc
-      row, col = @cursor_rc
+      old_cursor = cursor_rc
+      row, col = cursor_rc
 
       case direction
       when :up
@@ -75,18 +75,18 @@ module CrymbleUI
         col = flat_index % @cols
       end
 
-      @cursor_rc = {row, col}
+      self.cursor_rc ={row, col}
       clamp_cursor
       mark_cursor_overlay_dirty
-      start_cursor_flash if @cursor_rc != old_cursor
-      update_proxy_focus if @cursor_rc != old_cursor
+      start_cursor_flash if cursor_rc != old_cursor
+      update_proxy_focus if cursor_rc != old_cursor
     end
 
     # Clamp cursor to valid bounds
     private def clamp_cursor
-      row = @cursor_rc[0].clamp(0, {@rows - 1, 0}.max)
-      col = @cursor_rc[1].clamp(0, {@cols - 1, 0}.max)
-      @cursor_rc = {row, col}
+      row = cursor_rc[0].clamp(0, {@rows - 1, 0}.max)
+      col = cursor_rc[1].clamp(0, {@cols - 1, 0}.max)
+      self.cursor_rc ={row, col}
     end
 
     # === PROXY FOCUS ===
@@ -102,9 +102,9 @@ module CrymbleUI
         if orig && widget.value != orig
           if new_rc = @adapter.try &.cell_assign(rc[0], rc[1], widget.value)
             # Preserve any cursor delta already applied (e.g., arrow key moved before commit)
-            delta_row = @cursor_rc[0] - rc[0]
-            delta_col = @cursor_rc[1] - rc[1]
-            @cursor_rc = {new_rc[0] + delta_row, new_rc[1] + delta_col}
+            delta_row = cursor_rc[0] - rc[0]
+            delta_col = cursor_rc[1] - rc[1]
+            self.cursor_rc ={new_rc[0] + delta_row, new_rc[1] + delta_col}
           end
         end
       end
@@ -116,12 +116,12 @@ module CrymbleUI
       # Don't establish proxy on cells that are about to be destroyed
       return if @pending_invalidate_all
 
-      cell_widget = @active_cells[@cursor_rc]?
+      cell_widget = @active_cells[cursor_rc]?
 
       # If cursor is on a non-handle cell within a merged region,
       # find the widget at the handle cell instead.
       unless cell_widget
-        bounding = get_bounding_box(@cursor_rc)
+        bounding = get_bounding_box(cursor_rc)
         if bounding[0] != bounding[1]  # Is merged
           (bounding[0][0]..bounding[1][0]).each do |r|
             (bounding[0][1]..bounding[1][1]).each do |c|
@@ -146,7 +146,7 @@ module CrymbleUI
 
       # Activate new
       @proxy_focused_widget = target
-      @proxy_focused_rc = target ? @cursor_rc : nil
+      @proxy_focused_rc = target ? cursor_rc : nil
       target.try(&.activate_proxy_focus)
     end
 
@@ -159,41 +159,6 @@ module CrymbleUI
     end
 
     # === END PROXY FOCUS ===
-
-    # Mark viewport cells as dirty on the content layer for selective render.
-    # After snap_to_cursor or mouse_wheel scroll (render-only, no layout), the
-    # update_visible_cells early-exit (< 50px threshold) means no cells are marked dirty.
-    # mark_needs_render on VirtualMatrix adds the MATRIX to dirty_widgets, but the matrix
-    # is not in layer.widgets (cells are) → selective render finds zero widgets → blank row.
-    # This method adds viewport cells to dirty_set so render_single_widget's fast-path
-    # blits their cached widget_backend to the buffer at the correct position.
-    private def mark_viewport_cells_dirty
-      return unless layer = @content_layer
-      {% if flag?(:CURSOR_PERF) %}
-        _mvcd_start = Time.monotonic
-        _mvcd_count = 0
-      {% end %}
-      viewport_y = @scroll_offset.y
-      viewport_x = @scroll_offset.x
-      viewport_h = layer.bounds.height
-      viewport_w = layer.bounds.width
-
-      @active_cells.each do |_key, widget|
-        wb = widget.bounds
-        next if wb.y + wb.height < viewport_y || wb.y > viewport_y + viewport_h
-        next if wb.x + wb.width < viewport_x || wb.x > viewport_x + viewport_w
-        layer.mark_needs_render(widget)
-        {% if flag?(:CURSOR_PERF) %}
-          _mvcd_count += 1
-        {% end %}
-      end
-      {% if flag?(:CURSOR_PERF) %}
-        _mvcd_ms = (Time.monotonic - _mvcd_start).total_milliseconds
-        if _mvcd_ms > 0.05
-          File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  MARK_VP_DIRTY: #{_mvcd_ms.round(2)}ms marked=#{_mvcd_count}/#{@active_cells.size}" }
-        end
-      {% end %}
-    end
 
     # Mark cursor overlay for full re-render with new cursor position.
     # Uses mark_needs_clear_and_render (not mark_needs_layout) to force a buffer
@@ -261,7 +226,7 @@ module CrymbleUI
       return unless @content_layer
       return if @rows == 0 || @cols == 0 # degenerate grid: no cell to scroll into view
 
-      row, col = @cursor_rc
+      row, col = cursor_rc
       viewport_width = @content_layer.try(&.bounds.width) || @bounds.width
       viewport_height = @content_layer.try(&.bounds.height) || @bounds.height
 
@@ -272,20 +237,20 @@ module CrymbleUI
       # For editing, use full bounding box so the entire merged region is visible.
       # For navigation, just ensure the single cursor cell is visible.
       if for_edit
-        bounding = get_bounding_box(@cursor_rc)
+        bounding = get_bounding_box(cursor_rc)
         min_row, min_col = bounding[0]
         max_row, max_col = bounding[1]
       else
-        min_row, min_col = @cursor_rc
-        max_row, max_col = @cursor_rc
+        min_row, min_col = cursor_rc
+        max_row, max_col = cursor_rc
       end
 
       # Geometric snap: use data positions relative to sticky header sizes.
       # In CrymbleUI, content scrolls uniformly in content_layer and sticky headers
       # are painted on separate layers on top. scroll_order does NOT affect visual
       # clipping of content cells, so visibility depends purely on geometry.
-      new_scroll_x = @scroll_offset.x
-      new_scroll_y = @scroll_offset.y
+      new_scroll_x = scroll_offset.x
+      new_scroll_y = scroll_offset.y
 
       # Horizontal: snap only for non-sticky columns
       unless min_col < sticky_col_count
@@ -293,7 +258,7 @@ module CrymbleUI
         merged_width = (min_col..max_col).sum { |c| col_sizes[c] }
         sticky_w = (sticky_col_width_pixels + ruler_col_width_pixels).to_i32
         ruler_col_w_i = ruler_col_width_pixels.to_i32
-        scroll_x_i = @scroll_offset.x.to_i32
+        scroll_x_i = scroll_offset.x.to_i32
         vp_w = viewport_width.to_i32
 
         # Cell content-space position includes ruler offset: ruler_col_w + data_pos_x
@@ -315,7 +280,7 @@ module CrymbleUI
         merged_height = (min_row..max_row).sum { |r| row_sizes[r] }
         sticky_h = (sticky_row_height_pixels + ruler_row_height_pixels).to_i32
         ruler_row_h_i = ruler_row_height_pixels.to_i32
-        scroll_y_i = @scroll_offset.y.to_i32
+        scroll_y_i = scroll_offset.y.to_i32
         vp_h = viewport_height.to_i32
 
         # Cell content-space position includes ruler offset: ruler_row_h + data_pos_y
@@ -335,33 +300,16 @@ module CrymbleUI
       new_scroll_y = new_scroll_y.clamp(0.0, max_content_scroll_y)
       new_scroll_x = new_scroll_x.clamp(0.0, max_content_scroll_x)
 
-      if new_scroll_y != @scroll_offset.y || new_scroll_x != @scroll_offset.x
+      if new_scroll_y != scroll_offset.y || new_scroll_x != scroll_offset.x
         {% if flag?(:DEBUG_BLIT) %}
-          old_scroll = @scroll_offset
+          old_scroll = scroll_offset
         {% end %}
-        @scroll_offset = Vec2.new(new_scroll_x, new_scroll_y)
-        @last_synced_scroll_offset = @scroll_offset
         {% if flag?(:DEBUG_BLIT) %}
           File.open("/tmp/blit_trace.log", "a") do |f|
-            f.puts ">>> SCROLL: (#{old_scroll.x.round(1)},#{old_scroll.y.round(1)}) → (#{@scroll_offset.x.round(1)},#{@scroll_offset.y.round(1)})"
+            f.puts ">>> SCROLL: (#{old_scroll.x.round(1)},#{old_scroll.y.round(1)}) → (#{new_scroll_x.round(1)},#{new_scroll_y.round(1)})"
           end
         {% end %}
-
-        # Follow on_mouse_wheel pattern: render-only, no layout
-        if layer = @content_layer
-          layer.scroll_offset = @scroll_offset
-        end
-        if sv = @content_scroll_view
-          sv.set_scroll_offset_for_sync(@scroll_offset)
-        end
-        vp_w = @content_layer.try(&.bounds.width) || @bounds.width
-        vp_h = @content_layer.try(&.bounds.height) || @bounds.height
-        if vp_w > 0 && vp_h > 0
-          update_visible_cells(vp_w, vp_h)
-        end
-        mark_needs_render
-        mark_cursor_overlay_dirty
-        mark_ruler_widgets_dirty
+        self.scroll_offset = Vec2.new(new_scroll_x, new_scroll_y)  # custom setter: Source.set + apply_scroll
         {% if flag?(:CURSOR_PERF) %}
           _snap_ms = (Time.monotonic - _snap_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  SNAP_TO_CURSOR(scroll): #{_snap_ms.round(2)}ms" }

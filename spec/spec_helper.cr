@@ -16,6 +16,9 @@ require "../src/testing/test_clipboard"
 require "../src/testing/gui_test_helpers"
 require "../src/input/focus_manager"
 require "../src/widgets/virtual_matrix/adapter"
+{% if flag?(:cache_validation) %}
+  require "../src/rendering/cache_validation"
+{% end %}
 
 # Include GUI test helpers for all specs
 include CrymbleUI::Testing::GUITestHelpers
@@ -38,7 +41,22 @@ Spec.before_each do
   CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
   CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
   CrymbleUI::Layer.clear_registry  # Prevent orphaned layers from leaking between tests
+  {% if flag?(:cache_validation) %}
+    # Turn the dual renderer into a gate over the WHOLE suite. With
+    # -Dcache_validation, every rendered frame compares the cached matrix buffer against
+    # a fresh immediate-mode render; the after_each below fails the example on any divergence
+    # (the class of cache-divergence bugs that otherwise slip through). Inert in normal (un-flagged) runs.
+    CrymbleUI::CacheValidation.suite_gate = true # cv self-tests opt out in their own before_each
+    CrymbleUI::CacheValidation.clear_failures!
+    CrymbleUI::CacheValidation.enable(:immediate_mode)
+  {% end %}
 end
+
+{% if flag?(:cache_validation) %}
+  Spec.after_each do
+    CrymbleUI::CacheValidation.assert_no_failures! if CrymbleUI::CacheValidation.suite_gate
+  end
+{% end %}
 
 # Concrete widget implementation for testing.
 # NOTE: Use only as LEAF widget (for controlled sizing). For testing container

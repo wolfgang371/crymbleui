@@ -32,9 +32,15 @@ module CrymbleUI
         include PrimitiveBuilder
         include LayerOwner
 
-        # Pull-based layer bounds: panel bounds = self-positioned Rect(@x, @y, @width, @height)
+        # Pull-based layer bounds: panel bounds = self-positioned Rect(x, y, width, height)
         def compute_bounds_for_layer(layer : Layer) : Rect
-            Rect.new(@x, @y, @width, @height)
+            Rect.new(x, y, width, height)
+        end
+
+        # Pull-based layer background: the panel layer clears to the LIVE panel background so a
+        # Theme.set recolors it without a rebuild. background_color is the live getter (override-or-theme).
+        def compute_background_for_layer(layer : Layer) : Color?
+            background_color
         end
 
         # Minimum visible area to keep panel accessible (prevents dragging completely off-screen)
@@ -46,39 +52,32 @@ module CrymbleUI
         # would go negative and feed a negative texture dimension downstream.
         MIN_PANEL_SIZE = 100.0
 
-        @title : String
-        def title : String
-            @title
-        end
-        def title=(value : String)
-            @title = value
-            mark_needs_render
-        end
+        reactive_property title : String
 
         # Override label to return title for unique path_id
         # This ensures find_by_path can distinguish between panels after rebuild
         def label : String?
-            @title
+            title
         end
 
-        reconcile_property x : Float64
-        reconcile_property y : Float64
-        reconcile_property width : Float64
-        reconcile_property height : Float64
+        reactive_property x : Float64, reconcile: true
+        reactive_property y : Float64, reconcile: true
+        reactive_property width : Float64, reconcile: true
+        reactive_property height : Float64, reconcile: true
 
         # Z-ordering for overlapping panels (higher = on top)
-        reconcile_property z_index : Int32
+        reactive_property z_index : Int32, reconcile: true
 
         # Close button support
         property closeable : Bool
-        reconcile_property closed : Bool = false
+        reactive_property closed : Bool = false, reconcile: true
 
         # Close callback - invoked when panel is closed (via close button or programmatic close)
         @on_closed_callback : Proc(Nil)?
 
         # Maximize state
-        reconcile_property maximized : Bool = false
-        reconcile_property pre_maximize_bounds : Rect = Rect.zero
+        reactive_property maximized : Bool = false, reconcile: true
+        reactive_property pre_maximize_bounds : Rect = Rect.zero, reconcile: true
 
         # Double-click detection for title bar maximize
         DOUBLE_CLICK_THRESHOLD_MS = 300
@@ -127,35 +126,32 @@ module CrymbleUI
             w
         end
 
-        @[Reconcile]
-        @interaction_mode : InteractionMode = InteractionMode::Idle
+        reactive_property interaction_mode : InteractionMode = InteractionMode::Idle, reconcile: true
 
         # Dragging state
-        @[Reconcile]
-        @drag_offset : Vec2 = Vec2.new(0.0, 0.0)
+        reactive_property drag_offset : Vec2 = Vec2.new(0.0, 0.0), reconcile: true
         # Track panel position when children were last laid out (for drag offset calculation)
         @children_layout_position : Vec2 = Vec2.new(0.0, 0.0)
 
         # Resizing state - reconciled to preserve resize across DSL rebuilds
-        @[Reconcile]
-        @resize_edge : ResizeEdge = ResizeEdge::None
-        @[Reconcile]
-        @resize_start_pos : Vec2 = Vec2.new(0.0, 0.0)
-        @[Reconcile]
-        @resize_start_bounds : Rect = Rect.zero
+        reactive_property resize_edge : ResizeEdge = ResizeEdge::None, reconcile: true
+        reactive_property resize_start_pos : Vec2 = Vec2.new(0.0, 0.0), reconcile: true
+        reactive_property resize_start_bounds : Rect = Rect.zero, reconcile: true
 
-        # Visual properties - reconcile: true to preserve user color changes
-        render_property title_bar_color : Color = Theme.current.panel_title_bar
-        render_property title_text_color : Color = Theme.current.panel_title_text
-        render_property border_color : Color = Theme.current.panel_border
-        render_property background_color : Color = Theme.current.panel_background
+        # Visual properties — theme colors resolve live (nil = follow Theme.current; explicit wins).
+        # background_color is layer-held: it also feeds the panel layer's clear via the pull-based
+        # Layer#background_color (see compute_background_for_layer below).
+        theme_property title_bar_color, panel_title_bar
+        theme_property title_text_color, panel_title_text
+        theme_property border_color, panel_border
+        theme_property background_color, panel_background
         # Title font scale (relative sizing: 0 = base, +1 = larger, -1 = smaller)
-        # Note: Uses layout_property because title_bar_height depends on font_scale
-        layout_property title_font_scale : Int32 = 0
+        # Note: Uses layout: true because title_bar_height depends on font_scale
+        reactive_property title_font_scale : Int32 = 0, layout: true
 
         # Calculated title font size (for internal use)
         def title_font_size : Float64
-            FontSizing.calculate_size(@title_font_scale)
+            FontSizing.calculate_size(title_font_scale)
         end
 
         # Title bar and close button brightness multiplier
@@ -163,7 +159,7 @@ module CrymbleUI
 
         # Dynamic title bar height (scales with font zoom)
         def title_bar_height : Float64
-            (FontSizing.calculate_size(@title_font_scale) + 16.0).round
+            (FontSizing.calculate_size(title_font_scale) + 16.0).round
         end
 
         # The panel's content rectangle in absolute coords (below the title bar,
@@ -171,9 +167,9 @@ module CrymbleUI
         # the live content edge so they shrink only when the edge reaches them.
         def content_clip_bounds : Rect
             ty = title_bar_height
-            Rect.new(@x + CONTENT_PADDING, @y + ty,
-                Math.max(0.0, @width - CONTENT_PADDING * 2),
-                Math.max(0.0, @height - ty - CONTENT_PADDING))
+            Rect.new(x + CONTENT_PADDING, y + ty,
+                Math.max(0.0, width - CONTENT_PADDING * 2),
+                Math.max(0.0, height - ty - CONTENT_PADDING))
         end
 
         # Dynamic close button size (proportional to title bar)
@@ -494,20 +490,29 @@ module CrymbleUI
         @content : Content
 
         def initialize(
-            @title : String,
-            @x : Float64,
-            @y : Float64,
-            @width : Float64,
-            @height : Float64,
-            @z_index : Int32 = 0,
+            title : String,
+            x : Float64,
+            y : Float64,
+            width : Float64,
+            height : Float64,
+            z_index : Int32 = 0,
             @closeable : Bool = true,
             @draggable : Bool = true,
             @resizable : Bool = true,
             id : String? = nil
         )
+            # Source-back the reactive geometry fields (no-default reactive_property →
+            # the macro declares them uninitialized; assign the Sources here from the
+            # plain ctor params).
+            @title = Source(String).new(title)
+            @x = Source(Float64).new(x)
+            @y = Source(Float64).new(y)
+            @width = Source(Float64).new(width)
+            @height = Source(Float64).new(height)
+            @z_index = Source(Int32).new(z_index)
             super(id: id)
             # Initialize layout position to match initial panel position
-            @children_layout_position = Vec2.new(@x, @y)
+            @children_layout_position = Vec2.new(x, y)
 
             # Create chrome and content widgets
             @chrome = Chrome.new("#{id}_chrome")
@@ -523,27 +528,27 @@ module CrymbleUI
             # Create internal layer with panel background color (bounds will be set in layout)
             # Background color used for buffer clearing instead of rendering as primitive
             # Must be created after all ivars initialized (Crystal requirement)
-            @internal_layer = Layer.new("panel_#{id}", Rect.zero, z_index: @z_index, background_color: @background_color, owner_widget: self)
+            @internal_layer = Layer.new("panel_#{id}", Rect.zero, z_index: z_index, background_color: background_color, owner_widget: self)
         end
 
         # layer getter provided by LayerOwner mixin
 
         def measure(constraints : BoxConstraints) : Size
             # Panel has fixed size
-            Size.new(@width, @height)
+            Size.new(width, height)
         end
 
         def perform_layout(constraints : BoxConstraints, position : Vec2)
-            # Panel is positioned absolutely at @x, @y
+            # Panel is positioned absolutely at x, y
             # (ignoring position parameter - panels float)
-            @bounds = Rect.new(@x, @y, @width, @height)
+            @bounds = Rect.new(x, y, width, height)
 
             # Update internal layer
             if layer = @internal_layer
                 # Sync layer z_index with panel z_index (important after reconciliation)
-                layer.z_index = @z_index
+                layer.z_index = z_index
                 # Sync layer background color with current theme (important after theme switch)
-                layer.background_color = @background_color
+                layer.background_color = background_color
 
                 # Populate layer.widgets with chrome and content (NOT panel self!)
                 # Chrome first (renders first for correct background capture order)
@@ -553,16 +558,16 @@ module CrymbleUI
             end
 
             # Layout chrome (title bar area)
-            chrome_constraints = BoxConstraints.tight(Size.new(@width, title_bar_height))
+            chrome_constraints = BoxConstraints.tight(Size.new(width, title_bar_height))
             @chrome.layout(chrome_constraints, Vec2.zero)
 
             # Layout content (below title bar with padding)
             # Content widget handles its own children layout (computes its own position)
-            content_constraints = BoxConstraints.tight(Size.new(@width, @height))
+            content_constraints = BoxConstraints.tight(Size.new(width, height))
             @content.layout(content_constraints, Vec2.zero)
 
             # Track position when layout happened (for drag offset calculation)
-            @children_layout_position = Vec2.new(@x, @y)
+            @children_layout_position = Vec2.new(x, y)
         end
 
         # Override add_child to redirect user children to content widget
@@ -573,7 +578,7 @@ module CrymbleUI
 
         # Polymorphic rendering control - skip rendering if closed
         def skip_render? : Bool
-            @closed
+            closed
         end
 
         # Constrain panel position to stay within window bounds
@@ -583,48 +588,48 @@ module CrymbleUI
             # panel minimum (an absurdly narrow window must not yield a negative
             # content area). The panel may then slightly overhang a sub-minimum
             # window; that is harmless and far better than corrupt geometry.
-            if @maximized
+            if maximized
                 fit_w = Math.max(MIN_PANEL_SIZE, window_bounds.width)
                 fit_h = Math.max(MIN_PANEL_SIZE, window_bounds.height)
-                if @x != window_bounds.x || @y != window_bounds.y ||
-                   @width != fit_w || @height != fit_h
-                    @x = window_bounds.x
-                    @y = window_bounds.y
-                    @width = fit_w
-                    @height = fit_h
-                    @bounds = Rect.new(@x, @y, @width, @height)
+                if x != window_bounds.x || y != window_bounds.y ||
+                   width != fit_w || height != fit_h
+                    self.x = window_bounds.x      # write → setter (.set notifies pull node)
+                    self.y = window_bounds.y      # write → setter
+                    self.width = fit_w            # write → setter
+                    self.height = fit_h           # write → setter
+                    @bounds = Rect.new(x, y, width, height)
                     # Re-flow children NOW. Window.perform_layout already
                     # called panel.layout earlier in this pass, using the
-                    # pre-resize @width/@height — so the chrome and the
+                    # pre-resize width/height — so the chrome and the
                     # content widgets are still positioned for the old
                     # size. mark_needs_layout alone defers the fix to
                     # whichever future pass picks it up, leaving stale
                     # content in the meantime (visible as a maximized
                     # panel-border with old-size content inside).
                     perform_layout(
-                        BoxConstraints.tight(Size.new(@width, @height)),
-                        Vec2.new(@x, @y)
+                        BoxConstraints.tight(Size.new(width, height)),
+                        Vec2.new(x, y)
                     )
                 end
                 return
             end
 
             # Allow dragging left edge up to (width - MIN_VISIBLE_MARGIN) off-screen
-            min_x = window_bounds.x - @width + MIN_VISIBLE_MARGIN
+            min_x = window_bounds.x - width + MIN_VISIBLE_MARGIN
             max_x = window_bounds.x + window_bounds.width - MIN_VISIBLE_MARGIN
             # Top edge must stay within window (can't go above window)
             min_y = window_bounds.y
             max_y = window_bounds.y + window_bounds.height - title_bar_height
 
-            new_x = @x.clamp(min_x, max_x)
-            new_y = @y.clamp(min_y, max_y)
+            new_x = x.clamp(min_x, max_x)
+            new_y = y.clamp(min_y, max_y)
 
             # Only update if position changed
-            if new_x != @x || new_y != @y
-                delta = Vec2.new(new_x - @x, new_y - @y)
-                @x = new_x
-                @y = new_y
-                @bounds = Rect.new(@x, @y, @width, @height)
+            if new_x != x || new_y != y
+                delta = Vec2.new(new_x - x, new_y - y)
+                self.x = new_x      # write → setter
+                self.y = new_y      # write → setter
+                @bounds = Rect.new(x, y, width, height)
                 # Pull-based: layer.bounds will auto-update from compute_bounds_for_layer
             end
         end
@@ -632,10 +637,10 @@ module CrymbleUI
         # Get the content area rect for clipping
         def content_area : Rect
             Rect.new(
-                @x,
-                @y + title_bar_height,
-                @width,
-                @height - title_bar_height
+                x,
+                y + title_bar_height,
+                width,
+                height - title_bar_height
             )
         end
 
@@ -649,7 +654,7 @@ module CrymbleUI
 
         # Override hit_test to handle close button, resize edges, and skip when closed
         def hit_test(point : Vec2) : Widget?
-            return nil if @closed
+            return nil if closed
             return nil unless absolute_bounds.contains_point(point)
 
             # Store hit point for on_click to use
@@ -662,7 +667,7 @@ module CrymbleUI
 
             # Check if we're over a resize edge/corner - intercept before children
             # Skip when maximized (no resize allowed, let window handle edge events)
-            if @resizable && !@maximized && get_resize_edge(point) != ResizeEdge::None
+            if @resizable && !maximized && get_resize_edge(point) != ResizeEdge::None
                 return self  # Return self so on_mouse_down gets called for resize
             end
 
@@ -697,7 +702,7 @@ module CrymbleUI
 
         # Mouse down - start drag or resize
         def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
-            return if @closed
+            return if closed
 
             # Bring this panel to front
             bring_to_front
@@ -710,7 +715,7 @@ module CrymbleUI
             # should claim.
             if button == MouseButton::Right
                 if (h = @on_title_bar_right_click_handler) &&
-                   Rect.new(@x, @y, @width, title_bar_height).contains_point(point)
+                   Rect.new(x, y, width, title_bar_height).contains_point(point)
                     h.call(point)
                     return
                 end
@@ -720,19 +725,19 @@ module CrymbleUI
             super(point, button)
 
             # Check for resize edge/corner first (blocked when maximized)
-            if @resizable && !@maximized
+            if @resizable && !maximized
                 edge = get_resize_edge(point)
                 if edge != ResizeEdge::None
-                    @interaction_mode = InteractionMode::Resizing
-                    @resize_edge = edge
-                    @resize_start_pos = point
-                    @resize_start_bounds = Rect.new(@x, @y, @width, @height)
+                    self.interaction_mode = InteractionMode::Resizing  # write → setter
+                    self.resize_edge = edge                            # write → setter
+                    self.resize_start_pos = point                      # write → setter
+                    self.resize_start_bounds = Rect.new(x, y, width, height)  # write → setter
                     return
                 end
             end
 
             # Check if click is on title bar (for dragging or double-click maximize)
-            title_bar = Rect.new(@x, @y, @width, title_bar_height)
+            title_bar = Rect.new(x, y, width, title_bar_height)
             if title_bar.contains_point(point)
                 # Don't process if clicking close button
                 if @closeable && close_button_rect.contains_point(point)
@@ -758,9 +763,9 @@ module CrymbleUI
                 @last_title_click_point = point
 
                 # Start dragging (blocked when maximized)
-                if @draggable && !@maximized
-                    @interaction_mode = InteractionMode::Dragging
-                    @drag_offset = Vec2.new(point.x - @x, point.y - @y)
+                if @draggable && !maximized
+                    self.interaction_mode = InteractionMode::Dragging      # write → setter
+                    self.drag_offset = Vec2.new(point.x - x, point.y - y)  # write → setter
 
                     # Trigger render to remove panel from main cache
                     mark_needs_render
@@ -770,33 +775,33 @@ module CrymbleUI
 
         # Mouse move - update position if dragging, or size if resizing
         def on_mouse_move(point : Vec2)
-            if @interaction_mode == InteractionMode::Dragging
+            if interaction_mode == InteractionMode::Dragging
                 # Update position
-                new_x = point.x - @drag_offset.x
-                new_y = point.y - @drag_offset.y
+                new_x = point.x - drag_offset.x
+                new_y = point.y - drag_offset.y
 
                 # Constrain to window bounds (keep MIN_VISIBLE_MARGIN visible)
                 if window = find_window
                     window_bounds = window.bounds
                     # Allow dragging left edge up to (width - MIN_VISIBLE_MARGIN) off-screen
-                    min_x = window_bounds.x - @width + MIN_VISIBLE_MARGIN
+                    min_x = window_bounds.x - width + MIN_VISIBLE_MARGIN
                     max_x = window_bounds.x + window_bounds.width - MIN_VISIBLE_MARGIN
                     # Top edge must stay within window (can't drag above window)
                     min_y = window_bounds.y
                     max_y = window_bounds.y + window_bounds.height - title_bar_height
 
-                    @x = new_x.clamp(min_x, max_x)
-                    @y = new_y.clamp(min_y, max_y)
+                    @x.set(new_x.clamp(min_x, max_x))  # in-place: hot drag loop
+                    @y.set(new_y.clamp(min_y, max_y))  # in-place: hot drag loop
                 else
-                    @x = new_x
-                    @y = new_y
+                    @x.set(new_x)  # in-place: hot drag loop
+                    @y.set(new_y)  # in-place: hot drag loop
                 end
 
                 # Calculate drag delta
-                drag_delta = Vec2.new(@x - @bounds.x, @y - @bounds.y)
+                drag_delta = Vec2.new(x - @bounds.x, y - @bounds.y)
 
                 # Update bounds
-                @bounds = Rect.new(@x, @y, @width, @height)
+                @bounds = Rect.new(x, y, width, height)
 
                 # NOTE: No layout_children needed during drag!
                 # Children absolute positions will be updated in on_mouse_up
@@ -805,53 +810,59 @@ module CrymbleUI
                 # NOTE: No mark_needs_render needed during drag!
                 # Pull-based: layer.bounds auto-updates from compute_bounds_for_layer
                 # This achieves O(1) drag performance - zero re-renders!
-            elsif @interaction_mode == InteractionMode::Resizing
+                # But the COMPOSITE position changed: bump the layer's position_rev so the version-keyed
+                # pull trigger (frame_aggregate_rev) sees the move and re-composites — still O(1), no
+                # widget re-render. Without this the pull path is blind and only the event-loop push repaints.
+                @internal_layer.try(&.bump_position_rev)
+            elsif interaction_mode == InteractionMode::Resizing
                 # Calculate deltas
-                dx = point.x - @resize_start_pos.x
-                dy = point.y - @resize_start_pos.y
+                dx = point.x - resize_start_pos.x
+                dy = point.y - resize_start_pos.y
 
                 # Update size/position based on resize edge
-                case @resize_edge
+                # (writes use in-place .set: hot resize loop)
+                rsb = resize_start_bounds
+                case resize_edge
                 when ResizeEdge::Right
-                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
                 when ResizeEdge::Bottom
-                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
                 when ResizeEdge::Left
-                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
-                    @width = new_width
+                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @x.set(rsb.x + (rsb.width - new_width))
+                    @width.set(new_width)
                 when ResizeEdge::Top
-                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
-                    @height = new_height
+                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @y.set(rsb.y + (rsb.height - new_height))
+                    @height.set(new_height)
                 when ResizeEdge::BottomRight
-                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
                 when ResizeEdge::BottomLeft
-                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
-                    @width = new_width
-                    @height = (@resize_start_bounds.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @x.set(rsb.x + (rsb.width - new_width))
+                    @width.set(new_width)
+                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
                 when ResizeEdge::TopRight
-                    @width = (@resize_start_bounds.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
-                    @height = new_height
+                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @y.set(rsb.y + (rsb.height - new_height))
+                    @height.set(new_height)
                 when ResizeEdge::TopLeft
-                    new_width = (@resize_start_bounds.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    new_height = (@resize_start_bounds.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    @x = @resize_start_bounds.x + (@resize_start_bounds.width - new_width)
-                    @y = @resize_start_bounds.y + (@resize_start_bounds.height - new_height)
-                    @width = new_width
-                    @height = new_height
+                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @x.set(rsb.x + (rsb.width - new_width))
+                    @y.set(rsb.y + (rsb.height - new_height))
+                    @width.set(new_width)
+                    @height.set(new_height)
                 end
 
                 # Update bounds
-                @bounds = Rect.new(@x, @y, @width, @height)
+                @bounds = Rect.new(x, y, width, height)
                 # Pull-based: layer.bounds auto-updates from compute_bounds_for_layer
 
                 # Update Chrome bounds directly (flex widget - width changed)
-                @chrome.bounds = Rect.new(0.0, 0.0, @width, title_bar_height)
+                @chrome.bounds = Rect.new(0.0, 0.0, width, title_bar_height)
                 # Invalidate background - old cached background doesn't cover new width
                 @chrome.background_backend = nil
                 @chrome.mark_needs_render
@@ -863,8 +874,8 @@ module CrymbleUI
                 else
                   title_bar_height + CONTENT_PADDING  # No MenuBar: add padding
                 end
-                content_width = Math.max(0.0, @width - (CONTENT_PADDING * 2))
-                content_height = Math.max(0.0, @height - title_bar_height - (CONTENT_PADDING * 2))
+                content_width = Math.max(0.0, width - (CONTENT_PADDING * 2))
+                content_height = Math.max(0.0, height - title_bar_height - (CONTENT_PADDING * 2))
                 @content.bounds = Rect.new(content_x, content_y, content_width, content_height)
 
                 # Layout MenuBar with new panel width (edge-to-edge, must extend)
@@ -873,10 +884,10 @@ module CrymbleUI
                 if mb = menubar
                     # MenuBar gets full panel width, flexible height
                     menubar_constraints = BoxConstraints.new(
-                        min_width: @width,
-                        max_width: @width,
+                        min_width: width,
+                        max_width: width,
                         min_height: 0.0,
-                        max_height: Math.max(0.0, @height - title_bar_height)
+                        max_height: Math.max(0.0, height - title_bar_height)
                     )
                     # Position at negative offset to account for Content padding
                     mb.layout(menubar_constraints, Vec2.new(-CONTENT_PADDING, mb.bounds.y))
@@ -891,18 +902,18 @@ module CrymbleUI
                 # (for panel-spanning layers) and the panel's CURRENT content
                 # rectangle (so narrow inner layers clip to the live edge instead
                 # of over-shrinking by the whole panel delta).
-                delta_width = @width - @resize_start_bounds.width
-                delta_height = @height - @resize_start_bounds.height
-                delta_x = @x - @resize_start_bounds.x
-                delta_y = @y - @resize_start_bounds.y
+                delta_width = width - resize_start_bounds.width
+                delta_height = height - resize_start_bounds.height
+                delta_x = x - resize_start_bounds.x
+                delta_y = y - resize_start_bounds.y
                 @content.notify_layer_owners_resize_move(delta_width, delta_height, delta_x, delta_y, content_clip_bounds)
             end
         end
 
         # Mouse up - stop dragging or resizing
         def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
-            was_dragging = @interaction_mode == InteractionMode::Dragging
-            was_resizing = @interaction_mode == InteractionMode::Resizing
+            was_dragging = interaction_mode == InteractionMode::Dragging
+            was_resizing = interaction_mode == InteractionMode::Resizing
 
             # Notify layer owners that resize ended (cleanup state)
             if was_resizing
@@ -914,8 +925,8 @@ module CrymbleUI
                 layout_children
             end
 
-            @interaction_mode = InteractionMode::Idle
-            @resize_edge = ResizeEdge::None
+            self.interaction_mode = InteractionMode::Idle  # write → setter
+            self.resize_edge = ResizeEdge::None            # write → setter
 
             # After interaction ends, trigger FULL layout to rebuild panel cache
             # (mark_needs_layout instead of mark_needs_render to force cache rebuild)
@@ -938,7 +949,7 @@ module CrymbleUI
             if callback = @on_closed_callback
                 callback.call
             else
-                @closed = true
+                self.closed = true  # write → setter
                 mark_needs_layout
                 # Trigger app rebuild to update dynamic content (e.g., panel counts)
                 Widget.app?.try(&.request_rebuild)
@@ -947,7 +958,7 @@ module CrymbleUI
 
         # Open/show this panel
         def open
-            @closed = false
+            self.closed = false  # write → setter
             mark_needs_layout
             # Trigger app rebuild to update dynamic content (e.g., panel counts)
             Widget.app?.try(&.request_rebuild)
@@ -955,7 +966,7 @@ module CrymbleUI
 
         # Toggle panel open/closed
         def toggle
-            @closed = !@closed
+            self.closed = !closed  # write → setter (RHS read via getter)
             mark_needs_layout
             # Trigger app rebuild to update dynamic content (e.g., panel counts)
             Widget.app?.try(&.request_rebuild)
@@ -963,41 +974,41 @@ module CrymbleUI
 
         # Maximize panel to fill window bounds
         def maximize(window_bounds : Rect)
-            return if @maximized
+            return if maximized
 
             # Store current bounds for restore
-            @pre_maximize_bounds = Rect.new(@x, @y, @width, @height)
+            self.pre_maximize_bounds = Rect.new(x, y, width, height)  # write → setter
 
             # Set to window bounds
-            @x = window_bounds.x
-            @y = window_bounds.y
-            @width = window_bounds.width
-            @height = window_bounds.height
-            @maximized = true
+            self.x = window_bounds.x          # write → setter
+            self.y = window_bounds.y          # write → setter
+            self.width = window_bounds.width  # write → setter
+            self.height = window_bounds.height # write → setter
+            self.maximized = true             # write → setter
 
             # Update bounds and trigger layout
-            @bounds = Rect.new(@x, @y, @width, @height)
+            @bounds = Rect.new(x, y, width, height)
             mark_needs_layout
         end
 
         # Restore panel to pre-maximize bounds
         def restore
-            return unless @maximized
+            return unless maximized
 
-            @x = @pre_maximize_bounds.x
-            @y = @pre_maximize_bounds.y
-            @width = @pre_maximize_bounds.width
-            @height = @pre_maximize_bounds.height
-            @maximized = false
+            self.x = pre_maximize_bounds.x          # write → setter
+            self.y = pre_maximize_bounds.y          # write → setter
+            self.width = pre_maximize_bounds.width  # write → setter
+            self.height = pre_maximize_bounds.height # write → setter
+            self.maximized = false                  # write → setter
 
             # Update bounds and trigger layout
-            @bounds = Rect.new(@x, @y, @width, @height)
+            @bounds = Rect.new(x, y, width, height)
             mark_needs_layout
         end
 
         # Toggle maximize/restore state
         def toggle_maximize
-            if @maximized
+            if maximized
                 restore
             else
                 # Need panel area bounds (excludes menubar) - find via parent chain
@@ -1024,8 +1035,8 @@ module CrymbleUI
             # Use +10 gap to ensure front panel's base z > back panel's child layers
             # (ScrollView uses +1 for content layer, +2 for scrollbar layer)
             new_z = max_z + 10
-            if @z_index != new_z
-                @z_index = new_z
+            if z_index != new_z
+                self.z_index = new_z  # write → setter
                 # Update layer z_index to match panel z_index (keeps visual z-order in sync with hit-test z-order)
                 if layer = @internal_layer
                     layer.z_index = new_z
@@ -1065,8 +1076,8 @@ module CrymbleUI
             # Position close button in top-right corner of title bar
             btn_size = close_button_size
             btn_padding = close_button_padding
-            btn_x = @x + @width - btn_size - btn_padding
-            btn_y = @y + (title_bar_height - btn_size) / 2.0
+            btn_x = x + width - btn_size - btn_padding
+            btn_y = y + (title_bar_height - btn_size) / 2.0
             Rect.new(btn_x, btn_y, btn_size, btn_size)
         end
 
@@ -1074,8 +1085,8 @@ module CrymbleUI
         private def maximize_button_rect : Rect
             btn_size = close_button_size
             btn_padding = close_button_padding
-            btn_x = @x + @width - (btn_size * 2) - (btn_padding * 2)
-            btn_y = @y + (title_bar_height - btn_size) / 2.0
+            btn_x = x + width - (btn_size * 2) - (btn_padding * 2)
+            btn_y = y + (title_bar_height - btn_size) / 2.0
             Rect.new(btn_x, btn_y, btn_size, btn_size)
         end
 
@@ -1083,16 +1094,16 @@ module CrymbleUI
         def get_resize_edge(point : Vec2) : ResizeEdge
             return ResizeEdge::None unless @resizable
 
-            # Check if point is inside panel area (using @x, @y, @width, @height)
-            return ResizeEdge::None if point.x < @x || point.x > @x + @width
-            return ResizeEdge::None if point.y < @y || point.y > @y + @height
+            # Check if point is inside panel area (using x, y, width, height)
+            return ResizeEdge::None if point.x < x || point.x > x + width
+            return ResizeEdge::None if point.y < y || point.y > y + height
 
             # Check if point is near panel edges (inside the panel)
             # Distance from each edge (positive values mean inside the panel)
-            dist_left = point.x - @x
-            dist_right = (@x + @width) - point.x
-            dist_top = point.y - @y
-            dist_bottom = (@y + @height) - point.y
+            dist_left = point.x - x
+            dist_right = (x + width) - point.x
+            dist_top = point.y - y
+            dist_bottom = (y + height) - point.y
 
             near_left = dist_left < RESIZE_HANDLE_SIZE && dist_left >= 0
             near_right = dist_right < RESIZE_HANDLE_SIZE && dist_right >= 0
@@ -1117,59 +1128,50 @@ module CrymbleUI
         # Programmatic movement API (for testing and animation)
         # Moves panel to absolute position and updates child positions
         def move_to(new_x : Float64, new_y : Float64)
-            @x = new_x
-            @y = new_y
-            @bounds = Rect.new(@x, @y, @width, @height)
+            self.x = new_x  # write → setter
+            self.y = new_y  # write → setter
+            @bounds = Rect.new(x, y, width, height)
             layout_children
             mark_needs_render
         end
 
         # Moves panel by relative offset and updates child positions
         def move_by(dx : Float64, dy : Float64)
-            move_to(@x + dx, @y + dy)
+            move_to(x + dx, y + dy)
         end
 
         # Re-layout children within the panel (must match perform_layout logic)
         private def layout_children
             # Layout chrome (title bar area)
-            chrome_constraints = BoxConstraints.tight(Size.new(@width, title_bar_height))
+            chrome_constraints = BoxConstraints.tight(Size.new(width, title_bar_height))
             @chrome.layout(chrome_constraints, Vec2.zero)
 
             # Layout content (Content computes its own position based on menubar presence)
-            content_constraints = BoxConstraints.tight(Size.new(@width, @height))
+            content_constraints = BoxConstraints.tight(Size.new(width, height))
             @content.layout(content_constraints, Vec2.zero)
 
             # Track position when layout happened
-            @children_layout_position = Vec2.new(@x, @y)
+            @children_layout_position = Vec2.new(x, y)
         end
 
         # Get drag offset since last layout (for selective rendering during drag)
         def drag_offset_since_layout : Vec2
-            Vec2.new(@x - @children_layout_position.x, @y - @children_layout_position.y)
+            Vec2.new(x - @children_layout_position.x, y - @children_layout_position.y)
         end
 
         # Check if panel is being dragged
         def dragging? : Bool
-            @interaction_mode == InteractionMode::Dragging
+            interaction_mode == InteractionMode::Dragging
         end
 
         # Check if panel is being resized
         def resizing? : Bool
-            @interaction_mode == InteractionMode::Resizing
+            interaction_mode == InteractionMode::Resizing
         end
 
-        # Debug getters for resize state (to diagnose reconciliation issues)
-        def resize_start_bounds : Rect
-            @resize_start_bounds
-        end
-
-        def resize_edge : ResizeEdge
-            @resize_edge
-        end
-
-        def resize_start_pos : Vec2
-            @resize_start_pos
-        end
+        # Debug getters for resize state (to diagnose reconciliation issues) are now
+        # provided by the reactive_property macros (resize_start_bounds / resize_edge /
+        # resize_start_pos) — the hand-written duplicates were removed.
 
         # Check if this panel is topmost (highest z_index) among siblings
         def topmost? : Bool
@@ -1183,7 +1185,7 @@ module CrymbleUI
             return true if panels.empty?
 
             max_z = panels.map(&.z_index).max
-            @z_index == max_z
+            z_index == max_z
         end
 
         # Propagate render invalidation up to root (so renderer knows to redraw)
@@ -1197,7 +1199,7 @@ module CrymbleUI
 
         # Concise inspect for readable spec output (prevents 80MB dumps)
         def inspect(io : IO)
-            io << "WindowPanel(id=#{@id.inspect}, \"#{@title}\", x=#{@x}, y=#{@y}, w=#{@width}, h=#{@height}, z=#{@z_index})"
+            io << "WindowPanel(id=#{@id.inspect}, \"#{title}\", x=#{x}, y=#{y}, w=#{width}, h=#{height}, z=#{z_index})"
         end
     end
 end

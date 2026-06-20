@@ -37,12 +37,12 @@ module CrymbleUI
         end
 
         # Visual properties
-        render_property background_color : Color
-        render_property border_color : Color
+        theme_property background_color, menubar_background
+        theme_property border_color, menubar_border
 
         # Menu system state - tracks if any menu is open (enables hover-to-open)
-        # Using reconcile_property for automatic state preservation across rebuilds
-        reconcile_property menu_system_active : Bool = false
+        # Using reactive_property (reconcile) for automatic state preservation across rebuilds
+        reactive_property menu_system_active : Bool = false, reconcile: true
 
         # @internal_layer provided by LayerOwner mixin
         # MenuBar always renders on top with fixed high z_index
@@ -50,21 +50,23 @@ module CrymbleUI
 
         # Activate menu system (called when any menu opens)
         def activate_menu_system
-            @menu_system_active = true
+            self.menu_system_active = true
         end
 
         # Deactivate menu system (called when all menus close)
         def deactivate_menu_system
-            @menu_system_active = false
+            self.menu_system_active = false
         end
 
-        # No manual copy_state_from needed - reconcile_property handles it automatically!
+        # No manual copy_state_from needed - reactive_property (reconcile) handles it automatically!
 
         def initialize(
             id : String? = nil,
-            @background_color : Color = Theme.current.menubar_background,
-            @border_color : Color = Theme.current.menubar_border
+            background_color : Color? = nil,
+            border_color : Color? = nil
         )
+            @background_color = background_color
+            @border_color = border_color
             super(id: id)
             # Layer will be created conditionally in layout() based on parent context
             # - Window menubar: needs own layer (high z-index to render above panels)
@@ -143,17 +145,17 @@ module CrymbleUI
                     if empty_width > 0
                         # last_menu_end is already in widget-local coordinates (child.bounds.x is relative to parent)
                         bg_rect = Rect.new(last_menu_end, 0.0, empty_width, bounds.height - BORDER_WIDTH)
-                        fill_rect(bg_rect, @background_color)
+                        fill_rect(bg_rect, background_color)
                     end
                 else
                     # No menus - draw full background to menubar width
                     bg_rect = Rect.new(0.0, 0.0, menubar_width, bounds.height - BORDER_WIDTH)
-                    fill_rect(bg_rect, @background_color)
+                    fill_rect(bg_rect, background_color)
                 end
 
                 # Draw bottom border to menubar width
                 border_rect = Rect.new(0.0, 0.0 + bounds.height - BORDER_WIDTH, menubar_width, BORDER_WIDTH)
-                fill_rect(border_rect, @border_color)
+                fill_rect(border_rect, border_color)
             end
         end
     end

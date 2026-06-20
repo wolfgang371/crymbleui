@@ -10,44 +10,13 @@ module CrymbleUI
         include PrimitiveBuilder
         include LayerOwner
 
-        @x : Float64
-        def x : Float64
-            @x
-        end
-        def x=(value : Float64)
-            @x = value
-            mark_needs_layout
-        end
-
-        @y : Float64
-        def y : Float64
-            @y
-        end
-        def y=(value : Float64)
-            @y = value
-            mark_needs_layout
-        end
-
-        @width : Float64?   # nil = fill available width from constraints
-        def width : Float64?
-            @width
-        end
-        def width=(value : Float64?)
-            @width = value
-            mark_needs_layout
-        end
-
-        @height : Float64?  # nil = fill available height from constraints
-        def height : Float64?
-            @height
-        end
-        def height=(value : Float64?)
-            @height = value
-            mark_needs_layout
-        end
+        reactive_property x : Float64, layout: true
+        reactive_property y : Float64, layout: true
+        reactive_property width : Float64?, layout: true   # nil = fill available width from constraints
+        reactive_property height : Float64?, layout: true  # nil = fill available height from constraints
 
         property z_index : Int32
-        render_property background_color : Color = Color.new(0, 0, 0, 0)  # Fully transparent by default
+        reactive_property background_color : Color = Color.new(0, 0, 0, 0)  # Fully transparent by default
 
         # Alignment properties for automatic positioning
         property alignment : Alignment = Alignment::None
@@ -57,12 +26,16 @@ module CrymbleUI
 
         # @internal_layer provided by LayerOwner mixin
 
-        def initialize(@x : Float64, @y : Float64, @width : Float64?, @height : Float64?,
+        def initialize(x : Float64, y : Float64, width : Float64?, height : Float64?,
                        @z_index : Int32 = 1, id : String? = nil,
                        @alignment : Alignment = Alignment::None,
                        @width_spec : SizeSpec = nil,
                        @height_spec : SizeSpec = nil,
                        @margin : Float64 = 0.0)
+            @x = Source(Float64).new(x)
+            @y = Source(Float64).new(y)
+            @width = Source(Float64?).new(width)
+            @height = Source(Float64?).new(height)
             super(id: id)
             # Create layer with higher z-index to appear on top
             # Layer buffer always transparent (allows seeing content below)
@@ -79,16 +52,16 @@ module CrymbleUI
 
         def measure(constraints : BoxConstraints) : Size
             # Use explicit dimensions if set, otherwise use constraints
-            w = @width || constraints.max_width
-            h = @height || constraints.max_height
+            w = width || constraints.max_width
+            h = height || constraints.max_height
             Size.new(w, h)
         end
 
         def perform_layout(constraints : BoxConstraints, position : Vec2)
             # Use explicit dimensions if set, otherwise fill available space from constraints
-            actual_width = @width || constraints.max_width
-            actual_height = @height || constraints.max_height
-            @bounds = Rect.new(@x, @y, actual_width, actual_height)
+            actual_width = width || constraints.max_width
+            actual_height = height || constraints.max_height
+            @bounds = Rect.new(x, y, actual_width, actual_height)
 
             # Update layer
             if layer = @internal_layer
@@ -132,11 +105,11 @@ module CrymbleUI
 
         # Render background rectangle for the overlay (if background_color has alpha > 0)
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-            return [] of DrawPrimitive if @background_color.a == 0
+            return [] of DrawPrimitive if background_color.a == 0
 
             # Render full-bounds background rectangle in widget-local coordinates
             primitives do
-                fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), @background_color)
+                fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), background_color)
             end
         end
 
@@ -151,16 +124,18 @@ module CrymbleUI
             return if @alignment == Alignment::None
 
             # Resolve sizes from specs (percentage, pixel, or measure children)
-            actual_width = resolve_size(@width_spec, @width, window_bounds.width, :width)
-            actual_height = resolve_size(@height_spec, @height, window_bounds.height, :height)
+            actual_width = resolve_size(@width_spec, width, window_bounds.width, :width)
+            actual_height = resolve_size(@height_spec, height, window_bounds.height, :height)
 
             # Calculate position based on alignment
-            @x, @y = calculate_aligned_position(@alignment, actual_width, actual_height, window_bounds, @margin)
-            @width = actual_width
-            @height = actual_height
+            new_x, new_y = calculate_aligned_position(@alignment, actual_width, actual_height, window_bounds, @margin)
+            self.x = new_x
+            self.y = new_y
+            self.width = actual_width
+            self.height = actual_height
 
             # Sync bounds
-            @bounds = Rect.new(@x, @y, actual_width, actual_height)
+            @bounds = Rect.new(new_x, new_y, actual_width, actual_height)
             mark_needs_layout
         end
 
@@ -223,7 +198,7 @@ module CrymbleUI
             when Alignment::BottomRight
                 {bounds.x + bounds.width - w - margin, bounds.y + bounds.height - h - margin}
             else
-                {@x, @y}  # None - keep current position
+                {x, y}  # None - keep current position
             end
         end
     end

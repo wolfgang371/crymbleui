@@ -9,15 +9,17 @@ include CrymbleUI
 class TransparentBox < CrymbleUI::Widget
   include CrymbleUI::PrimitiveBuilder
 
-  layout_property fixed_width : Float64
-  layout_property fixed_height : Float64
+  reactive_property fixed_width : Float64, layout: true
+  reactive_property fixed_height : Float64, layout: true
 
-  def initialize(@fixed_width : Float64, @fixed_height : Float64, id : String? = nil)
+  def initialize(fixed_width : Float64, fixed_height : Float64, id : String? = nil)
+    @fixed_width = CrymbleUI::Source(Float64).new(fixed_width)
+    @fixed_height = CrymbleUI::Source(Float64).new(fixed_height)
     super(id: id)
   end
 
   def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
-    CrymbleUI::Size.new(@fixed_width, @fixed_height)
+    CrymbleUI::Size.new(fixed_width, fixed_height)
   end
 
   def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)

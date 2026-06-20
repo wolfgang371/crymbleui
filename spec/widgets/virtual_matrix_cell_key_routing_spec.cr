@@ -3,7 +3,7 @@ require "../../src/widgets/virtual_matrix"
 require "../../src/widgets/text_input"
 require "../../src/testing/test_renderer"
 
-# T-006: the matrix carries no cell-op vocabulary anymore (CellAction /
+# the matrix carries no cell-op vocabulary anymore (CellAction /
 # on_key_action are gone). Cut/paste/delete are owned by the app, registered as
 # cursor shortcuts. The matrix's only job for those keys is ROUTING: a
 # proxy-focused editor gets first shot, and what it declines bubbles to the
@@ -37,7 +37,7 @@ private def setup_routing_matrix
   matrix
 end
 
-describe "VirtualMatrix cell-key routing (T-006)" do
+describe "VirtualMatrix cell-key routing" do
   it "Ctrl+X on a QuickEntry cell is not consumed — it bubbles to the app" do
     matrix = setup_routing_matrix
     CrymbleUI::Widget.focus_manager.focus(matrix)

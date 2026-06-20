@@ -41,7 +41,7 @@ private def setup_sticky_matrix(adapter, viewport_width = 400.0, viewport_height
 end
 
 describe CrymbleUI::VirtualMatrix do
-  describe "StickyMath-based Cell Positioning (WU1)" do
+  describe "StickyMath-based Cell Positioning" do
     it "positions cells identically to legacy behavior for sequential scroll_order" do
       # Sequential scroll_order should produce identical positions to (0...col).sum
       adapter = StickyPositioningAdapter.new(10, 10)

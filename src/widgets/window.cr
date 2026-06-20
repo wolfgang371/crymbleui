@@ -93,9 +93,11 @@ module CrymbleUI
             end
         end
 
-        # Check if any ComboBox in the tree references this popup
+        # Check if any ComboBox or MultiComboBox in the tree references this popup
         private def combo_owns_popup?(widget : Widget, popup : ComboBoxPopup) : Bool
             if widget.is_a?(ComboBox) && widget.popup_open?
+                return true if widget.current_popup.same?(popup)
+            elsif widget.is_a?(MultiComboBox) && widget.popup_open?
                 return true if widget.current_popup.same?(popup)
             end
             widget.children.any? { |child| combo_owns_popup?(child, popup) }

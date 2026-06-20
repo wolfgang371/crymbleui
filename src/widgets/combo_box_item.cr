@@ -25,20 +25,11 @@ module CrymbleUI
 
     # Dynamic item height (scales with font zoom)
     def item_height : Float64
-      FontSizing.calculate_size(@font_scale) + PADDING * 2
+      FontSizing.calculate_size(font_scale) + PADDING * 2
     end
 
     # Label text
-    @label : String
-
-    def label_text : String
-      @label
-    end
-
-    def label_text=(value : String)
-      @label = value
-      mark_needs_render
-    end
+    reactive_property label_text : String
 
     # Value for data binding (returned in callback)
     @value : String
@@ -52,34 +43,41 @@ module CrymbleUI
     end
 
     # Visual properties
-    render_property text_color : Color
-    render_property background_color : Color
-    render_property hover_color : Color
-    render_property selected_color : Color
-    render_property text_background_color : Color?
+    theme_property text_color, combo_text
+    theme_property background_color, combo_background
+    theme_property hover_color, combo_hover
+    theme_property selected_color, combo_selected
+    reactive_property text_background_color : Color?
 
     # State
-    @selected : Bool = false
+    reactive_property selected : Bool = false
     @hovered : Bool = false
 
     def selected? : Bool
-      @selected
-    end
-
-    def selected=(value : Bool)
-      return if @selected == value
-      @selected = value
-      mark_needs_render
+      selected
     end
 
     # Alias: highlighted = selected (for ComboBoxPopup arrow key navigation)
     def highlighted? : Bool
-      @selected
+      selected
     end
 
     def highlighted=(value : Bool)
       self.selected = value
     end
+
+    # When non-nil, this item is in "checkable" mode.
+    # True = checked (✓), false = unchecked (☐).
+    # The gutter region click fires @on_toggle; body region keeps the existing on_click path.
+    property checked : Bool? = nil
+
+    # Gutter width for the ✓/☐ column (pixels from left edge)
+    GUTTER_WIDTH = 20.0
+
+    # Toggle callback — fired on gutter click for checkable items
+    @on_toggle : Proc(Nil)?
+
+    property on_toggle : Proc(Nil)?
 
     # Click callback
     @on_click_callback : Proc(String, Nil)?
@@ -90,17 +88,22 @@ module CrymbleUI
       value : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      @text_color : Color = Theme.current.combo_text,
-      @background_color : Color = Theme.current.combo_background,
-      @hover_color : Color = Theme.current.combo_hover,
-      @selected_color : Color = Theme.current.combo_selected,
-      @text_background_color : Color? = nil,
+      text_color : Color? = nil,
+      background_color : Color? = nil,
+      hover_color : Color? = nil,
+      selected_color : Color? = nil,
+      text_background_color : Color? = nil,
       on_click : Proc(String, Nil)? = nil,
     )
-      @font_scale = font_scale
+      @label_text = Source(String).new(label)
+      @text_background_color = Source(Color?).new(text_background_color)
+      @font_scale.set(font_scale)
       super(id: id)
-      @label = label
       @value = value || label
+      @text_color = text_color
+      @background_color = background_color
+      @hover_color = hover_color
+      @selected_color = selected_color
       @on_click_callback = on_click
     end
 
@@ -110,10 +113,10 @@ module CrymbleUI
       value : String? = nil,
       id : String? = nil,
       font_scale : Int32 = 0,
-      text_color : Color = Theme.current.combo_text,
-      background_color : Color = Theme.current.combo_background,
-      hover_color : Color = Theme.current.combo_hover,
-      selected_color : Color = Theme.current.combo_selected,
+      text_color : Color? = nil,
+      background_color : Color? = nil,
+      hover_color : Color? = nil,
+      selected_color : Color? = nil,
       text_background_color : Color? = nil,
       &block : String -> Nil
     )
@@ -127,7 +130,7 @@ module CrymbleUI
 
     # Measure item size
     def measure(constraints : BoxConstraints) : Size
-      text_size = measure_text(@label, font_size)
+      text_size = measure_text(label_text, font_size)
       width = text_size.width + PADDING * 2
       height = item_height
       Size.new(width, height)
@@ -152,7 +155,25 @@ module CrymbleUI
       mark_needs_render
     end
 
+    # For checkable items: split the click region in on_mouse_up so we can
+    # fire toggle (stay open) vs select (close) with no double-fire.
+    def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
+      return unless button == MouseButton::Left
+      if @checked != nil
+        # Checkable mode: decide by horizontal position
+        local_x = point.x - absolute_bounds.x
+        if local_x < GUTTER_WIDTH
+          @on_toggle.try &.call
+        else
+          @on_click_callback.try &.call(@value)
+        end
+      end
+      # Non-checkable items: fall through to on_click (trigger_click path)
+    end
+
     def on_click
+      # For checkable items on_mouse_up already handled everything — skip double-fire.
+      return if @checked != nil
       @on_click_callback.try &.call(@value)
     end
 
@@ -160,9 +181,9 @@ module CrymbleUI
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       # Determine background color based on state
       # text_background_color replaces background_color when set (for per-item customization)
-      base_bg = @text_background_color || @background_color
+      base_bg = text_background_color || background_color
 
-      bg_color = if @selected
+      bg_color = if selected
                    # Flash by toggling between two brightness levels for prominent effect
                    brightness = focus_highlighted? ? HIGHLIGHT_BRIGHTNESS_HIGH : HIGHLIGHT_BRIGHTNESS_LOW
                    base_bg.highlight(brightness)
@@ -182,7 +203,18 @@ module CrymbleUI
 
       primitives do
         fill_rect(bg_rect, bg_color)
-        draw_text(@label, text_pos, @text_color, @font_scale)
+        # MultiComboBox checkbox items show a ✓/☐ gutter. Read the reactive getters
+        # (label_text / text_color / font_scale), never the ivars — under t029 those are now
+        # a Source / a raw ThemeColor override, not the painted value.
+        if (c = checked) != nil
+          gutter_pos = Vec2.new(2.0, text_y)
+          glyph = c ? "✓" : "☐"
+          draw_text(glyph, gutter_pos, text_color, font_scale)
+          # Shift label text to the right of the gutter
+          draw_text(label_text, Vec2.new(GUTTER_WIDTH + PADDING, text_y), text_color, font_scale)
+        else
+          draw_text(label_text, text_pos, text_color, font_scale)
+        end
       end
     end
   end

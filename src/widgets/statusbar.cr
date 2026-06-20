@@ -84,53 +84,42 @@ module CrymbleUI
         # StatusBar renders on top with fixed high z_index (like MenuBar)
         STATUSBAR_Z_INDEX = 1000
 
-        # Status text to display
-        @text : String
-        def text : String
-            @text
-        end
-
-        def text=(value : String)
-            @text = value
-            mark_needs_render
-        end
+        # Visual properties (reactive_property: Source-backed, auto-captures in to_primitives)
+        reactive_property text : String
 
         # Font scale (relative sizing: 0 = base, +1 = larger, -1 = smaller)
         # Default -1 for compact statusbar text (~12.7pt)
-        @font_scale : Int32 = -1
-
-        def font_scale : Int32
-            @font_scale
-        end
-
-        def font_scale=(value : Int32)
-            @font_scale = value
-            mark_needs_layout  # Size changes affect layout
-        end
+        reactive_property font_scale : Int32 = -1, layout: true
 
         # Calculated font size (for internal use)
         def font_size : Float64
-            FontSizing.calculate_size(@font_scale)
+            FontSizing.calculate_size(font_scale)
         end
 
         # Visual properties
-        render_property text_color : Color
-        render_property background_color : Color
-        render_property border_color : Color
-        layout_property height : Float64
-        layout_property padding : Float64
+        theme_property text_color, statusbar_text
+        theme_property background_color, statusbar_background
+        theme_property border_color, statusbar_border
+        reactive_property height : Float64, layout: true
+        reactive_property padding : Float64, layout: true
 
         def initialize(
-            @text : String = "Ready",
+            text : String = "Ready",
             id : String? = nil,
             font_scale : Int32 = -1,
-            @text_color : Color = Theme.current.statusbar_text,
-            @background_color : Color = Theme.current.statusbar_background,
-            @border_color : Color = Theme.current.statusbar_border,
-            @height : Float64 = 24.0,
-            @padding : Float64 = 5.0
+            text_color : Color? = nil,
+            background_color : Color? = nil,
+            border_color : Color? = nil,
+            height : Float64 = 24.0,
+            padding : Float64 = 5.0
         )
-            @font_scale = font_scale
+            @text = Source(String).new(text)
+            @height = Source(Float64).new(height)
+            @padding = Source(Float64).new(padding)
+            @text_color = text_color
+            @background_color = background_color
+            @border_color = border_color
+            @font_scale.set(font_scale)
             super(id: id)
         end
 
@@ -142,13 +131,13 @@ module CrymbleUI
         # Measure statusbar size - auto-sized height based on font, flexible width
         def measure(constraints : BoxConstraints) : Size
             # Measure text to get proper height including SFML padding
-            text_size = measure_text(@text, font_size)
+            text_size = measure_text(text, font_size)
 
             # Auto-size height: text height + padding on top and bottom
-            auto_height = text_size.height + (@padding * 2)
+            auto_height = text_size.height + (padding * 2)
 
             # Use explicit height if larger than auto-sized, otherwise use auto-sized
-            height = @height > auto_height ? @height : auto_height
+            height = self.height > auto_height ? self.height : auto_height
 
             # Take full available width
             width = constraints.max_width.finite? ? constraints.max_width : 400.0
@@ -178,8 +167,8 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
 
             # Calculate text position (left-aligned with padding)
-            text_x = 0.0 + @padding
-            text_y = 0.0 + @padding
+            text_x = 0.0 + padding
+            text_y = 0.0 + padding
             text_position = Vec2.new(text_x, text_y)
 
             # Border rect (top border)
@@ -190,13 +179,13 @@ module CrymbleUI
 
             primitives do
                 # Draw background
-                fill_rect(local_bounds, @background_color)
+                fill_rect(local_bounds, background_color)
 
                 # Draw top border
-                fill_rect(border_rect, @border_color)
+                fill_rect(border_rect, border_color)
 
                 # Draw text (draw_text automatically handles SFML offset compensation)
-                draw_text(@text, text_position, @text_color, @font_scale)
+                draw_text(text, text_position, text_color, font_scale)
             end
         end
     end

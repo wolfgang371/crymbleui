@@ -34,26 +34,17 @@ module CrymbleUI
         BORDER_MARGIN = 1.0          # Margin for border stroke rendering
         MAX_CHILD_HEIGHT = 400.0     # Max height for child measurement
 
-        layout_property width : Float64? = nil   # nil = auto-size to content
-        layout_property height : Float64? = nil  # nil = auto-size to content
+        reactive_property width : Float64? = nil, layout: true   # nil = auto-size to content
+        reactive_property height : Float64? = nil, layout: true  # nil = auto-size to content
 
         # Position properties (for DSL-created popups)
         property target_x : Float64 = 0.0
         property target_y : Float64 = 0.0
 
         # Visual properties
-        @background_color : Color
-        @border_color : Color
-        @padding : Float64
-
-        def background_color : Color; @background_color end
-        def background_color=(value : Color); @background_color = value; mark_needs_render end
-
-        def border_color : Color; @border_color end
-        def border_color=(value : Color); @border_color = value; mark_needs_render end
-
-        def padding : Float64; @padding end
-        def padding=(value : Float64); @padding = value; mark_needs_layout end
+        theme_property background_color, popup_background
+        theme_property border_color, popup_border
+        reactive_property padding : Float64 = 0.0, layout: true
 
         # Z-ordering (higher = on top)
         property z_index : Int32
@@ -72,18 +63,23 @@ module CrymbleUI
         end
 
         def initialize(
-            @width : Float64? = nil,
-            @height : Float64? = nil,
-            @background_color : Color = Theme.current.popup_background,
-            @border_color : Color = Theme.current.popup_border,
-            @padding : Float64 = 0.0,
+            width : Float64? = nil,
+            height : Float64? = nil,
+            background_color : Color? = nil,
+            border_color : Color? = nil,
+            padding : Float64 = 0.0,
             @z_index : Int32 = 1000,  # High z-index for popups
             id : String? = nil
         )
+            @width = Source(Float64?).new(width)
+            @height = Source(Float64?).new(height)
+            @padding.set(padding)
+            @background_color = background_color
+            @border_color = border_color
             super(id: id)
             # Create internal layer (bounds will be set in layout)
             # Layer background should match popup background for correct selective rendering
-            @internal_layer = Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: @background_color, owner_widget: self)
+            @internal_layer = Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: self.background_color, owner_widget: self)
         end
 
         # layer getter provided by LayerOwner mixin
@@ -99,6 +95,12 @@ module CrymbleUI
             )
         end
 
+        # Pull-based layer background: the popup layer clears to the LIVE popup background so a
+        # Theme.set recolors it without a rebuild. background_color is the live getter (override-or-theme).
+        def compute_background_for_layer(layer : Layer) : Color?
+            background_color
+        end
+
         # Override label for path_id generation
         def label : String?
             "popup"
@@ -106,8 +108,10 @@ module CrymbleUI
 
         # Measure popup size - auto-size to children if width/height not specified
         def measure(constraints : BoxConstraints) : Size
-            if @width && @height
-                return Size.new(@width.not_nil!, @height.not_nil!)
+            w = width
+            h = height
+            if w && h
+                return Size.new(w, h)
             end
 
             # Start with 0 for auto-sizing
@@ -115,23 +119,23 @@ module CrymbleUI
             total_height = 0.0
 
             # Measure children if we need to auto-size any dimension
-            if !@width || !@height
+            if !w || !h
                 @children.each do |child|
                     # Give children unconstrained loose constraints to get their natural size
                     child_constraints = BoxConstraints.loose(Size.new(Float64::INFINITY, Float64::INFINITY))
                     child_size = child.measure(child_constraints)
-                    max_width = [max_width, child_size.width].max if !@width
-                    total_height += child_size.height if !@height
+                    max_width = [max_width, child_size.width].max if !w
+                    total_height += child_size.height if !h
                 end
             end
 
             # Apply minimum width only if no children and width not specified
-            if !@width && max_width == 0.0
+            if !w && max_width == 0.0
                 max_width = MIN_AUTO_WIDTH
             end
 
-            final_width = @width || (max_width + @padding * 2)
-            final_height = @height || (total_height + @padding * 2)
+            final_width = w || (max_width + padding * 2)
+            final_height = h || (total_height + padding * 2)
 
             Size.new(final_width, final_height)
         end
@@ -176,9 +180,9 @@ module CrymbleUI
 
             # Layout children vertically inside popup
             # Use relative coordinates (relative to popup, not window)
-            child_x = @padding
-            child_y = @padding
-            available_width = @bounds.width - (@padding * 2)
+            child_x = padding
+            child_y = padding
+            available_width = @bounds.width - (padding * 2)
 
             @children.each do |child|
                 child_size = child.measure(BoxConstraints.loose(Size.new(available_width, MAX_CHILD_HEIGHT)))
@@ -202,10 +206,10 @@ module CrymbleUI
 
             primitives do
                 # Draw background
-                fill_rect(local_bounds, @background_color)
+                fill_rect(local_bounds, background_color)
 
                 # Draw border
-                draw_rect(local_bounds, @border_color)
+                draw_rect(local_bounds, border_color)
             end
         end
 
@@ -213,10 +217,10 @@ module CrymbleUI
         def content_area : Rect
             abs = absolute_bounds
             Rect.new(
-                abs.x + @padding,
-                abs.y + @padding,
-                @bounds.width - (@padding * 2),
-                @bounds.height - (@padding * 2)
+                abs.x + padding,
+                abs.y + padding,
+                @bounds.width - (padding * 2),
+                @bounds.height - (padding * 2)
             )
         end
 

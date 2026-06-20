@@ -3,6 +3,15 @@ require "../../../src/widgets/virtual_matrix/sticky_math"
 
 include CrymbleUI::Widgets::VirtualMatrix
 
+# Inverse permutation of a scroll_order: inv[physical_index] = its position in scroll order.
+# This is what the matrix caches per resize and what sticky_fast/visible_indices_in_range now
+# take for O(1) shifted-membership.
+private def inverse_perm(order : Array(Int32)) : Array(Int32)
+  inv = Array.new(order.size, 0)
+  order.each_with_index { |phys, i| inv[phys] = i }
+  inv
+end
+
 describe StickyMath do
   describe ".visibility_range_min" do
     it "returns 0 for first element" do
@@ -208,6 +217,90 @@ describe StickyMath do
       visible.should_not contain(2)
       visible.should_not contain(3)
       visible.should_not contain(4)
+    end
+  end
+
+  describe "performance: O(visible), not O(num_shifted) [seam fix]" do
+    # The freeze: a far thumb-drag drives num_shifted ≈ grid size; per-scroll work used to
+    # scale with it (building sorted_shifted / shifted_set). After the seam fix, per-call work
+    # must scale only with the visible window. StickyMath.work counts shifted-proportional
+    # cells examined; the bounds below are generous but far under num_shifted (~9000).
+    it "sticky_fast stays O(visible) at far scroll (identity order)" do
+      n = 10_000
+      sizes = Array.new(n, 20)
+      order = (0...n).to_a
+      cumulative = order.map { |el| sizes[el] }.accumulate { |x, y| x + y }
+      physical_cum = sizes.accumulate(0) { |a, b| a + b }
+      min_pos = 9000 * 20
+      max_pos = min_pos + 300
+      num_shifted = cumulative.bsearch_index { |p| p >= min_pos } || n
+      num_shifted.should be > 8000 # sanity: genuinely far-scrolled
+      scroll_rank = inverse_perm(order)
+
+      StickyMath.reset_work
+      StickyMath.sticky_fast(sizes, order, scroll_rank, num_shifted, cumulative, physical_cum, min_pos, max_pos, 0)
+      StickyMath.work.should be < 100
+    end
+
+    it "sticky_fast stays O(visible) at far scroll (grouped order, interior holes)" do
+      n = 10_000
+      sizes = Array.new(n, 20)
+      # grouped: groups of 4 (3 data + 1 header); header scrolls out AFTER its data.
+      order = [] of Int32
+      (0...n).step(4) do |base|
+        (1..3).each { |o| order << base + o if base + o < n }
+        order << base
+      end
+      cumulative = order.map { |el| sizes[el] }.accumulate { |x, y| x + y }
+      physical_cum = sizes.accumulate(0) { |a, b| a + b }
+      min_pos = 9000 * 20
+      max_pos = min_pos + 300
+      num_shifted = cumulative.bsearch_index { |p| p >= min_pos } || n
+      scroll_rank = inverse_perm(order)
+
+      StickyMath.reset_work
+      StickyMath.sticky_fast(sizes, order, scroll_rank, num_shifted, cumulative, physical_cum, min_pos, max_pos, 1)
+      StickyMath.work.should be < 100
+    end
+
+    it "visible_indices_in_range stays O(visible) at far scroll" do
+      n = 10_000
+      sizes = Array.new(n, 20)
+      order = (0...n).to_a
+      cumulative = order.map { |el| sizes[el] }.accumulate { |x, y| x + y }
+      physical_cum = sizes.accumulate(0) { |a, b| a + b }
+      min_pos = 9000 * 20
+      max_pos = min_pos + 300
+      num_shifted = cumulative.bsearch_index { |p| p >= min_pos } || n
+      scroll_rank = inverse_perm(order)
+
+      StickyMath.reset_work
+      StickyMath.visible_indices_in_range(physical_cum, scroll_rank, num_shifted, min_pos, max_pos, 0)
+      StickyMath.work.should be < 100
+    end
+
+    it "sticky_fast viewport matches sticky() ground truth with interior (shifted) holes" do
+      # Correctness guard for the membership the perf path must preserve: grouped order where a
+      # pinned header sits physically before its scrolled-out data, so shifted cells are interior
+      # to [first_idx,last_idx]. Mirrors the n=13 task board.
+      sizes = [83, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103]
+      order = [2, 3, 4, 1, 6, 7, 8, 5, 10, 11, 12, 9, 0]
+      cumulative = order.map { |el| sizes[el] }.accumulate { |x, y| x + y }
+      physical_cum = sizes.accumulate(0) { |a, b| a + b }
+      min_pos = 350
+      max_pos = 1010
+      num_shifted = cumulative.bsearch_index { |p| p >= min_pos } || order.size
+      scroll_rank = inverse_perm(order)
+
+      _, _, _, truth_visible, _ = StickyMath.sticky(sizes, order, min_pos, max_pos)
+      _, _, _, fast_visible, _ = StickyMath.sticky_fast(sizes, order, scroll_rank, num_shifted, cumulative, physical_cum, min_pos, max_pos, 1)
+
+      # shifted-out, physically-interior cols (3,4) must NOT appear in the fast viewport
+      [3, 4].each { |c| fast_visible.should_not contain(c) }
+      # no dupes, and every fast-visible cell is a real non-shifted cell per the ground truth
+      fast_visible.sort.should eq(fast_visible.uniq.sort)
+      fast_visible.each { |idx| truth_visible.should contain(idx) }
+      fast_visible.should contain(0) # sticky col survives
     end
   end
 

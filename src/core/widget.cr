@@ -1,4 +1,5 @@
 require "./types"
+require "./cached"
 require "./scheduler"
 require "./cache_policy"
 require "./font"
@@ -15,7 +16,7 @@ module CrymbleUI
     end
 
     # Annotation for properties that should be automatically copied during reconciliation
-    # Used by render_property, layout_property, and reconcile_property macros
+    # Emitted by reactive_property(reconcile: true) and reconcile_property
     # The auto_copy_reconcile_properties method iterates all @[Reconcile] annotated vars
     annotation Reconcile
     end
@@ -342,8 +343,16 @@ module CrymbleUI
         property focus_override : FocusOverride?
 
         # Cached primitive list (for primitive-based rendering)
-        # Managed by base class - subclasses never touch this
+        # Managed by base class - subclasses never touch this. Used by the Static cache policy; the
+        # Dynamic policy uses @primitives_node.
         @cached_primitives : Array(DrawPrimitive)?
+
+        # The Dynamic-policy primitive cache as a pull node. Its recompute is
+        # to_primitives(@primitives_bounds), which AUTO-CAPTURES theme/zoom (Sources) it reads; content
+        # and layout are signalled via touch() from mark_needs_render / mark_needs_layout. Lazily created
+        # on first render.
+        @primitives_node : Cached(Array(DrawPrimitive))? = nil
+        @primitives_bounds : Rect = Rect.new(0.0, 0.0, 0.0, 0.0)
 
         # Per-widget render backend (for per-widget texture optimization)
         # Each widget maintains its own tiny RenderTexture for fast selective rendering
@@ -361,17 +370,6 @@ module CrymbleUI
         # Managed by renderer - subclasses never touch this
         @background_backend : RenderBackend?
 
-        # Flag: widget exited viewport and needs fresh background on re-entry
-        # WORKAROUND for SFML RenderTexture limitation:
-        #   - When widget exits viewport, its region in layer texture still has old pixels
-        #   - We CANNOT clear that region because: fill_rect draws to render target,
-        #     but blit_region reads from TEXTURE which isn't updated until display()
-        #   - Calling display() after fill_rect breaks rendering
-        #   - So instead we track that this widget needs "fresh" background on re-entry
-        #   - During capture, we fill with background_color instead of blit_region
-        # This is the same pattern as layer.buffer_just_cleared (Bug 1 fix)
-        # Set by ScrollView when widget exits, cleared after capture
-        @needs_fresh_background : Bool = false
 
         # Layer position where widget was last rendered (for auto-detecting stale background).
         # Cleared when widget_backend is disposed (scroll exit, rebuild).
@@ -383,6 +381,55 @@ module CrymbleUI
 
         # Zoom epoch at last layout (forces re-layout when zoom changes)
         @last_zoom_epoch : UInt64 = 0
+
+        # Per-widget revision axes for the primitive cache.
+        # content_rev bumps on mark_needs_render (visual change), layout_rev on mark_needs_layout
+        # (size/structure). Summed with the global Theme.theme_rev + FontSizing.zoom_epoch they form
+        # the validity key (see primitive_cache_rev) — replacing `needs_render? || nil`, which was
+        # blind to theme/zoom swaps that issue no mark_needs_render.
+        @content_rev : UInt64 = 0
+        @layout_rev : UInt64 = 0
+
+        # Pull/SlotBuffer (sparse, per-cell — no dense structure): the slot key for a
+        # viewport_cache buffer = {content version, BUFFER position}. content_version is
+        # primitive_cache_rev (content_rev+theme_rev+zoom_rev+layout_rev). buffer_pos = content_pos −
+        # buffer_origin. The buffer SKIPS a cell whose key is unchanged (it already holds its pixels);
+        # the soundness invariant is that buffer_pos is moved IN LOCKSTEP with the pixels by every
+        # buffer op (scroll blit-shift → shift_slot; reflow/clear → invalidate via disposed backend).
+        @slot_rev : UInt64? = nil
+        @slot_buffer_pos : Tuple(Int32, Int32)? = nil
+
+        # Skip iff the buffer already holds this cell's current pixels at buffer_pos. The
+        # version axis is the cell's node version (primitives_version) — auto-captures theme/zoom, so a
+        # theme/zoom swap invalidates every slot. The geometric coherence (buffer_pos +
+        # shift_slot/invalidate_slot lockstep) is the separate spatial axis, unchanged.
+        def slot_fresh?(buffer_pos : Tuple(Int32, Int32)) : Bool
+            @slot_rev == primitives_version && @slot_buffer_pos == buffer_pos
+        end
+
+        # Stamp the slot after a (re-)blit into the buffer at buffer_pos.
+        def stamp_slot(buffer_pos : Tuple(Int32, Int32)) : Nil
+            @slot_rev = primitives_version
+            @slot_buffer_pos = buffer_pos
+        end
+
+        # Blit-shift lockstep: the cell's pixels were moved by (dx,dy) in the buffer — move its stamp too.
+        def shift_slot(dx : Int32, dy : Int32) : Nil
+            if bp = @slot_buffer_pos
+                @slot_buffer_pos = {bp[0] + dx, bp[1] + dy}
+            end
+        end
+
+        # Blit-shift: the cell's backend is still VALID but its pixels were NOT copied to the new buffer
+        # position — invalidate the slot so it re-blits the cached backend (no re-render needed).
+        def invalidate_slot : Nil
+            @slot_buffer_pos = nil
+        end
+
+        # True iff the cached widget_backend texture still reflects the current version (position aside).
+        def slot_rev_matches? : Bool
+            @slot_rev == primitives_version
+        end
 
         def initialize(@id : String? = nil)
             @parent = nil
@@ -454,6 +501,8 @@ module CrymbleUI
         # This implies rendering will also be needed
         def mark_needs_layout
             @state = WidgetState::NeedsLayout
+            @layout_rev &+= 1             # bump layout axis
+            @primitives_node.try(&.touch) # signal the pull node (layout is an intrinsic change)
             @ancestry_bounds_valid = nil  # Invalidate bounds cache (propagates up via parent chain)
 
             # Invalidate cached constraints (forces re-layout even if constraints unchanged)
@@ -475,6 +524,8 @@ module CrymbleUI
         # Mark widget as needing render (visual change only)
         # Does not trigger layout unless already needed
         def mark_needs_render
+            @content_rev &+= 1  # bump content axis (any visual change)
+            @primitives_node.try(&.touch) # signal the pull node (content is an intrinsic change)
             # Don't downgrade from NeedsLayout to NeedsRender
             @state = WidgetState::NeedsRender if @state == WidgetState::Clean
 
@@ -533,6 +584,14 @@ module CrymbleUI
             end
         end
 
+        # The node-driven layer-index enqueue. The widget's primitives node calls this
+        # (via on_dirty) when it goes value-stale, putting this widget in its layer's selective-render
+        # set. Reuses propagate_to_layer so the @state branch (selective render vs full-layout) is
+        # honoured exactly as the push path does — they coexist idempotently with the push.
+        protected def enqueue_dirty_to_layer : Nil
+            propagate_to_layer
+        end
+
         # Invalidate children's background backends recursively
         # Called when parent changes visually - children must re-capture backgrounds
         # This is an O(children) cascade which is correct behavior (uncommon case: ~5-10%)
@@ -549,85 +608,62 @@ module CrymbleUI
             end
         end
 
-        # Property macros for widget properties with automatic invalidation and optional reconciliation
+        # Widget property macros — two concerns, two macros:
         #
-        # Invalidation behavior:
-        #   layout_property   →  mark_needs_layout on setter (implies render)
-        #   render_property   →  mark_needs_render on setter
-        #   reconcile_property   →  no invalidation (just reconcile)
-        #
-        # Reconciliation behavior:
-        #   - reconcile_property: ALWAYS adds @[Reconcile] annotation
-        #   - layout_property/render_property: Only add @[Reconcile] if `reconcile = true` is passed
+        #   reactive_property  — a reactive VALUE (the workhorse). A tracked Source(T): read it in
+        #                        to_primitives and it auto-captures; a change re-renders.
+        #   reconcile_property — non-reactive infrastructure that must survive a DSL rebuild (a managed
+        #                        Layer/Widget ref). A plain ivar, carried across the rebuild — NOT a value.
         #
         # Usage:
-        #   render_property background_color : Color = Color::White              # No reconcile
-        #   render_property hover_state : Bool = false, reconcile = true         # With reconcile
-        #   layout_property padding : Float64 = 0.0                              # No reconcile
-        #   layout_property scroll_offset : Vec2 = Vec2.zero, reconcile = true   # With reconcile
-        #   reconcile_property interaction_mode : InteractionMode = InteractionMode::None  # Always reconciled
+        #   reactive_property text : String                              # render-reactive (read while painting)
+        #   reactive_property padding : Float64 = 0.0, layout: true      # change also re-layouts
+        #   reactive_property mode : Mode = Mode::None, reconcile: true   # value survives a rebuild
+        #   reconcile_property content_layer : Layer?                    # carried object ref, not reactive
 
-        # render_property: mark_needs_render on setter
-        # reconcile: if true, preserve this value during widget reconciliation (default: false)
-        # When reconciled, a shadow @_build_<name> tracks the build-time value.
-        # During reconciliation, if build value changed, app's value wins over old state.
-        macro render_property(declaration, reconcile = false)
+        # reactive_property: the unified reactive field. The field is a tracked Source(T) — the getter
+        # reads it (so to_primitives AUTO-CAPTURES it → the primitives node depends on it), the setter
+        # notifies (→ node stale → the on_dirty callback enqueues this widget). No manual mark: the value
+        # edge can't be forgotten, and the equality gate suppresses no-op writes.
+        #   layout: true    → the setter ALSO pokes the imperative layout pass (mark_needs_layout) — layout
+        #                     is not a pull-node, so a layout-affecting change must trigger it explicitly.
+        #   reconcile: true → @[Reconcile] + a PLAIN build-shadow (the @[Reconcile] copy compares it by ==;
+        #                     a Source-typed shadow would compare by identity and never reconcile), so the
+        #                     value survives a DSL rebuild.
+        macro reactive_property(declaration, layout = false, reconcile = false)
             {% if declaration.is_a?(TypeDeclaration) %}
                 {% if reconcile %}
                     @[::CrymbleUI::Reconcile]
                 {% end %}
                 {% if !declaration.value.is_a?(Nop) %}
-                    @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    @{{declaration.var}} : ::CrymbleUI::Source({{declaration.type}}) = ::CrymbleUI::Source({{declaration.type}}).new({{declaration.value}})
                     {% if reconcile %}
                         @_build_{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
                     {% end %}
                 {% else %}
-                    @{{declaration.var}} : {{declaration.type}}
+                    @{{declaration.var}} : ::CrymbleUI::Source({{declaration.type}})
                 {% end %}
 
                 def {{declaration.var}} : {{declaration.type}}
-                    @{{declaration.var}}
+                    @{{declaration.var}}.get
                 end
 
                 def {{declaration.var}}=(value : {{declaration.type}})
-                    @{{declaration.var}} = value
-                    mark_needs_render
-                end
-            {% end %}
-        end
-
-        # layout_property: mark_needs_layout on setter (implies render)
-        # reconcile: if true, preserve this value during widget reconciliation (default: false)
-        macro layout_property(declaration, reconcile = false)
-            {% if declaration.is_a?(TypeDeclaration) %}
-                {% if reconcile %}
-                    @[::CrymbleUI::Reconcile]
-                {% end %}
-                {% if !declaration.value.is_a?(Nop) %}
-                    @{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
-                    {% if reconcile %}
-                        @_build_{{declaration.var}} : {{declaration.type}} = {{declaration.value}}
+                    @{{declaration.var}}.set(value)
+                    {% if layout %}
+                        mark_needs_layout
                     {% end %}
-                {% else %}
-                    @{{declaration.var}} : {{declaration.type}}
-                {% end %}
-
-                def {{declaration.var}} : {{declaration.type}}
-                    @{{declaration.var}}
-                end
-
-                def {{declaration.var}}=(value : {{declaration.type}})
-                    @{{declaration.var}} = value
-                    mark_needs_layout
                 end
             {% end %}
         end
 
-        # reconcile_property: Auto-reconcile only, no invalidation on setter
-        # Use for internal state that must survive rebuilds but doesn't directly affect rendering
-        # Examples: interaction_mode, drag state, internal flags
-        # When a default value exists, a shadow @_build_<name> tracks the build-time value
-        # so reconciliation can detect when the app changed it (app wins over old state).
+        # reconcile_property: non-reactive carry-over for infrastructure that must survive a DSL rebuild
+        # but is NOT a reactive value — a managed Layer/Widget ref (content_layer, cursor_overlay_widget,
+        # proxy_focused_widget). A plain ivar (NOT a Source): Source-wrapping a managed object would be a
+        # dishonest abstraction and buys no auto-capture (these are never read in to_primitives). The field
+        # is carried from the old widget on rebuild via @[Reconcile] (see auto_copy_reconcile_properties).
+        # When a default exists, a @_build_<name> shadow gates the copy (app-wins-if-changed); without a
+        # default it is always carried. Reactive VALUES use reactive_property(reconcile: true) instead.
         macro reconcile_property(declaration)
             {% if declaration.is_a?(TypeDeclaration) %}
                 @[::CrymbleUI::Reconcile]
@@ -648,9 +684,44 @@ module CrymbleUI
             {% end %}
         end
 
-        # Check if widget needs rendering (either NeedsRender or NeedsLayout)
+        # theme_property: a theme-derived Color that resolves LIVE.
+        # Stores nil by default → the getter falls back to Theme.current.<theme_key> at READ time, so
+        # a Theme.set recolors the widget immediately (paired with theme_rev invalidating the cache).
+        # An explicit value (constructor arg or setter) is stored and WINS. This is the Flutter/ImGui
+        # idiom: read the theme role at render, an explicit override takes precedence.
+        # IMPORTANT: to_primitives MUST read the getter (`name`), never the `@name` ivar — the ivar is
+        # the nullable override store, not the resolved color.
+        macro theme_property(name, theme_key)
+            # Stores nil (follow theme), a concrete Color (sticky override), or a live ThemeColorRef
+            # (a different theme key, resolved at read time — see Theme.ref).
+            @{{name.id}} : ThemeColor? = nil
+
+            def {{name.id}} : Color
+                v = @{{name.id}}
+                case v
+                in ThemeColorRef then v.resolve
+                in Color         then v
+                in Nil           then Theme.current.{{theme_key.id}}
+                end
+            end
+
+            def {{name.id}}=(value : ThemeColor?)
+                @{{name.id}} = value
+                mark_needs_render
+            end
+        end
+
+        # Check if widget needs rendering. For a node-backed (Dynamic, rendered) widget
+        # this is NODE-DERIVED — render is needed iff the primitives cache is stale (a Source.set or a
+        # touch invalidated it). This is more precise than the @state flag (which a Source-backed setter
+        # no longer sets) and is what blit_plan needs: "blit the cached texture, or re-render?". Static /
+        # Never / not-yet-rendered widgets fall back to the @state flag.
         def needs_render? : Bool
-            @state >= WidgetState::NeedsRender
+            if node = @primitives_node
+                !node.valid?
+            else
+                @state >= WidgetState::NeedsRender
+            end
         end
 
         # Check if widget needs layout
@@ -793,8 +864,9 @@ module CrymbleUI
 
         # Auto-copy all @[Reconcile] annotated properties from old widget
         # Called by copy_state_from - widgets can override copy_state_from for custom logic
-        # Note: Only reconcile_property always adds @[Reconcile]. For layout_property/render_property,
-        # you must pass `reconcile = true` to get the annotation.
+        # Note: reconcile_property always adds @[Reconcile]; reactive_property adds it only with
+        # `reconcile: true`. Fields with a @_build_<name> shadow are gated (app-wins-if-changed);
+        # fields without one (a no-default reconcile_property object ref) are always carried.
         protected def auto_copy_reconcile_properties(old_widget : Widget)
             {% for ivar in @type.instance_vars %}
                 {% if ivar.annotation(::CrymbleUI::Reconcile) %}
@@ -863,6 +935,36 @@ module CrymbleUI
             [] of DrawPrimitive
         end
 
+        # The primitive-cache validity key — the SUM of every axis that can change
+        # what to_primitives() emits: this widget's content_rev (visual changes) + layout_rev (size)
+        # + the global Theme.theme_rev + FontSizing.zoom_epoch. Each is monotonic, so the sum is
+        # monotonic (wrapping &+ keeps it a pure key, never raising); a bump on ANY axis changes the
+        # sum and forces a regenerate. This AUGMENTS the old `needs_render? || nil` key (blind to
+        # theme/zoom swaps, which issue no mark_needs_render); the design retires needs_render?
+        # per-level once every bump-site bumps content_rev.
+        def primitive_cache_rev : UInt64
+            # The residual version for Static / Never / pre-first-render widgets only
+            # (rendered Dynamic widgets use the node version). Theme/zoom dropped here: Dynamic widgets
+            # auto-capture them via the Cached node; a zoom change also bumps layout_rev (relayout); and a
+            # theme switch reaches the residual via rebuild. The global theme_rev counter is now deleted.
+            @content_rev &+ @layout_rev
+        end
+
+        # The per-widget version the render-trigger aggregate folds. For a rendered
+        # Dynamic widget this is the pull node's version (auto-captured theme/zoom + touch-driven local
+        # rev) — so the trigger moves iff this widget's primitives WOULD change, correct-by-construction
+        # and more precise than the global rev (only widgets that read theme move on a theme swap). For
+        # Static (cached forever), Never (re-rendered every frame, triggered elsewhere), and a not-yet-
+        # rendered Dynamic widget, fall back to the hand-rolled primitive_cache_rev (a documented residual
+        # until those policies are reseated). version() is CHEAP — it re-folds, never recomputes the value.
+        def primitives_version : UInt64
+            if cache_policy == CachePolicy::Dynamic && (node = @primitives_node)
+                node.version
+            else
+                primitive_cache_rev
+            end
+        end
+
         # Get primitives (may be cached)
         # Renderer calls this method - never call to_primitives directly
         # Base class manages caching based on cache_policy
@@ -873,13 +975,21 @@ module CrymbleUI
                 to_primitives(bounds)
 
             when CachePolicy::Dynamic
-                # Cache primitives, invalidate on state change (buttons, text)
-                should_regenerate = needs_render? || @cached_primitives.nil?
-
-                if should_regenerate
-                    @cached_primitives = to_primitives(bounds)
+                # The cache is a pull node. Its recompute (to_primitives) auto-captures
+                # the theme/zoom it reads; content/layout are signalled via touch() from
+                # mark_needs_render / mark_needs_layout. The node memoizes and re-derives only on a real
+                # change — correct-by-construction (a global edge the widget reads can't be forgotten).
+                @primitives_bounds = bounds
+                node = @primitives_node
+                unless node
+                    node = Cached(Array(DrawPrimitive)).new { to_primitives(@primitives_bounds) }
+                    # When this node goes value-stale, enqueue THIS widget into its layer's
+                    # selective-render index — the pull-side replacement for mark_needs_render's push
+                    # (which still COEXISTS). Fires once per clean→stale edge.
+                    node.on_dirty = -> { enqueue_dirty_to_layer }
+                    @primitives_node = node
                 end
-                @cached_primitives.not_nil!
+                node.get
 
             when CachePolicy::Static
                 # Cache primitives forever (window chrome, static content)
@@ -893,12 +1003,17 @@ module CrymbleUI
         # Invalidate primitive cache (called on state changes)
         def invalidate_primitive_cache
             @cached_primitives = nil
+            @primitives_node.try(&.touch)
         end
 
         # Check if widget has valid cached primitives (for scroll optimization)
         # Returns true if primitives were generated and haven't been invalidated
         def has_valid_primitive_cache? : Bool
-            !@cached_primitives.nil?
+            if node = @primitives_node
+                node.valid? # Dynamic policy: fresh iff the node's memoized value is current
+            else
+                !@cached_primitives.nil?
+            end
         end
 
         # === END PRIMITIVE-BASED RENDERING ===
@@ -941,16 +1056,6 @@ module CrymbleUI
             @rendered_to_layer_at_current_bounds = true
         end
 
-        # Check if widget needs fresh background (exited viewport, layer has stale content)
-        def needs_fresh_background? : Bool
-            @needs_fresh_background
-        end
-
-        # Set needs_fresh_background flag (set by ScrollView on exit, cleared by renderer after capture)
-        def needs_fresh_background=(value : Bool)
-            @needs_fresh_background = value
-        end
-
         # Layer position where widget was last rendered (for centralized stale-background detection)
         def last_rendered_layer_position : Tuple(Int32, Int32)?
             @last_rendered_layer_position
@@ -987,6 +1092,7 @@ module CrymbleUI
             @bounds = Rect.zero
             invalidate_last_constraints
             @cached_primitives = nil
+            @primitives_node.try(&.touch)
             self.background_backend = nil
             self.widget_backend = nil
             invalidate_ancestry_bounds_cache
@@ -1394,6 +1500,7 @@ module CrymbleUI
         # Used when exception occurs mid-frame and caches may be corrupted
         def reset_render_caches_recursive
             @cached_primitives = nil
+            @primitives_node.try(&.touch)
             @widget_backend = nil
             @background_backend = nil
             @rendered_to_layer_at_current_bounds = false

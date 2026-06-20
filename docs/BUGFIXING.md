@@ -60,7 +60,7 @@ Bug 2 had two independent root causes (compound cell sizing + buffer origin drif
 
 ## Question uniform code paths across architectural boundaries
 
-Bug A happened because WU3 visible-size shrinking was applied uniformly to all compound cells. But content cells and sticky cells have fundamentally different coordinate models (fixed content-space vs viewport-relative). The fix was a two-line guard: `next if row >= sticky_rows && col >= sticky_cols`.
+Bug A happened because the visible-size shrinking of compound cells was applied uniformly to all of them. But content cells and sticky cells have fundamentally different coordinate models (fixed content-space vs viewport-relative). The fix was a two-line guard: `next if row >= sticky_rows && col >= sticky_cols`.
 
 **Rule**: When code applies the same transformation to widgets on different layers or in different coordinate spaces, verify the transformation is correct for each case. Uniform application across architectural boundaries is a common source of subtle bugs.
 

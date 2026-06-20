@@ -30,7 +30,7 @@ module CrymbleUI
     include PrimitiveBuilder
 
     # Spacing between cells
-    layout_property spacing : Float64 = 0.0
+    reactive_property spacing : Float64 = 0.0, layout: true
 
     # Border width in pixels
     BORDER_WIDTH = 2.0
@@ -39,11 +39,13 @@ module CrymbleUI
     @grid : RecursiveGridData::Grid(Widget)
 
     # Border color (nil = no border)
-    @border_color : Color?
+    # Source-backed: getter auto-captures, setter re-layouts (border affects padding)
+    reactive_property border_color : Color?, layout: true
 
     # Cell background color (nil = no auto-wrap)
     # When set, non-RecursiveGrid cells are wrapped in VStack with this background
-    @cell_background_color : Color?
+    # Source-backed: getter auto-captures, setter only re-renders (no layout)
+    reactive_property cell_background_color : Color?
 
     # Cached row heights and column widths (computed during measure)
     @row_heights : Array(Float64) = [] of Float64
@@ -60,44 +62,23 @@ module CrymbleUI
     protected setter parent_col_widths : Array(Float64)? = nil
     protected setter parent_row_heights : Array(Float64)? = nil
 
-    # Border color getter
-    def border_color : Color?
-      @border_color
-    end
-
-    # Border color setter
-    def border_color=(color : Color?)
-      @border_color = color
-      mark_needs_layout  # Border affects layout (padding)
-      mark_needs_render
-    end
-
-    # Cell background color getter
-    def cell_background_color : Color?
-      @cell_background_color
-    end
-
-    # Cell background color setter
-    def cell_background_color=(color : Color?)
-      @cell_background_color = color
-      mark_needs_render
-    end
-
     # Border padding (border line + visual padding inside)
     # Extra padding creates visible gap between border and content
     # Protected so parent grids can account for it in column size calculations
     protected def border_padding : Float64
-      @border_color ? BORDER_WIDTH + 4.0 : 0.0
+      border_color ? BORDER_WIDTH + 4.0 : 0.0
     end
 
     def initialize(
       content : Array(Array(Widget)) = [] of Array(Widget),
       id : String? = nil,
-      @spacing : Float64 = 0.0,
-      @cell_background_color : Color? = nil
+      spacing : Float64 = 0.0,
+      cell_background_color : Color? = nil
     )
+      @spacing = Source(Float64).new(spacing)
+      @cell_background_color = Source(Color?).new(cell_background_color)
       super(id: id)
-      @border_color = nil
+      @border_color = Source(Color?).new(nil)
       @nested_widgets = {} of RecursiveGridData::Grid(Widget) => RecursiveGrid
 
       # Convert content, extracting inner grids from nested RecursiveGrid widgets
@@ -111,7 +92,7 @@ module CrymbleUI
             inner = cell.inner_grid
             @nested_widgets[inner] = cell  # Remember the widget!
             inner.as(Widget | RecursiveGridData::Grid(Widget))
-          elsif bg = @cell_background_color
+          elsif bg = cell_background_color
             # Wrap in VStack with background color for proper span visualization.
             # VStack is used here, but HStack would work equally well for a single-child
             # wrapper - both position the child at (0,0) and fill bounds with background.
@@ -252,8 +233,8 @@ module CrymbleUI
       end
 
       # Calculate total size with spacing and border padding
-      total_width = @col_widths.sum + @spacing * (cols - 1).clamp(0, Int32::MAX) + padding * 2
-      total_height = @row_heights.sum + @spacing * (rows - 1).clamp(0, Int32::MAX) + padding * 2
+      total_width = @col_widths.sum + spacing * (cols - 1).clamp(0, Int32::MAX) + padding * 2
+      total_height = @row_heights.sum + spacing * (rows - 1).clamp(0, Int32::MAX) + padding * 2
 
       constraints.constrain(Size.new(total_width, total_height))
     end
@@ -360,16 +341,16 @@ module CrymbleUI
       rows, cols = @grid.size
       return if rows == 0 || cols == 0
       padding = border_padding
-      natural_width = @col_widths.sum + @spacing * (cols - 1).clamp(0, Int32::MAX) + padding * 2
-      natural_height = @row_heights.sum + @spacing * (rows - 1).clamp(0, Int32::MAX) + padding * 2
+      natural_width = @col_widths.sum + spacing * (cols - 1).clamp(0, Int32::MAX) + padding * 2
+      natural_height = @row_heights.sum + spacing * (rows - 1).clamp(0, Int32::MAX) + padding * 2
 
       if size.width != natural_width && natural_width > padding * 2
-        available = (size.width - padding * 2 - @spacing * (cols - 1).clamp(0, Int32::MAX)).clamp(0.0, Float64::MAX)
+        available = (size.width - padding * 2 - spacing * (cols - 1).clamp(0, Int32::MAX)).clamp(0.0, Float64::MAX)
         total = @col_widths.sum
         @col_widths = @col_widths.map { |w| w * available / total } if total > 0
       end
       if size.height != natural_height && natural_height > padding * 2
-        available = (size.height - padding * 2 - @spacing * (rows - 1).clamp(0, Int32::MAX)).clamp(0.0, Float64::MAX)
+        available = (size.height - padding * 2 - spacing * (rows - 1).clamp(0, Int32::MAX)).clamp(0.0, Float64::MAX)
         total = @row_heights.sum
         @row_heights = @row_heights.map { |h| h * available / total } if total > 0
       end
@@ -391,7 +372,7 @@ module CrymbleUI
         else
           # Last col absorbs remaining outer cols + spacings, minus sub-grid border
           start = c1 + k
-          (start..c2).sum { |c| @col_widths[c] } + @spacing * (c2 - start) - 2.0 * bp
+          (start..c2).sum { |c| @col_widths[c] } + spacing * (c2 - start) - 2.0 * bp
         end
       end
     end
@@ -410,7 +391,7 @@ module CrymbleUI
         else
           # Last row absorbs remaining outer rows + spacings, minus sub-grid border
           start = r1 + k
-          (start..r2).sum { |r| @row_heights[r] } + @spacing * (r2 - start) - 2.0 * bp
+          (start..r2).sum { |r| @row_heights[r] } + spacing * (r2 - start) - 2.0 * bp
         end
       end
     end
@@ -427,8 +408,8 @@ module CrymbleUI
       y = row_offsets[r1] + padding
 
       # Calculate size from span (including spacing within span)
-      width = col_offsets[c2 + 1] - col_offsets[c1] - (c2 < cols - 1 ? @spacing : 0.0)
-      height = row_offsets[r2 + 1] - row_offsets[r1] - (r2 < rows - 1 ? @spacing : 0.0)
+      width = col_offsets[c2 + 1] - col_offsets[c1] - (c2 < cols - 1 ? spacing : 0.0)
+      height = row_offsets[r2 + 1] - row_offsets[r1] - (r2 < rows - 1 ? spacing : 0.0)
 
       # Layout widget with tight constraints at calculated position
       child_constraints = BoxConstraints.tight(Size.new(width, height))
@@ -437,7 +418,7 @@ module CrymbleUI
 
     # Draw border as 4 filled rectangles (avoids clipping issues with draw_rect outline)
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-      if color = @border_color
+      if color = border_color
         primitives do
           w = BORDER_WIDTH
           # Top edge
@@ -459,7 +440,7 @@ module CrymbleUI
     private def compute_offsets(sizes : Array(Float64)) : Array(Float64)
       offsets = [0.0]
       sizes.each_with_index do |size, i|
-        spacing_after = (i < sizes.size - 1) ? @spacing : 0.0
+        spacing_after = (i < sizes.size - 1) ? spacing : 0.0
         offsets << offsets.last + size + spacing_after
       end
       offsets

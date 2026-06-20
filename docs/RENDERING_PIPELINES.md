@@ -33,20 +33,32 @@ memorizing backgrounds, compositing layers, and validating correctness.
 
 ### 2. Use Property Macros for Invalidation
 
-Property macros automatically notify the renderer when state changes:
+Property macros declare a widget's reactive fields. Reading the getter in
+`to_primitives` auto-captures it as a dependency, so a change re-renders the
+widget — no manual invalidation call:
 
 ```crystal
 class MyButton < Widget
-  render_property color : Color = Color::White          # visual change → re-render this widget
-  layout_property padding : Float64 = 0.0               # structural change → re-layout subtree
-  reconcile_property selected : Bool = false             # preserved across DSL rebuilds, no invalidation
-  render_property hover : Bool = false, reconcile = true # visual change + preserved across rebuilds
+  reactive_property color : Color = Color::White            # any reactive value — the default
+  reactive_property padding : Float64 = 0.0, layout: true   # also pokes layout (size/position change)
+  reactive_property hover : Bool = false, reconcile: true   # value survives a DSL rebuild
+  reconcile_property layer : Layer? = nil                   # plain ivar carried across rebuilds (never painted)
+  theme_property accent, :accent_color                      # resolves the global Theme Source live
 end
 ```
 
-- `render_property` → calls `mark_needs_render` on change (selective re-render, O(1))
-- `layout_property` → calls `mark_needs_layout` on change (full layout + render, O(subtree))
-- `reconcile_property` → no invalidation, just state preservation
+- `reactive_property` → a `Source(T)` field; the getter auto-captures (read it in
+  `to_primitives` and a change re-renders), the setter notifies. The default for
+  anything painted. Flags: `layout: true` (setter also calls `mark_needs_layout`),
+  `reconcile: true` (value survives a DSL rebuild).
+- `reconcile_property` → a plain ivar (no `Source`) carried across a rebuild — for
+  infrastructure refs (a `Layer`/`Widget`) that are never painted.
+- `theme_property` → a getter that resolves a global `Theme` `Source`, so the
+  color follows the theme.
+
+`render_property` and `layout_property` no longer exist. **See `REACTIVITY.md` for
+the canonical model** (auto-capture, version counting, the pull render trigger, and
+which macro to reach for) — that doc is the single source of truth for the macros.
 
 ### 3. Choose a Cache Policy (Optional)
 
@@ -72,15 +84,15 @@ The renderer manages all of this internally — widget code never interacts with
 
 ## The Crymble Pipeline (Cached, Default)
 
-Every frame proceeds through three phases:
+Every frame proceeds through three passes:
 
-### Phase 1: Layout (O(dirty path), skipped if unchanged)
+### Layout pass (O(dirty path), skipped if unchanged)
 
 Widgets with `needs_layout?` recompute bounds top-down. Template method pattern:
 `layout()` checks constraints → `perform_layout()` runs if changed → recurses to
 children. Unchanged subtrees are skipped entirely.
 
-### Phase 2: Render (O(dirty widgets) selective, O(visible) full)
+### Render pass (O(dirty widgets) selective, O(visible) full)
 
 Each widget owns two small GPU textures:
 - **widget_backend**: the widget's rendered content (background + primitives)
@@ -91,15 +103,20 @@ Rendering a widget:
 2. **Render primitives**: execute `DrawPrimitive` list on `widget_backend`
 3. **Blit to layer**: copy `widget_backend` → layer buffer at widget position
 
-**Fast path** (~90% of widgets during scroll): if the widget hasn't changed
-(`has_valid_primitive_cache? && !needs_render? && !needs_fresh_background?`),
-skip steps 1-2 and just re-blit the cached `widget_backend`. This is O(1) per
-widget — no primitive generation, no background restoration.
+**Fast path** (~90% of widgets during scroll): the live cache gate is
+`slot_fresh?(buffer_pos)`, then `has_valid_primitive_cache? && slot_rev_matches?`.
+`slot_fresh?` short-circuits first — when the cell's pixels already sit at this
+buffer position with a matching revision (`slot_rev == primitives_version`), there
+is nothing to do. Otherwise, a valid primitive cache plus a matching slot revision
+re-blits the cached `widget_backend`, skipping steps 1-2. Both are version-keyed
+(auto-captured `primitives_version`), so no widget re-renders unless a captured
+source actually moved. This is O(1) per widget — no primitive generation, no
+background restoration.
 
 **Selective rendering**: only widgets in `dirty_widgets` are re-rendered. Clean
 widgets keep their cached content in the layer buffer from previous frames.
 
-### Phase 3: Composite (O(layers))
+### Composite pass (O(layers))
 
 Layer textures are blitted to the window sorted by z-index. For viewport_cache
 layers (scrollable content), the compositor samples the correct viewport region

@@ -60,10 +60,26 @@ module CrymbleUI
       @cached_bounds = value
     end
 
-    # Background color for buffer clearing (panel content area, over-allocated texture space)
-    # Used instead of rendering full-panel background FillRect primitive
-    # This prevents background from painting over cached children during selective rendering
-    property background_color : Color
+    # Background color for buffer clearing (panel content area, over-allocated texture space).
+    # Used instead of rendering full-panel background FillRect primitive; prevents the background
+    # from painting over cached children during selective rendering.
+    # PULL-BASED (snapshot-drop, mirrors `bounds`): a theme-derived layer background would go
+    # stale on a Theme.set, so the layer asks its owner for the live color via
+    # compute_background_for_layer (nil = no theme override → use @cached_background_color). Ownerless
+    # layers and non-theme owners use the cached value as before.
+    @cached_background_color : Color
+
+    def background_color : Color
+      if (owner = @owner_widget) && owner.responds_to?(:compute_background_for_layer)
+        owner.compute_background_for_layer(self) || @cached_background_color
+      else
+        @cached_background_color
+      end
+    end
+
+    def background_color=(value : Color)
+      @cached_background_color = value
+    end
 
     # Rendering backend (assigned by renderer: CrSFMLBackend or TestRenderBackend)
     property backend : RenderBackend?
@@ -109,9 +125,34 @@ module CrymbleUI
       @scroll_offset
     end
 
+    # App-level pull: monotonic version of the scroll input, summed into frame_aggregate_rev so
+    # a scroll (which the compositor must re-sample) moves the aggregate and triggers a frame.
+    @scroll_rev : UInt64 = 0
+    getter scroll_rev : UInt64
+
+    # Monotonic version of the layer's COMPOSITE position. A panel drag moves the layer at the
+    # compositor level without re-rendering any widget (window_panel.cr: "No mark_needs_render needed
+    # during drag" — O(1) drag), so without this the version-keyed pull trigger is blind to the move
+    # (it only repainted via the SFML event-loop push). Summed into frame_aggregate_rev and bumped at
+    # the mutation site, exactly like scroll_rev. A drag thus re-composites (no widget re-render).
+    @position_rev : UInt64 = 0
+    getter position_rev : UInt64
+
+    def bump_position_rev : Nil
+      @position_rev &+= 1
+    end
+
+    # Monotonic version of buffer-CLEAR events (mark_needs_clear_and_render — reflow / sticky
+    # reposition / zoom). A clear bumps no widget/scroll/position rev, so without this it is invisible to
+    # frame_aggregate_rev and only the any_needs_render? backstop catches it. Summed into the aggregate so
+    # a clear moves the trigger directly — the prerequisite for deleting that backstop.
+    @clear_rev : UInt64 = 0
+    getter clear_rev : UInt64
+
     def scroll_offset=(value : Vec2)
       return if value == @scroll_offset
       @scroll_offset = value
+      @scroll_rev &+= 1
       # Auto-mark viewport_cache layers for render when scroll changes,
       # so handle_viewport_cache_scroll runs and recenters buffer if needed.
       # Without this, scrollbar drag/wheel/arrow would set scroll_offset
@@ -130,6 +171,12 @@ module CrymbleUI
     property viewport_cache : Bool = false
     property cache_extent : Float64 = 0.0     # Extra pixels to pre-render beyond viewport
     property buffer_origin : Vec2 = Vec2.zero # Content coord at buffer position (0,0)
+    # Opt a NON-matrix layer into -Dcache_validation immediate-mode validation.
+    # The validator auto-covers viewport_cache content layers; non-matrix overlay/window-direct
+    # layers (combo popups, menus, buttons) are blind to it. A non-scrolling layer has scroll_offset=0
+    # so the immediate path positions correctly — set this to true (ideally with synthetic-color
+    # widgets, which don't AA-jitter) to validate keying-migration coherency on non-matrix widgets.
+    property cv_validate : Bool = false
 
     # Where inside the (oversized) buffer the visible viewport starts —
     # THE single source of truth for viewport-cache sampling, used by
@@ -150,7 +197,8 @@ module CrymbleUI
     # NeedsLayout is heavier than needed (forces sibling validation on first_render).
     property needs_clear : Bool = false
 
-    def initialize(@id : String, @cached_bounds : Rect, @z_index : Int32 = 0, @background_color : Color = Color.new(0, 0, 0, 0), @owner_widget : Widget? = nil)
+    def initialize(@id : String, @cached_bounds : Rect, @z_index : Int32 = 0, background_color : Color = Color.new(0, 0, 0, 0), @owner_widget : Widget? = nil)
+      @cached_background_color = background_color
       @opacity = 1.0
       @blend_mode = BlendMode::Normal
       @parent = nil
@@ -164,7 +212,7 @@ module CrymbleUI
       @@all_layers << self
 
       {% if flag?(:DEBUG_RENDER) %}
-        puts "[LAYER CREATED: #{@id}, bg=#{@background_color}]"
+        puts "[LAYER CREATED: #{@id}, bg=#{@cached_background_color}]"
       {% end %}
     end
 
@@ -179,6 +227,33 @@ module CrymbleUI
     # More efficient than collecting all layers when we just need a boolean
     def self.any_needs_render?(root : Widget) : Bool
       @@all_layers.any? { |layer| layer.in_tree?(root) && layer.needs_render? }
+    end
+
+    # App-level pull render-trigger: a version-keyed aggregate over all in-tree layers. The SFML
+    # loop renders a frame iff this moved since the last render — the correct-by-construction
+    # replacement for any_needs_render? (which can MISS a change nobody marked). Captures every input
+    # under versioning: content/theme/zoom/layout (each widget's primitive_cache_rev), structure (a +1
+    # per widget, so add/remove moves it), scroll (scroll_rev), layer composite position (position_rev,
+    # so a panel drag re-composites). O(rendered widgets) — bounded by the
+    # viewport for virtual content. The event-driven 0%-idle behaviour is preserved: no change → same
+    # aggregate → no frame.
+    def self.frame_aggregate_rev(root : Widget) : UInt64
+      agg = 0_u64
+      @@all_layers.each do |layer|
+        next unless layer.in_tree?(root)
+        agg &+= layer.scroll_rev
+        agg &+= layer.position_rev
+        agg &+= layer.clear_rev
+        layer.widgets.each { |w| agg = sum_widget_revs(w, agg) }
+      end
+      agg
+    end
+
+    private def self.sum_widget_revs(w : Widget, agg : UInt64) : UInt64
+      agg &+= w.primitives_version # the pull node's version for Dynamic widgets (residual rev otherwise)
+      agg &+= 1_u64 # structure: count each widget so an add/remove moves the aggregate
+      w.children.each { |c| agg = sum_widget_revs(c, agg) }
+      agg
     end
 
     # Remove layer from registry (called when layer is no longer needed)
@@ -307,6 +382,7 @@ module CrymbleUI
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
       @dirty_widgets.clear # Empty set = render all widgets
       @needs_clear = true
+      @clear_rev &+= 1 # make the clear visible to frame_aggregate_rev
     end
 
     # Check if layer needs rendering

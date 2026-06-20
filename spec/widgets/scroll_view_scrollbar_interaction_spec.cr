@@ -255,6 +255,50 @@ describe "ScrollView Scrollbar Interaction" do
     scroll_view.scroll_offset.y.should be < mid_offset
   end
 
+  it "page-jump pages by the scrollable viewport (minus the opposite scrollbar), not the full viewport" do
+    # Minor bug: a vertical page jump scrolled the FULL viewport height, ignoring that the
+    # horizontal scrollbar reserves SCROLLBAR_WIDTH at the bottom — the visible data area is
+    # that much shorter, so paging the full viewport over-scrolls by SCROLLBAR_WIDTH.
+    # (No sticky headers here, so the only term is the scrollbar.)
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = TestApp.new
+    window = CrymbleUI::Window.new("Test", 400, 300)
+
+    scroll_view = CrymbleUI::ScrollView.new(direction: CrymbleUI::ScrollDirection::Both)
+    # Wide AND tall content → both scrollbars present.
+    hstack = CrymbleUI::HStack.new(spacing: 5.0)
+    10.times do
+      col = CrymbleUI::VStack.new(spacing: 5.0)
+      20.times { col.add_child(CrymbleUI::Button.new("Button") { }) }
+      hstack.add_child(col)
+    end
+    scroll_view.set_content(hstack)
+
+    window.add_child(scroll_view)
+    app.root_widget = window
+    renderer.render_frame(app)
+
+    # Sanity: both scrollbars are actually present (content overflows both axes).
+    scroll_view.content_size.width.should be > scroll_view.viewport_size.width
+    scroll_view.content_size.height.should be > scroll_view.viewport_size.height
+
+    viewport_h = scroll_view.viewport_size.height
+    initial = scroll_view.scroll_offset.y
+    initial.should eq 0.0
+
+    # Click the vertical track below the thumb (thumb at top at scroll=0).
+    scrollbar_x = scroll_view.bounds.width - 8.0
+    track_click = CrymbleUI::Vec2.new(scrollbar_x, 150.0)
+    app.handle_mouse_down(track_click)
+    app.handle_mouse_up(track_click)
+
+    jump = scroll_view.scroll_offset.y - initial
+    expected = viewport_h - CrymbleUI::ScrollView::SCROLLBAR_WIDTH
+    jump.should be_close(expected, 2.0),
+      "vertical page-jump scrolled #{jump.round(1)}px but the data viewport is viewport #{viewport_h.round(1)} − " \
+      "scrollbar #{CrymbleUI::ScrollView::SCROLLBAR_WIDTH} = #{expected.round(1)} (over-scrolled by #{(jump - expected).round(1)})"
+  end
+
   it "scrolls down when clicking down arrow on vertical scrollbar" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
     app = TestApp.new
