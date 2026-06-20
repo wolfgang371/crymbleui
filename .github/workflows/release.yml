@@ -35,7 +35,30 @@ permissions:
   contents: write
 
 jobs:
+  # Create the GitHub Release ONCE, before the parallel build jobs attach their
+  # assets. Previously BOTH the linux and windows jobs ran softprops/action-gh-release,
+  # which each try to CREATE the release for the tag -- a race that intermittently
+  # fails the loser with "already_exists" (it hit v0.7.2: windows won, the linux
+  # AppImage landed on an orphaned draft). Now creation happens in this single job and
+  # the build jobs only upload (idempotent + additive), so there is no race to lose.
+  create_release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure the GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; reusing it."
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "" --verify-tag
+          fi
+
   linux:
+    needs: create_release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,14 +86,15 @@ jobs:
       - name: Build AppImage
         run: bash tools/build-appimage.sh
 
-      - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: temp/crymbleui-showcase-linux-x86_64.AppImage
-          fail_on_unmatched_files: true
+      - name: Upload the AppImage to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release upload "$TAG" temp/crymbleui-showcase-linux-x86_64.AppImage --repo "$REPO" --clobber
 
   windows:
+    needs: create_release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,9 +125,10 @@ jobs:
           cp bin/showcase_demo.exe "crymbleui-showcase-windows-x64.exe"
           echo "ASSET=crymbleui-showcase-windows-x64.exe" >> "$GITHUB_ENV"
 
-      - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: ${{ env.ASSET }}
-          fail_on_unmatched_files: true
+      - name: Upload the .exe to the Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release upload "$TAG" "$ASSET" --repo "$REPO" --clobber
