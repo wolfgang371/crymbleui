@@ -74,7 +74,7 @@ jobs:
       - name: Cache-coherency gate (dual renderer)
         run: |
           source setup.sh
-          ./scripts/cv-coherency.sh
+          ./tools/cv-coherency.sh
 
   windows:
     runs-on: windows-latest
