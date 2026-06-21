@@ -40,7 +40,7 @@ module CrymbleUI
 
         # State (managed internally)
         @open : Bool = false
-        @hovered : Bool = false
+        reactive_property hovered : Bool = false
 
         # Preserve menu items across open/close cycles
         @menu_items : Array(Widget) = [] of Widget
@@ -288,8 +288,7 @@ module CrymbleUI
 
         # Mouse enter - highlight menu and auto-open if menu system is active
         def on_mouse_enter
-            @hovered = true
-            mark_needs_render
+            self.hovered = true
 
             # Auto-open if menu system is active (hover-to-open after first click)
             if menubar = @parent
@@ -310,8 +309,7 @@ module CrymbleUI
 
         # Mouse exit - remove highlight
         def on_mouse_exit
-            @hovered = false
-            mark_needs_render
+            self.hovered = false
         end
 
         # Generate primitives for rendering
@@ -320,7 +318,7 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
 
             # Determine background color based on hover/open state
-            bg_color = (@hovered || @open) ? hover_color : background_color
+            bg_color = (hovered || @open) ? hover_color : background_color
 
             # Background rect (leave space at bottom for menubar border)
             bg_rect = Rect.new(0.0, 0.0, bounds.width, bounds.height - MenuBar::BORDER_WIDTH)
@@ -338,7 +336,7 @@ module CrymbleUI
 
             # Text position (centered)
             text_x = 0.0 + padding
-            text_y = 0.0 + (bounds.height - font_size) / 2.0
+            text_y = vcentered_text_y(bounds.height, font_scale)
             text_position = Vec2.new(text_x, text_y)
 
             primitives do

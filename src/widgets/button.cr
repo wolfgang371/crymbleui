@@ -38,8 +38,8 @@ module CrymbleUI
     reactive_property text_align : TextAlign = TextAlign::Center
     reactive_property padding : Float64, layout: true
 
-    # Hover state
-    @hovered : Bool = false
+    # Hover state (reactive: read in to_primitives auto-captures; the setter re-renders)
+    reactive_property hovered : Bool = false
 
     property on_click_callback : Proc(Nil)?
 
@@ -125,7 +125,7 @@ module CrymbleUI
 
       if !enabled?
         txt_color = Color.new(txt_color.r, txt_color.g, txt_color.b, (txt_color.a // 3).to_u8)
-      elsif @hovered || focus_highlighted?
+      elsif hovered || focus_highlighted?
         hover_brightness = Theme.current.brightness_hover
         bg_color = bg_color.highlight(hover_brightness)
         bd_color = bd_color.highlight(hover_brightness)
@@ -139,7 +139,7 @@ module CrymbleUI
       when TextAlign::Right then bounds.width - text_size.width - padding
       else                       (bounds.width - text_size.width) / 2.0 # Center (default)
       end
-      text_y = (bounds.height - font_size) / 2.0
+      text_y = vcentered_text_y(bounds.height, font_scale)
       text_position = Vec2.new(text_x, text_y)
 
       # Create widget-local rect at (0,0)
@@ -154,14 +154,12 @@ module CrymbleUI
 
     # Handle mouse enter (hover start)
     def on_mouse_enter
-      @hovered = true
-      mark_needs_render
+      self.hovered = true
     end
 
     # Handle mouse exit (hover end)
     def on_mouse_exit
-      @hovered = false
-      mark_needs_render
+      self.hovered = false
     end
 
     # Override on_click to call callback

@@ -1,16 +1,24 @@
 require "../src/crymble-ui"
 
-# Demo application showcasing checkbox features
+# Demo application showcasing checkbox features, including a tristate "Select all"
+# that is a REAL union of the two boolean checkboxes above it.
 class CheckboxDemo < CrymbleUI::App
-    # Boolean checkboxes
+    # Boolean checkboxes — the "items" the Select-all unions over.
     state auto_toggle : Bool = false
     state accept_terms : Bool = true
 
-    # Tristate checkbox
-    state select_all : CrymbleUI::CheckState = CrymbleUI::CheckState::Unchecked
-
     # Counter to show rebuild behavior
     state rebuild_count : Int32 = 0
+
+    # Tristate union of the two checkboxes above:
+    #   none checked → Unchecked, all checked → Checked, some checked → Indeterminate.
+    private def items_state : CrymbleUI::CheckState
+        case [self.auto_toggle, self.accept_terms].count(true)
+        when 0 then CrymbleUI::CheckState::Unchecked
+        when 2 then CrymbleUI::CheckState::Checked
+        else        CrymbleUI::CheckState::Indeterminate
+        end
+    end
 
     def build : CrymbleUI::Widget
         # Increment rebuild count to show rebuilds working
@@ -32,29 +40,26 @@ class CheckboxDemo < CrymbleUI::App
                     self.accept_terms = !self.accept_terms
                 end
 
-                # Section: Tristate Checkbox
-                text("Tristate Checkbox:", font_scale: 2)
-                checkbox("Select all items", state: self.select_all) do
-                    current = self.select_all
-                    self.select_all = case current
-                    when CrymbleUI::CheckState::Unchecked then CrymbleUI::CheckState::Checked
-                    when CrymbleUI::CheckState::Checked then CrymbleUI::CheckState::Indeterminate
-                    when CrymbleUI::CheckState::Indeterminate then CrymbleUI::CheckState::Unchecked
-                    else CrymbleUI::CheckState::Unchecked
-                    end
+                # Section: Tristate "Select all" — a REAL union of the two boxes above.
+                # It reflects their combined state, and on click sets BOTH
+                # (toggle-all: clear if all are set, otherwise set all).
+                text("Tristate \"Select all\" (union of the two above):", font_scale: 2)
+                checkbox("Select all items", state: items_state) do
+                    target = items_state != CrymbleUI::CheckState::Checked
+                    self.auto_toggle = target
+                    self.accept_terms = target
                 end
 
                 # Section: Current State Display
                 text("Current State:", font_scale: 2)
                 text("Auto-toggle: #{self.auto_toggle}", font_scale: 0)
                 text("Accept terms: #{self.accept_terms}", font_scale: 0)
-                text("Tristate state: #{self.select_all}", font_scale: 0)
+                text("Select all (union): #{items_state}", font_scale: 0)
 
                 # Reset button
                 button("Reset All") do
-                    self.accept_terms = false
                     self.auto_toggle = false
-                    self.select_all = CrymbleUI::CheckState::Unchecked
+                    self.accept_terms = false
                 end
             end
         end

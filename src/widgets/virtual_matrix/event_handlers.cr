@@ -241,7 +241,6 @@ module CrymbleUI
         end
         if cell = point_to_cell(content_point)
           set_cursor_from_cell(cell)
-          update_cell_states
           mark_needs_render
         end
         super(point, button)
@@ -295,7 +294,6 @@ module CrymbleUI
           end
         else
           set_cursor_from_cell({row, col})
-          update_cell_states
           mark_needs_render
           @last_click_time = now
           @last_click_cell = {row, col}
@@ -487,13 +485,11 @@ module CrymbleUI
         # focused widget declines).
         move_cursor(:tab, shift: shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         true
       when SF::Keyboard::Key::Up
         move_cursor(:up, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
           _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
@@ -503,7 +499,6 @@ module CrymbleUI
       when SF::Keyboard::Key::Down
         move_cursor(:down, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
           _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
@@ -514,26 +509,22 @@ module CrymbleUI
         return false if alt  # Alt+Left: let shortcut manager handle (e.g., history navigation)
         move_cursor(:left, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         true
       when SF::Keyboard::Key::Right
         return false if alt  # Alt+Right: let shortcut manager handle
         move_cursor(:right, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         true
       when SF::Keyboard::Key::Home
         move_cursor(:home, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         true
       when SF::Keyboard::Key::End
         move_cursor(:end, control, shift)
         snap_to_cursor
-        update_cell_states
         mark_needs_render
         true
       else
@@ -630,7 +621,6 @@ module CrymbleUI
       if adapter = @adapter
         new_cursor = adapter.cell_move(data.row, data.col, target[0], target[1])
         set_cursor_from_cell(new_cursor)
-        update_cell_states
         mark_needs_render
         @on_cell_drop_handler.try &.call
       end

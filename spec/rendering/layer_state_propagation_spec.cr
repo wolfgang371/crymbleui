@@ -247,6 +247,7 @@ describe "Widget to Layer State Propagation" do
       window.layout(constraints, CrymbleUI::Vec2.zero)
 
       root_layer = window.root_layer.not_nil!
+      button.get_primitives(button.bounds) # render so the reactive hover edge enqueues to the layer
       root_layer.clear_render_state
 
       # Simulate hover (button should mark itself)
@@ -266,6 +267,7 @@ describe "Widget to Layer State Propagation" do
 
       # Start with hover
       button.on_mouse_enter
+      button.get_primitives(button.bounds) # render at hovered=true so the exit edge re-enqueues
 
       root_layer = window.root_layer.not_nil!
       root_layer.clear_render_state
@@ -289,6 +291,7 @@ describe "Widget to Layer State Propagation" do
       window.layout(constraints, CrymbleUI::Vec2.zero)
 
       panel_layer = panel.layer.not_nil!
+      button.get_primitives(button.bounds) # render so the reactive hover edge enqueues to the layer
       panel_layer.clear_render_state
 
       # Hover button in panel

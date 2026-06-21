@@ -24,6 +24,19 @@ module CrymbleUI
       nil
     end
 
+    # Y-anchored position for `popup`: directly below the combo cell, or flipped ABOVE it
+    # when it would extend past the window's bottom edge. Shared by mount_popup (initial
+    # open) and the host's perform_layout (re-layout on rebuild) so the two agree --
+    # otherwise a rebuild that keeps the popup open (e.g. a MultiComboBox gutter toggle)
+    # re-anchors it below and it visibly jumps.
+    private def popup_position(abs : Rect, popup_height : Float64) : Vec2
+      popup_y = abs.y + abs.height
+      if win = find_window
+        popup_y = abs.y - popup_height if popup_y + popup_height > win.bounds.height
+      end
+      Vec2.new(abs.x, popup_y)
+    end
+
     # Mount an already-constructed-and-wired popup: add it to the Window overlays,
     # record open state, measure + position it (below the cell, flipped above if it
     # would run past the window bottom), lay it out, then transfer focus into its
@@ -52,17 +65,8 @@ module CrymbleUI
       popup_constraints = BoxConstraints.loose(Size.new(popup_width, 200.0))
       popup_size = popup.measure(popup_constraints)
 
-      # Position below combo, but flip above if it would extend past window bottom
-      popup_y = abs.y + abs.height
-      if win = window
-        window_bottom = win.bounds.height
-        if popup_y + popup_size.height > window_bottom
-          # Flip above the combo box
-          popup_y = abs.y - popup_size.height
-        end
-      end
-      popup_pos = Vec2.new(abs.x, popup_y)
-      popup.layout(popup_constraints, popup_pos)
+      # Position below the combo, flipped above if it would run past the window bottom.
+      popup.layout(popup_constraints, popup_position(abs, popup_size.height))
 
       # Remember proxy focus state before focus transfer clears it
       @was_proxy_focused = @proxy_focused

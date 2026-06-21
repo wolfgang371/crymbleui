@@ -61,6 +61,17 @@ module CrymbleUI
       end
     end
 
+    # Local y at which to draw a single line of text so it is vertically centered in the
+    # band [band_top, band_top + band_height]. draw_text anchors the cap-top, so we centre
+    # the font's real visual extent (reference_height) -- NOT the em font_size, which
+    # over-reserves the descender slot and makes text sit high. Headless fonts report
+    # reference_height == font_size, so this reduces to the previous `(h - font_size)/2`.
+    def vcentered_text_y(band_height : Float64, font_scale : Int32 = 0, band_top : Float64 = 0.0) : Float64
+      size = FontSizing.calculate_size(font_scale)
+      ref_h = (font = Widget.font) ? font.reference_height(size) : size
+      band_top + (band_height - ref_h) / 2.0
+    end
+
     # Draw a line between two points
     def draw_line(from : Vec2, to : Vec2, color : Color, width : Float64 = 1.0)
       @primitives.not_nil! << DrawLine.new(from, to, color, width)

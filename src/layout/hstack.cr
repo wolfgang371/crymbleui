@@ -83,11 +83,19 @@ module CrymbleUI
             @bounds = Rect.new(position.x, position.y, size.width, size.height)
             inner_height = size.height - padding * 2
 
+            child_constraints = BoxConstraints.loose(Size.new(Float64::INFINITY, inner_height))
+            sizes = @children.map { |child| child.measure(child_constraints) }
+            # Cross-axis: center each child within the natural content band (tallest child),
+            # anchored at the top. A short bare label then lines up with a taller combo_box /
+            # button beside it; but a row inside a stretched HStack (e.g. a scroll viewport
+            # taller than its content) stays at the top instead of floating in the middle.
+            content_height = sizes.empty? ? 0.0 : sizes.max_of(&.height)
+
             x_offset = padding
-            @children.each do |child|
-                child_constraints = BoxConstraints.loose(Size.new(Float64::INFINITY, inner_height))
-                child_size = child.measure(child_constraints)
-                child.layout(child_constraints, Vec2.new(x_offset, padding))
+            @children.each_with_index do |child, i|
+                child_size = sizes[i]
+                child_y = padding + (content_height - child_size.height) / 2.0
+                child.layout(child_constraints, Vec2.new(x_offset, child_y))
                 x_offset += child_size.width + spacing
             end
         end
@@ -104,15 +112,17 @@ module CrymbleUI
             inner_width = width - padding * 2
             inner_height = height - padding * 2
 
-            # Pass 1: Measure fixed children, sum flex values
+            # Pass 1: Measure fixed children, sum flex values, track the tallest (content band)
             fixed_width = 0.0
             total_flex = 0
+            content_height = 0.0
             @children.each do |child|
                 if child.is_a?(Expanded)
                     total_flex += child.flex
                 else
                     child_size = child.measure(BoxConstraints.loose(Size.new(inner_width, inner_height)))
                     fixed_width += child_size.width
+                    content_height = Math.max(content_height, child_size.height)
                 end
             end
 
@@ -137,7 +147,11 @@ module CrymbleUI
                     # Use INFINITY for intrinsic-sized widgets (buttons, labels, etc.)
                     child_constraints = BoxConstraints.loose(Size.new(Float64::INFINITY, inner_height))
                     child_size = child.measure(child_constraints)
-                    child.layout(child_constraints, Vec2.new(x_offset, padding))
+                    # Cross-axis: center intrinsic-sized children within the content band
+                    # (tallest fixed child), anchored at the top. Expanded children keep the
+                    # top edge — they fill / carry their own content.
+                    child_y = padding + (content_height - child_size.height) / 2.0
+                    child.layout(child_constraints, Vec2.new(x_offset, child_y))
                     x_offset += child_size.width + spacing
                 end
             end

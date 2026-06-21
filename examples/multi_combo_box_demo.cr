@@ -16,7 +16,7 @@ class MultiComboBoxDemo < CrymbleUI::App
   VEGGIES = ["Carrot", "Pea", "Bean", "Kale", "Leek"]
 
   def build : CrymbleUI::Widget
-    window("MultiComboBox Demo", 640, 560) do
+    window("MultiComboBox Demo", 640, 600) do
       vstack(spacing: 15.0) do
         cpu_monitor
         text("MultiComboBox (multi-select) Demo", font_scale: 5)
@@ -28,20 +28,21 @@ class MultiComboBoxDemo < CrymbleUI::App
         text("- Click a row body: select-only-that and close", font_scale: -2)
 
         # Readout ABOVE the combo so the open dropdown doesn't hide it.
-        text("Fruits — app updates state on toggle:", font_scale: 0)
+        # Fruits passes NO `summary:`, so the collapsed cell shows the framework DEFAULT label.
+        text("Fruits — DEFAULT label (no `summary:`): 1 pick shows the name,", font_scale: 0)
+        text("  more show \"N of M (Apple, Ban...)\".  `summary:` is opt-in — see Veggies.", font_scale: -2)
         text("  fruits = #{self.fruits.to_a.sort.map { |i| FRUITS[i] }}", font_scale: -1)
         combo_box(
           items: FRUITS,
           selected: self.fruits,
           width: 280.0,
-          id: "fruits",
-          summary: ->(s : Set(Int32)) { s.empty? ? "(pick fruits)" : "#{s.size} of #{FRUITS.size}" }
+          id: "fruits"
         ) do |new_set|
           self.fruits = new_set
         end
 
-        # Second combo with a non-empty initial selection (checks at open).
-        text("Veggies — preselected {Pea, Kale}:", font_scale: 0)
+        # Second combo OPTS IN to a custom `summary:` (always "N of M"), overriding the default.
+        text("Veggies — OPT-IN custom `summary:` (always \"N of M\"); preselected {Pea, Kale}:", font_scale: 0)
         text("  veggies = #{self.veggies.to_a.sort.map { |i| VEGGIES[i] }}", font_scale: -1)
         combo_box(
           items: VEGGIES,

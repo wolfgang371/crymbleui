@@ -218,11 +218,17 @@ describe "Menu Interaction" do
       popups.size.should eq(1)
       popup = popups.first
       popup_layer = popup.layer.not_nil!
+      # Render the item so its pull-node + layer-enqueue (on_dirty) exist. Reactive
+      # re-render is edge-triggered on the captured `hovered`, so each hover change
+      # needs the node freshly valid first (the old code marked unconditionally).
+      item.get_primitives(item.bounds)
       popup_layer.clear_render_state
 
       # Hover over item
       item.on_mouse_enter
       popup_layer.needs_render?.should be_true
+
+      item.get_primitives(item.bounds) # re-render so the exit produces a fresh stale edge
       popup_layer.clear_render_state
 
       # Mouse exit should mark layer for render

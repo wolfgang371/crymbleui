@@ -51,7 +51,7 @@ module CrymbleUI
 
     # State
     reactive_property selected : Bool = false
-    @hovered : Bool = false
+    reactive_property hovered : Bool = false
 
     def selected? : Bool
       selected
@@ -152,13 +152,11 @@ module CrymbleUI
 
     # Mouse events
     def on_mouse_enter
-      @hovered = true
-      mark_needs_render
+      self.hovered = true
     end
 
     def on_mouse_exit
-      @hovered = false
-      mark_needs_render
+      self.hovered = false
     end
 
     # For checkable items: split the click region in on_mouse_up so we can
@@ -193,7 +191,7 @@ module CrymbleUI
                    # Flash by toggling between two brightness levels for prominent effect
                    brightness = focus_highlighted? ? HIGHLIGHT_BRIGHTNESS_HIGH : HIGHLIGHT_BRIGHTNESS_LOW
                    base_bg.highlight(brightness)
-                 elsif @hovered
+                 elsif hovered
                    base_bg.highlight(HIGHLIGHT_BRIGHTNESS_LOW) # Subtle hover
                  else
                    base_bg
@@ -204,7 +202,7 @@ module CrymbleUI
 
       # Text position (vertically centered)
       text_x = PADDING
-      text_y = (bounds.height - font_size) / 2.0
+      text_y = vcentered_text_y(bounds.height, font_scale)
       text_pos = Vec2.new(text_x, text_y)
 
       primitives do

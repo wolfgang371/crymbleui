@@ -86,7 +86,7 @@ describe CrymbleUI::MenuItem do
             item.layout(CrymbleUI::BoxConstraints.new, CrymbleUI::Vec2.zero)
 
             item.on_mouse_enter
-            item.state = CrymbleUI::WidgetState::Clean
+            item.get_primitives(item.bounds) # real render: captures `hovered` (reactive, no manual mark)
 
             item.on_mouse_exit
             item.needs_render?.should be_true

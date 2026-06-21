@@ -16,7 +16,6 @@ module CrymbleUI
     HEADER_PADDING = TreeNode::HEADER_PADDING
 
     @header : String
-    @expanded : Bool
 
     # Theme colors resolve live (nil = follow Theme.current; explicit value wins)
     theme_property text_color, text_default
@@ -24,7 +23,6 @@ module CrymbleUI
 
     def initialize(
       @header : String,
-      @expanded : Bool,
       font_scale : Int32 = 0,
       text_color : ThemeColor? = nil,
       indicator_color : ThemeColor? = nil
@@ -39,7 +37,11 @@ module CrymbleUI
       "header"
     end
 
-    def expanded=(@expanded : Bool)
+    # The expanded state is the parent TreeNode's single source of truth -- read it
+    # here, NOT a stored copy. Reading it in to_primitives auto-captures the TreeNode's
+    # `expanded` Source, so any change re-renders the triangle with no layout push.
+    def expanded? : Bool
+      parent.as?(TreeNode).try(&.expanded) || false
     end
 
     def measure(constraints : BoxConstraints) : Size
@@ -52,7 +54,6 @@ module CrymbleUI
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       size = measure(constraints)
       @bounds = Rect.new(position, size)
-      mark_needs_render
     end
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
@@ -64,7 +65,7 @@ module CrymbleUI
       tri_cy = header_height / 2.0
 
       primitives do
-        if @expanded
+        if expanded?
           # Downward-pointing triangle (expanded)
           fill_triangle(
             Vec2.new(tri_cx - TRIANGLE_SIZE/2, tri_cy - TRIANGLE_SIZE/3),
@@ -82,9 +83,9 @@ module CrymbleUI
           )
         end
 
-        # Header text
+        # Header text — vertically centered to line up with the triangle (tri_cy)
         text_x = INDENT
-        text_y = HEADER_PADDING
+        text_y = vcentered_text_y(header_height, font_scale)
         draw_text(@header, Vec2.new(text_x, text_y), text_color, font_scale)
       end
     end
@@ -165,7 +166,6 @@ module CrymbleUI
       # header resolves the theme color LIVE itself (snapshot-drop).
       @header_widget = TreeNodeHeader.new(
         @header,
-        expanded,
         font_scale: font_scale,
         text_color: @text_color,
         indicator_color: @indicator_color
@@ -218,8 +218,7 @@ module CrymbleUI
       @header_widget.layout(header_constraints, Vec2.new(0.0, 0.0))
       header_height = @header_widget.bounds.height
 
-      # Sync expanded state to header for triangle rendering
-      @header_widget.expanded = expanded
+      # (No expanded push: the header pulls the TreeNode's `expanded` Source directly.)
 
       # Layout DSL children below header with indentation (positions relative to TreeNode)
       if expanded

@@ -293,19 +293,6 @@ module CrymbleUI
         # Cleared on mark_needs_layout (upward propagation clears entire chain).
         @ancestry_bounds_valid : Bool? = nil
 
-        # Visibility - hidden widgets are skipped in layout/render/hit-test
-        @visible : Bool = true
-
-        def visible? : Bool
-          @visible
-        end
-
-        def visible=(value : Bool)
-          return if @visible == value
-          @visible = value
-          mark_needs_layout
-        end
-
         # Enabled state - disabled widgets render but don't respond to clicks
         @enabled : Bool = true
 
@@ -1095,7 +1082,13 @@ module CrymbleUI
             @primitives_node.try(&.touch)
             self.background_backend = nil
             self.widget_backend = nil
-            invalidate_ancestry_bounds_cache
+            @ancestry_bounds_valid = nil
+            # A vacated footprint releases the cached pixels of the WHOLE subtree, not just
+            # this node. Otherwise a descendant keeps stale bounds + a cached widget_backend,
+            # and a viewport_cache layer's visit-all-visible pass re-blits it next frame as a
+            # ghost (it never traverses through this now-zeroed node to discover it's gone).
+            # Recursing also frees the hidden subtree's GPU backends — a perf win, not a cost.
+            @children.each(&.zero_bounds!)
         end
 
         def widget_in_tree?(root : Widget) : Bool
@@ -1105,11 +1098,6 @@ module CrymbleUI
                 current = current.parent
             end
             false
-        end
-
-        def invalidate_ancestry_bounds_cache
-            @ancestry_bounds_valid = nil
-            @children.each(&.invalidate_ancestry_bounds_cache)
         end
 
         # === END PER-WIDGET TEXTURE BACKEND ===

@@ -335,7 +335,8 @@ describe CrymbleUI::TextInput do
 
         it "marks widget as needing render" do
             input = CrymbleUI::TextInput.new
-            input.state = CrymbleUI::WidgetState::Clean
+            input.layout(CrymbleUI::BoxConstraints.new, CrymbleUI::Vec2.zero)
+            input.get_primitives(input.bounds) # real render: captures `value` (reactive, no manual mark)
 
             input.on_text_input('x')
 

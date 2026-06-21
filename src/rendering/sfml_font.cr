@@ -47,6 +47,18 @@ module CrymbleUI
       end
     end
 
+    @reference_heights = Hash(UInt32, Float64).new
+
+    # Real visual line extent (cap-top to descender-bottom of "Ag"), cached per size.
+    # Used to vertically center text by its ink box instead of the em size.
+    def reference_height(size : Float64) : Float64
+      key = size.round.to_u32
+      @reference_heights[key] ||= begin
+        ref = SF::Text.new("Ag", @font, key)
+        ref.local_bounds.height.to_f64
+      end
+    end
+
     # Allow direct access to underlying SF::Font if needed
     def to_sf_font : SF::Font
       @font

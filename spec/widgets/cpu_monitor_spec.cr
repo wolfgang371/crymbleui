@@ -81,6 +81,29 @@ describe "CPU Monitor Rendering" do
     cpu_monitor.background_color.a.should eq(0)
   end
 
+  it "every CPUMonitor re-renders when the CPU value changes (not only the last one)" do
+    # The old code pushed re-render through a single @@current_instance pointer, so a
+    # SECOND monitor never updated. The value is now a class-level Source that every
+    # monitor auto-captures while painting, so a change re-renders ALL of them.
+    renderer = CrymbleUI::Testing::TestRenderer.new(200, 120)
+    app = TestApp.new
+    m1 = CrymbleUI::CPUMonitor.new(id: "m1")
+    m2 = CrymbleUI::CPUMonitor.new(id: "m2")
+    m1.bounds = CrymbleUI::Rect.new(0.0, 0.0, 80.0, 30.0)
+    m2.bounds = CrymbleUI::Rect.new(0.0, 40.0, 80.0, 30.0)
+    window = CrymbleUI::Window.new("Test", 200, 120)
+    window.add_child(m1)
+    window.add_child(m2)
+    app.root_widget = window
+
+    CrymbleUI::CPUMonitor.cpu_percent = 10.0
+    renderer.render_frame(app) # both render and capture the cpu Source
+
+    CrymbleUI::CPUMonitor.cpu_percent = 73.5 # change the shared value, NO manual mark
+    m1.needs_render?.should be_true          # the FIRST monitor is stale too (was the single-slot bug)
+    m2.needs_render?.should be_true
+  end
+
   it "transparent background still covers full bounds (for layer clearing)" do
     renderer = CrymbleUI::Testing::TestRenderer.new(200, 100)
     app = TestApp.new

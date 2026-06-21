@@ -17,13 +17,25 @@ module CrymbleUI
         # Linux process timing constant
         CLOCK_TICKS_PER_SEC = 100.0  # USER_HZ on most Linux systems
 
-        # Class variables to preserve state across rebuilds
+        # Class state shared across all instances + rebuilds.
         @@last_cpu_time : UInt64 = 0_u64
         @@last_wall_time : Time::Instant = Time.instant
-        @@cpu_percent : Float64 = 0.0
+        # The current CPU% is a CLASS-LEVEL reactive Source (the Theme / FontSizing idiom):
+        # every CPUMonitor that reads it while painting auto-captures it, so a timer update
+        # re-renders ALL monitors -- not just the last-built one (the old @@current_instance
+        # single-slot push could only ever mark one).
+        @@cpu_source : Source(Float64) = Source(Float64).new(0.0)
         @@timer_id : Int32? = nil
         @@initialized : Bool = false
-        @@current_instance : CPUMonitor? = nil  # Updated on each rebuild
+
+        # Read / write the displayed CPU% (the read auto-captures inside to_primitives).
+        def self.cpu_percent : Float64
+            @@cpu_source.get
+        end
+
+        def self.cpu_percent=(value : Float64) : Nil
+            @@cpu_source.set(value)
+        end
 
         # Visual properties — text_color resolves live (nil = follow Theme.current; explicit wins)
         theme_property text_color, text_default
@@ -33,9 +45,6 @@ module CrymbleUI
             @font_scale.set(font_scale)
             super(id: id)
             @text_color = text_color
-
-            # Store current instance for timer callback to mark for render
-            @@current_instance = self
 
             # Initialize monitoring on first instance only (survives rebuilds)
             unless @@initialized
@@ -114,16 +123,14 @@ module CrymbleUI
 
             # Calculate percentage
             if wall_delta > 0
-                @@cpu_percent = (cpu_seconds / wall_delta) * 100.0
+                self.cpu_percent = (cpu_seconds / wall_delta) * 100.0
             end
 
             # Update for next iteration
             @@last_cpu_time = current_cpu_time
             @@last_wall_time = current_wall_time
-
-            # Mark current instance for render
-            # Note: Scheduler also marks root, but we need to mark THIS widget for selective rendering
-            @@current_instance.try(&.mark_needs_render)
+            # No push: setting the Source re-renders every monitor that captured it
+            # (and the Source equality-gate skips a re-render when the percent is steady).
         end
 
         def measure(constraints : BoxConstraints) : Size
@@ -146,7 +153,7 @@ module CrymbleUI
         end
 
         private def format_text : String
-            "CPU: #{"%.1f" % @@cpu_percent}%"
+            "CPU: #{"%.1f" % @@cpu_source.get}%"
         end
 
         # Generate primitives for rendering

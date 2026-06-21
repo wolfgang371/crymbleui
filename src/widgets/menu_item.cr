@@ -87,7 +87,7 @@ module CrymbleUI
         reactive_property min_width : Float64, layout: true
 
         # Hover state
-        @hovered : Bool = false
+        reactive_property hovered : Bool = false
 
         # Click callback
         @on_click : Proc(Nil)?
@@ -265,14 +265,12 @@ module CrymbleUI
 
         # Mouse enter - highlight item
         def on_mouse_enter
-            @hovered = true
-            mark_needs_render
+            self.hovered = true
         end
 
         # Mouse exit - remove highlight
         def on_mouse_exit
-            @hovered = false
-            mark_needs_render
+            self.hovered = false
         end
 
         # Generate primitives for rendering
@@ -284,7 +282,7 @@ module CrymbleUI
             base_text_color = text_color
             txt = if !enabled?
                 Color.new(base_text_color.r, base_text_color.g, base_text_color.b, (base_text_color.a // 3).to_u8)
-            elsif @hovered
+            elsif hovered
                 Color.white
             else
                 base_text_color
@@ -301,14 +299,14 @@ module CrymbleUI
             check_y = 0.0 + (height - font_size) / 2.0
 
             label_x = 0.0 + padding + check_width  # Leave space for checkmark
-            label_y = 0.0 + (height - font_size) / 2.0
+            label_y = vcentered_text_y(height, font_scale)
 
             # Local bounds rect for background
             local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
             primitives do
                 # Draw hover background if hovered
-                if @hovered
+                if hovered
                     fill_rect(local_bounds, hover_color)
                 end
 
@@ -337,8 +335,8 @@ module CrymbleUI
                         shortcut_width = measure_text(sc, font_size).width
                         0.0 + bounds.width - shortcut_width - padding
                     end
-                    shortcut_y = 0.0 + (height - font_size) / 2.0
-                    sc_color = if @hovered
+                    shortcut_y = vcentered_text_y(height, font_scale)
+                    sc_color = if hovered
                         Color.white.with_alpha(200)
                     else
                         shortcut_color

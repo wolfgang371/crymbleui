@@ -195,7 +195,7 @@ module CrymbleUI
 
       # Calculate text position
       text_x = box_x + box + spacing
-      text_y = box_y + (box - font_size) / 2.0
+      text_y = vcentered_text_y(box, font_scale, box_y)
       text_position = Vec2.new(text_x, text_y)
 
       # Calculate box color (highlight when focus_highlighted, same as button hover)

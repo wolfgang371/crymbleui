@@ -1390,7 +1390,6 @@ module CrymbleUI
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(early-exit): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size}" }
         {% end %}
         # Update visual states for cursor/highlight (lightweight, O(active_cells))
-        update_cell_states
         if sticky_cells_can_use_blit_plan?
           compute_sticky_blit_plans
         else
@@ -1685,7 +1684,6 @@ module CrymbleUI
           end
         end
         # Update visual states for all cells
-        update_cell_states
 
         # Reposition sticky cells to account for scroll offset
         # Sticky layers are non-viewport_cache, so cells need screen-space positions
@@ -1811,10 +1809,6 @@ module CrymbleUI
         # Normal content cell - scrolls both X and Y
         content_layer
       end
-    end
-
-    # Update cell states. Cursor visuals are handled by the cursor overlay layer.
-    private def update_cell_states
     end
 
     # Variable size helpers (include grid spacing)

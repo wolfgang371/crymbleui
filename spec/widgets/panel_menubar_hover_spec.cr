@@ -120,6 +120,7 @@ describe "Panel MenuBar Hover Highlighting" do
     menubar.layer.should be_nil
 
     panel_layer = panel.layer.not_nil!
+    menu.get_primitives(menu.bounds) # render so the reactive hover edge enqueues to the layer
     panel_layer.clear_render_state
 
     # Simulate hover (menu should mark itself and propagate to panel layer)

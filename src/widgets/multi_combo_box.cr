@@ -194,9 +194,9 @@ module CrymbleUI
       @bounds = Rect.new(position, size)
 
       if @popup_open && (popup = @current_popup)
-        abs = absolute_bounds
-        popup_pos = Vec2.new(abs.x, abs.y + abs.height)
-        popup.bounds = Rect.new(popup_pos, popup.bounds.size)
+        # Re-anchor with the SAME flip-above logic as the initial open, so a rebuild
+        # (e.g. a gutter toggle that keeps the popup open) doesn't snap it back below.
+        popup.bounds = Rect.new(popup_position(absolute_bounds, popup.bounds.height), popup.bounds.size)
       end
     end
 
@@ -214,7 +214,7 @@ module CrymbleUI
         draw_rect(local_bounds, Theme.current.combo_border)
         content_y = BORDER_WIDTH + PADDING
         content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
-        text_y = content_y + (content_height - font_size) / 2.0
+        text_y = vcentered_text_y(content_height, FONT_SCALE, content_y)
         text_pos = Vec2.new(PADDING, text_y)
         draw_text(display_text, text_pos, Theme.current.combo_text, FONT_SCALE)
       end

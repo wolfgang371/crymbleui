@@ -350,7 +350,7 @@ module CrymbleUI
       # At natural height content_h ≈ font_size so offset ≈ 0 (no-op).
       # In tall merged cells, text centers properly and scrolls out
       # when the cell shrinks behind a sticky row header.
-      text_y = content_y + (content_height - font_size) / 2.0
+      text_y = vcentered_text_y(content_height, font_scale, content_y)
       prefix_position = Vec2.new(content_x, text_y)
       content_x = content_x + prefix_width
       text_position = Vec2.new(content_x, text_y)
@@ -478,7 +478,6 @@ module CrymbleUI
       stop_cursor_blink # Clear any existing timer
       @blink_timer_id = schedule_timer(CURSOR_BLINK_INTERVAL, repeating: true) do
         @cursor_visible.set(!cursor_visible)
-        mark_needs_render
       end
     end
 
@@ -516,7 +515,6 @@ module CrymbleUI
       restart_cursor_blink
 
       notify_change
-      mark_needs_render
     end
 
     # Public method to insert a character programmatically
@@ -583,13 +581,11 @@ module CrymbleUI
         if has_selection?
           delete_selection
           reset_cursor_blink
-          mark_needs_render
         elsif cursor_pos > 0
           @value.set(value[0...(cursor_pos - 1)] + value[cursor_pos..])
           @cursor_pos.set(cursor_pos - 1)
           reset_cursor_blink
           notify_change
-          mark_needs_render
         end
         @pending_replace.set(false) # Any editing clears pending replace
         true
@@ -601,12 +597,10 @@ module CrymbleUI
         if has_selection?
           delete_selection
           reset_cursor_blink
-          mark_needs_render
         elsif cursor_pos < value.size
           @value.set(value[0...cursor_pos] + value[(cursor_pos + 1)..])
           reset_cursor_blink
           notify_change
-          mark_needs_render
         end
         @pending_replace.set(false) # Any editing clears pending replace
         true
@@ -625,7 +619,6 @@ module CrymbleUI
           if cursor_pos > 0
             @cursor_pos.set(cursor_pos - 1)
             reset_cursor_blink
-            mark_needs_render
           end
         else
           # Move cursor left, clear selection
@@ -638,7 +631,6 @@ module CrymbleUI
             @cursor_pos.set(cursor_pos - 1)
           end
           reset_cursor_blink
-          mark_needs_render
         end
         true
       when SF::Keyboard::Key::Right
@@ -656,7 +648,6 @@ module CrymbleUI
           if cursor_pos < value.size
             @cursor_pos.set(cursor_pos + 1)
             reset_cursor_blink
-            mark_needs_render
           end
         else
           # Move cursor right, clear selection
@@ -669,7 +660,6 @@ module CrymbleUI
             @cursor_pos.set(cursor_pos + 1)
           end
           reset_cursor_blink
-          mark_needs_render
         end
         true
       when SF::Keyboard::Key::Up
@@ -688,7 +678,6 @@ module CrymbleUI
         clear_selection
         @cursor_pos.set(0)
         reset_cursor_blink
-        mark_needs_render
         true
       when SF::Keyboard::Key::Down
         # Parent intercept consumed it (commit + re-dispatch to the grid). Return
@@ -706,7 +695,6 @@ module CrymbleUI
         clear_selection
         @cursor_pos.set(value.size)
         reset_cursor_blink
-        mark_needs_render
         true
       when SF::Keyboard::Key::Home
         if shift
@@ -718,7 +706,6 @@ module CrymbleUI
           @cursor_pos.set(0)
         end
         reset_cursor_blink
-        mark_needs_render
         true
       when SF::Keyboard::Key::End
         if shift
@@ -730,7 +717,6 @@ module CrymbleUI
           @cursor_pos.set(value.size)
         end
         reset_cursor_blink
-        mark_needs_render
         true
       when SF::Keyboard::Key::Escape
         # Check if value was modified since focus
@@ -782,7 +768,6 @@ module CrymbleUI
       Widget.clipboard.string = selected_text
       delete_selection
       reset_cursor_blink
-      mark_needs_render
     end
 
     # Paste from clipboard at cursor position
@@ -800,7 +785,6 @@ module CrymbleUI
       @cursor_pos.set(cursor_pos + text.size)
       reset_cursor_blink
       notify_change
-      mark_needs_render
     end
 
     # Select all text
