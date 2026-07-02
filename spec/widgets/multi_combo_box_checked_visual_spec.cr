@@ -5,7 +5,7 @@ require "../../src/widgets/multi_combo_box"
 require "../../src/widgets/window"
 
 # Visual-state regression for MultiComboBox (user-reported 2026-06-20: the
-# checkboxes don't update AND use a wrong visual). T-030 makes the per-item check
+# checkboxes don't update AND use a wrong visual). makes the per-item check
 # PULL-based and renders the REAL tristate Checkbox (box + mark), not a text glyph.
 #
 # These assert through a real render on the RESOLVED CheckState (the same pull the

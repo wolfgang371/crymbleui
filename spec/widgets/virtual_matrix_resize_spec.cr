@@ -565,3 +565,47 @@ describe "VirtualMatrix interactive resize", tags: "slow" do
     end
   end
 end
+
+# (Finding 3a): growing the viewport of a SCROLLED VirtualMatrix must leave the content layer's
+# buffer_origin whole-valued and fitting (so the composite never clamps → no content shift), and the
+# sticky header row must stay pinned to the top. (Sticky layers are excluded from the cv gate, so the
+# sticky assertion lives here as a normal find-by-cell bounds check.)
+describe "VirtualMatrix grow-while-scrolled keeps a whole, fitting content origin", tags: "slow" do
+  it "content layer fits at a whole origin after a scrolled grow; sticky header stays pinned" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(800, 1000)
+    app = TestApp.new
+    adapter = ResizeTestAdapter.new(60, 12) # tall + wide enough to scroll both ways
+    matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "grow_scroll")
+    app.root_widget = matrix
+    app.build_tree
+
+    # Phase 1: a small viewport, scrolled down past the cache margin.
+    matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 300.0)), CrymbleUI::Vec2.zero)
+    renderer.settle_rendering(app)
+
+    center = CrymbleUI::Vec2.new(400.0, 150.0)
+    12.times do
+      matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), center)
+      renderer.render_frame(app)
+    end
+    renderer.settle_rendering(app)
+
+    cl = matrix.content_layer.not_nil!
+    cl.buffer_origin.y.should_not eq(0.0) # precondition: genuinely scrolled past the cache margin
+
+    # Phase 2: grow the viewport height (e.g. a section above collapsed, releasing height).
+    matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 850.0)), CrymbleUI::Vec2.zero)
+    renderer.settle_rendering(app)
+
+    cl = matrix.content_layer.not_nil!
+    b = cl.backend.not_nil!
+    cl.viewport_fits_buffer?(b.width, b.height).should be_true # composite won't clamp ⇒ no content shift
+    cl.buffer_origin.x.should eq(cl.buffer_origin.x.round)
+    cl.buffer_origin.y.should eq(cl.buffer_origin.y.round)
+
+    # The sticky header row (row 0) stays pinned to the top of the matrix, not scrolled off.
+    sticky = matrix.active_cells[{0, 1}]?
+    sticky.should_not be_nil
+    (sticky.not_nil!.absolute_bounds.y - matrix.absolute_bounds.y).abs.should be < (RULER_ROW_H + ROW_H)
+  end
+end

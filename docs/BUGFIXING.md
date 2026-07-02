@@ -72,6 +72,8 @@ A test asserting "content compound cell width == calculate_merged_width regardle
 
 ## Stale primitive cache after zoom (VHTree white lines)
 
+(VHTree is an embrace application widget composed of nested HStack/VStack rows — it is not a crymbleui class. The framework bug was in HStack/VStack.)
+
 **Root cause**: HStack/VStack `perform_layout` set new bounds after zoom (e.g., 196x21 → 306x29) but never called `mark_needs_render`. `get_primitives()` returned cached primitives from the old size — a `fill_rect(0, 0, 196, 21)` rendered on a 306x29 widget_backend. The unfilled bottom region showed stale background content as "white lines" at every row boundary.
 
 **Secondary cause**: Some VHTree rows used `vstack` wrappers which pass loose height constraints, so their HStack children measured to natural height (28.15) instead of the required 29px.
@@ -88,6 +90,8 @@ A test asserting "content compound cell width == calculate_merged_width regardle
 
 **Rule**: When a "heal" action exists, first test with the *minimal* heal (pure rebuild, no state change). If the bug persists after rebuild, the heal action has side effects that mask the real situation.
 
-**Rule**: Stale primitive caches are invisible to layout diagnostics. When layout is correct but rendering is wrong, check whether `get_primitives()` returns primitives matching the current bounds. A `DEBUG_STALE_PRIMITIVES` flag that asserts fill_rect dimensions match widget_backend size would catch this instantly.
+**Rule**: Stale primitive caches are invisible to layout diagnostics. When layout is correct but rendering is wrong, check whether `get_primitives()` returns primitives matching the current bounds. (A `DEBUG_STALE_PRIMITIVES` flag that asserts fill_rect dimensions match widget_backend size was proposed but never built. The real debug flags are `-Dverify_bounds` for constraint checks and `-DDEBUG_RENDER` for render logging.)
 
-**Rule**: Size-change detection should live in the base `Widget.layout()`, not in individual subclasses. Button already called `mark_needs_render` on size change; HStack/VStack forgot. Moving this to the framework prevents the same class of bug from recurring.
+**Rule**: Size-change detection should live in the base `Widget.layout()`, not in individual subclasses. Button had already called `mark_needs_render` on size change; HStack/VStack had not. Moving this to the framework prevents the same class of bug from recurring.
+
+**Why this check remains necessary after the reactive arc**: After the reactive migration, text-rendering widgets auto-capture the zoom source (`FontSizing.zoom_index_source`, a `Source(Int32)`) inside `to_primitives`, so a zoom change automatically invalidates their primitive cache. However, widget bounds are passed as a plain `Rect` to `to_primitives` — they are not reactive, so a size change never triggers pull-node invalidation. For layout containers like `VStack`, whose `to_primitives` only conditionally draws a background fill and does not read zoom at all, there is no reactive zoom-capture either. The base `Widget.layout()` size-change guard is therefore still the sole mechanism that forces a re-render when layout produces new dimensions.

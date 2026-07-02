@@ -505,7 +505,7 @@ layer.bounds = Rect.new(
 **Solution:** Overlay layer with opacity:
 - Drop zone background stays static (no cache invalidation)
 - `HighlightWidget` renders on separate layer at 40% opacity
-- `layer.opacity` applied during compositing (`sfml_renderer.cr` lines 223-226 for standard layers, lines 333-334 for viewport-cache layers)
+- `layer.opacity` applied during compositing (`sfml_renderer.cr` lines 298-300 for standard layers, lines 376-378 for viewport-cache layers)
 - Result: O(1) visual feedback, no widget cache touched
 
 ### DSL Usage
@@ -606,6 +606,107 @@ coherence* (re-blit the buffer at a new offset; slots keep their versions), dist
 is *dependency freshness* — see the "two orthogonal axes" section of `REACTIVITY.md`. This keeps a scrolling
 or idle matrix at near-zero render work while still catching a single edited cell.
 
+## Cache-Coherency Contract (what invalidates what)
+
+Cache garbling is almost always a **missing invalidation**: a value changed, but the signal that should
+have re-rendered the cache depending on it was either never sent or sent on the *wrong channel*. This
+section is the single "what invalidates what" reference, so a widget author picks the right channel.
+
+### The caches
+
+| Cache | Holds | Owned by |
+|-------|-------|----------|
+| **A1 primitives** (`@cached_primitives` / primitives node) | the widget's DrawPrimitives at (0,0) origin | every widget |
+| **A2 widget texture** (`widget_backend`) | the rasterized widget | every rendered widget |
+| **A3 background** (`background_backend`) | the layer pixels behind the widget, memorized | every rendered widget |
+| **A4 slot buffer** | rasterized visible cells, one per buffer slot | `viewport_cache` layers (VirtualMatrix, ScrollView content) |
+| **A5 layer texture** | the composited layer | layer-owning widgets |
+
+### Two kinds of signal — and the trap
+
+There are exactly two ways to mark a cache stale, and they are **not** interchangeable:
+
+- **PERSISTENT — a version bump.** `primitive_cache_rev = content_rev + theme_rev + zoom_rev + layout_rev`;
+  a widget's `primitives_version` folds these. It is a *value*, so it survives until the widget is actually
+  re-rendered. You raise it by **reading a `reactive_property` getter in `to_primitives`** (content/theme/zoom
+  auto-capture → content_rev) or by **`mark_needs_layout`** (size/structure → layout_rev).
+- **TRANSIENT — a dirty flag.** `mark_needs_render(widget)` adds the widget to its layer's `dirty_widgets`
+  set, which is **swept Clean every frame by `clear_render_state`**.
+
+**THE TRAP.** A `viewport_cache` layer does **not consult `dirty_widgets` at all** — it re-evaluates every
+visible cell each frame and **slot-skips** any whose `primitives_version` still matches its slot's `slot_rev`
+(`slot_rev_matches?`). So a transient `mark_needs_render` on a viewport_cache *child* is **silently dropped**:
+the flag is swept Clean before the visit-all-visible pass runs, and the pass never looks at it anyway. The
+cell keeps its stale slot pixels.
+
+> **RULE:** an *appearance* change for anything inside a `viewport_cache` layer must move a **version**
+> (`primitive_cache_rev`) — express it as a `reactive_property` read in `to_primitives`, or as
+> `mark_needs_layout` for size. Never rely on `mark_needs_render` alone there.
+>
+> *Worked example:* a grid cell's selection highlight toggled via `mark_needs_render` repainted fine in a
+> normal panel but never updated in the matrix viewport — the version-gated pull path ignored the dirty flag.
+> Routing the highlight through a versioned (reactive) field fixed it.
+
+### What invalidates what
+
+| You changed… | Send… | Channel | Cost |
+|--------------|-------|---------|------|
+| paint content (color, text, …) | read a `reactive_property` getter in `to_primitives` | content_rev — **persistent** | O(1) re-render |
+| theme / zoom | *(automatic)* `Theme.theme_rev` / `FontSizing.zoom_*` | theme_rev / zoom_rev — **persistent** | O(visible) |
+| structural state not backed by a `Source` (focus highlight, drag/reflow) | `mark_needs_render` | `dirty_widgets` — **transient, non-`viewport_cache` only** | O(1) |
+| size / structure | `mark_needs_layout` (or a `reactive_property … layout: true`) | layout_rev — **persistent** | O(n) layout |
+| position only (drag) | set `layer.bounds` | composite | O(layers) |
+| widget hidden / collapsed | `zero_bounds!` | releases the cache | O(subtree) |
+| DSL rebuild (`app.rebuild`) | — | `mark_needs_clear_and_render` on every active layer (unless `layer.skip_rebuild_clear`, which marks only the first widget `needs_render` instead); `app.cr:372-378` | O(n) full re-render per layer |
+
+### Footprint vacate: release the whole subtree
+
+When a widget leaves the visible area (TreeNode collapse, hide), `zero_bounds!` zeroes its bounds **and
+recurses into the whole subtree**, releasing every descendant's `widget_backend`/`background_backend`. This
+is load-bearing for `viewport_cache` layers: their visit-all-visible pass discovers cells by their *bounds*
+and never traverses *through* a zeroed parent to learn a descendant is gone. If `zero_bounds!` cleared only
+the top node, a grandchild would keep stale bounds + a cached texture, and the pass would re-blit it next
+frame as a ghost.
+
+> *Worked example:* collapsing a TreeNode inside a ScrollView left its children for one frame, then a stale
+> copy re-appeared — the collapse had released only the top node's pixels, not the subtree's.
+
+### Note on off-buffer paints
+
+An earlier hypothesis held that a widget partly outside its layer buffer could paint-skip and leave a stale
+strip. It was tested and **refuted** — the renderer *clips*, it does not skip — so there is no off-buffer
+special case to guard. The coherency hazards that remain are the two above: the wrong signal *channel*
+(transient vs persistent) and an *incomplete footprint release*.
+
+## `buffer_origin` Reader/Writer Invariant
+
+`viewport_cache` layers carry a `buffer_origin : Vec2` that records which content coordinate sits at the
+buffer's top-left corner. Render and composite both subtract this offset — if they ever observe different
+values the entire viewport appears shifted. The invariant is enforced by a single-reader /
+single-production-writer seam in `src/core/layer.cr`:
+
+- **One reader**: `Layer#viewport_sample_origin` (`layer.cr:218`) — pure method that computes the
+  integer sample position `(scroll - buffer_origin).to_i` for the live compositor and the cv instrument.
+  Every composite pass calls this; no other site reads `buffer_origin` directly.
+- **Private writer**: `Layer#write_buffer_origin` (`layer.cr:175`) — the only assignment to
+  `@buffer_origin`. Under `-Dverify_bounds` it asserts the value is whole-valued (a fractional origin
+  produces a 1px render/composite seam).
+- **One production writer**: `Layer#recenter_origin!` (`layer.cr:270`) — the sole external entry point
+  for recenter operations. All `viewport_cache` recenter and first-render sites funnel through this; it
+  calls `write_buffer_origin` and asserts the resulting origin fits the buffer under `-Dverify_bounds`.
+- **Pure computation**: `Layer#compute_buffer_origin` (`layer.cr:235`) computes a candidate whole+fitting
+  origin given scroll and buffer dimensions but **never writes** `@buffer_origin`. The blit-shift path
+  pre-computes the origin (to reuse it for overlap math) and then passes it into `recenter_origin!`.
+- **Test seam**: `Layer#set_buffer_origin_for_test` (`layer.cr:186`) — the only non-production writer,
+  used to position the buffer at an arbitrary offset in isolation without triggering a full recenter.
+- **Deleted**: `quantized_buffer_origin` no longer exists; its quantization logic was absorbed into
+  `compute_buffer_origin_axis`.
+
+`Layer#assert_composite_fits!` (`layer.cr:195`) guards the invariant at composite time: both the SFML
+renderer and the TestRenderer call it after computing the sample position, and it raises under
+`-Dverify_bounds` if the sample differs from `(scroll - buffer_origin).to_i` — catching any divergence
+between what the renderer wrote and what the compositor reads.
+
 ## Coordinate Systems
 
 Two coordinate systems that must be kept distinct:
@@ -696,8 +797,8 @@ GPU operations require `Int32` pixel coordinates. The rounding strategy must be 
 | Coordinate | Rounding | Why |
 |------------|----------|-----|
 | Widget position (layer_local_x/y) | `.to_i` (truncate) | Consistent direction for all widgets |
-| Widget/layer size (width/height) | `.ceil.to_i` | Prevents clipping rightmost/bottom pixels |
-| Scissor clip width/height | `.ceil.to_i` | Must match layer size to avoid off-by-one |
+| Widget backend size (width/height) | `device_pixel_span(start, length)` | Floors both edges (`(start+length).to_i - start.to_i`) so adjacent siblings tile exactly without gap or 1-pixel overlap; see comment at `layer_renderer.cr:963-967` |
+| Layer culling bounds (width/height) | `.ceil.to_i` | Conservative visibility test — ensures widgets at the layer edge are not prematurely culled (`layer_renderer.cr:986-987`) |
 
 **The helper function:**
 ```crystal
@@ -709,10 +810,24 @@ private def round_to_layer_pixels(abs_x, abs_y, layer_x, layer_y)
 end
 ```
 
-**Historical bug (fixed in commit 54d6254):**
+**Historical note (bug fixed in commit 54d6254):**
 Scissor clipping used `.to_i` (giving 298 for bounds 298.666) while compositor used `.ceil.to_i` (giving 299).
 Result: pixel 298 was never rendered but was sampled → white/garbage pixels at right edge.
-Fix: Both now use `.ceil.to_i` for width/height.
+The intermediate fix unified both to `.ceil.to_i`. The current code goes further: widget backend sizes use
+`device_pixel_span` (floors both edges) to prevent 1-pixel overlaps between siblings that `.ceil.to_i` would
+introduce — an overlapping pixel captured as "background" by an earlier sibling before the later sibling has
+rendered causes a stale strip on selective re-render. Layer culling bounds remain `.ceil.to_i`
+(a conservative bound for visibility testing only, not for sizing the backend texture).
+
+**Cache-validation instrument (`render_layer_immediate`):**
+The `render_layer_immediate` method (the ground-truth pass used by the cache-validation harness,
+`-Dcache_validation`) also sizes widget backends via `device_pixel_span`, matching production
+`render_single_widget` exactly (`layer_renderer.cr:840-841`). Using `.ceil.to_i` in the instrument while
+production uses `device_pixel_span` caused false ~1px "stale cache" seam failures at every
+fractional-width widget edge — the instrument painted one extra column the cache had never written.
+Aligning the instrument to `device_pixel_span` was the fix; production code was unchanged. This
+alignment is a correctness invariant of the validator: the ground-truth path and the production path
+must agree on widget extent, or the seam the instrument reports is its own error, not a cache bug.
 
 ## Layer Background Color
 
@@ -1296,64 +1411,52 @@ class TestRenderer
   getter primitive_count : Int32         # ✅ Counts rendering
   getter compositor_call_count : Int32   # ✅ Counts composites
   getter backend_clear_count : Int32     # ✅ Counts buffer clears
+  getter render_layer_count : Int32      # ✅ Counts layer render calls
+  getter backend_blit_count : Int32      # ✅ Counts widget-backend blits to layer
+  def layout_count : Int32               # ✅ Delegates to Widget.layout_count
 end
 ```
 
-### What We DIDN'T Have (Critical Gap!)
+### Viewport-Cache Recenter Counters
 
-```crystal
-# MISSING: Layout counters
-getter layout_count : Int32             # ❌ Would have caught the bug!
-getter widget_layout_count : Int32      # ❌ How many widgets laid out?
-```
+Three module-level class properties on `LayerRenderer` (reset by `LayerRenderer.reset_frame_counters`,
+`layer_renderer.cr:41-43`) track how each `viewport_cache` recenter was resolved. Use these in
+perf-budget specs to measure the delta across a scroll session, not an absolute duration:
 
-**Why it mattered**:
+| Counter | What it counts |
+|---------|----------------|
+| `LayerRenderer.frame_full_recenter_count` | Recenters with no usable overlap — buffer cleared and fully re-rendered |
+| `LayerRenderer.frame_blit_shift_count` | Recenters via blit-shift — existing buffer content shifted, only newly exposed edges re-rendered |
+| `LayerRenderer.frame_realloc_count` | Backend buffer reallocations (a grow event; the "allocation storm" these counters guard against) |
+
+A healthy scroll session shows `frame_blit_shift_count >> frame_full_recenter_count` and
+`frame_realloc_count == 0`, confirming the sliding-window cache is working correctly.
+
+### What We Didn't Have (Gap Now Resolved)
+
+At the time of the drag bug discovery, layout was not instrumented:
+
+**Why it mattered then**:
 - Tests showed `primitive_count = 0` (perfect caching!) ✅
 - Tests showed `compositor_call_count = 10` (one per frame) ✅
 - Tests DIDN'T show `layout_count = 10` (layout on every frame!) ❌
 
 **Lesson**: Instrument what's expensive (layout!), not just what's visible (primitives)
 
-### Recommended Instrumentation
+**Current state**: `layout_count` is implemented. `TestRenderer#layout_count` (`test_renderer.cr:39`)
+delegates to `Widget.layout_count` (a class-variable counter incremented inside `Widget#layout`).
+`render_layer_count` (`test_renderer.cr:25`) and `backend_blit_count` (`test_renderer.cr:28`) are also
+present. Do not re-add hand-rolled versions of these counters.
 
-```crystal
-class Widget
-  @@layout_call_count : Int32 = 0
+### Using the Instrumentation in Tests
 
-  def layout(constraints, offset)
-    @@layout_call_count += 1
-    # ... existing layout code ...
-  end
-
-  def self.layout_call_count : Int32
-    @@layout_call_count
-  end
-
-  def self.reset_layout_count
-    @@layout_call_count = 0
-  end
-end
-
-class TestRenderer
-  def layout_count : Int32
-    Widget.layout_call_count
-  end
-
-  def reset_counters
-    # ... existing counters ...
-    Widget.reset_layout_count
-  end
-end
-```
-
-**Usage in tests**:
 ```crystal
 it "drag doesn't trigger layout" do
   renderer.reset_counters
 
   drag_panel(100px)
 
-  renderer.layout_count.should eq 0  # ← Would have caught the bug!
+  renderer.layout_count.should eq 0
   renderer.primitive_count.should eq 0
   renderer.compositor_call_count.should eq 10  # One per frame
 end

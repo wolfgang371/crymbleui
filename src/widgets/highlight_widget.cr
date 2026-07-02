@@ -31,7 +31,7 @@ module CrymbleUI
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       primitives do
-        fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), @color)
+        fill_background(bounds, @color)
       end
     end
   end

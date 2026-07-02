@@ -57,6 +57,18 @@ module CrymbleUI
       @children.first.measure(constraints)
     end
 
+    # Passthrough: min is the wrapped child's min.
+    def min_intrinsic_height(width : Float64) : Float64
+      return 0.0 if @children.empty?
+      @children.first.min_intrinsic_height(width)
+    end
+
+    # Passthrough on the width axis too — the width dual.
+    def min_intrinsic_width(height : Float64) : Float64
+      return 0.0 if @children.empty?
+      @children.first.min_intrinsic_width(height)
+    end
+
     # Layout: position child at (0,0)
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       size = measure(constraints)
@@ -69,7 +81,7 @@ module CrymbleUI
       primitives do
         if bg = @background_color
           color = bg.is_a?(ThemeColorRef) ? bg.resolve : bg
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), color)
+          fill_background(bounds, color)
         end
       end
     end

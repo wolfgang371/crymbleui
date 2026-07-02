@@ -18,6 +18,7 @@ module CrymbleUI
     Blur      # Focus lost
     ArrowUp   # Up arrow pressed (for parent navigation)
     ArrowDown # Down arrow pressed (for parent navigation)
+    Toggle    # Space pressed while `toggle_on_space` is set (e.g. a checkable combo row toggle)
   end
 
   # TextInput widget for single-line text entry
@@ -129,6 +130,14 @@ module CrymbleUI
 
     # On-event callback (richer interaction: Change, Submit, Cancel)
     @on_event : Proc(String, TextInputEvent, Nil)?
+
+    # Opt-in: when set, a typed space fires a `Toggle` event INSTEAD of inserting a
+    # space character. Used by a checkable ComboBoxPopup so Space toggles the
+    # highlighted row/header. A space arrives as a TextEntered char (on_text_input),
+    # NOT as on_key_down(Space) — and the two SFML events are independent, so the
+    # suppression must live here, on the char path. Default false → generic TextInput
+    # is unaffected. Trade-off: such a filter can't contain a literal space.
+    property toggle_on_space : Bool = false
 
     # Horizontal arrow intercept: called before Left/Right is processed.
     # Bool param: true=Right, false=Left. Return true to consume: TextInput skips
@@ -493,6 +502,14 @@ module CrymbleUI
 
     # Handle text input (printable characters)
     def on_text_input(char : Char)
+      # Space-as-toggle (opt-in): fire Toggle and DON'T insert the space. This is the
+      # only seam that suppresses the char — on_key_down's return can't, since the
+      # TextEntered event is dispatched independently of KeyPressed.
+      if @toggle_on_space && char == ' '
+        @on_event.try &.call(value, TextInputEvent::Toggle)
+        return
+      end
+
       # In QuickEntry mode, first keystroke replaces entire content
       if edit_mode == TextInputMode::QuickEntry && pending_replace
         @value.set(char.to_s)

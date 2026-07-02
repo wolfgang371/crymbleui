@@ -4,8 +4,6 @@ require "../rendering/renderer"
 require "../rendering/draw_primitive"
 require "../rendering/layer_renderer"
 require "../rendering/render_trigger"
-require "../widgets/window_panel"
-require "../widgets/popup"
 require "./test_render_backend"
 require "./test_shortcut_manager"
 
@@ -55,6 +53,23 @@ module CrymbleUI
       @widget_backends : Array(TestRenderBackend) = [] of TestRenderBackend
       getter widget_backends
 
+      # Per-frame render disposition: widget object_id → :rendered | :blitted | :skipped. Populated by
+      # record_widget_disposition (the shared render path's paint points), cleared each frame, so specs
+      # can assert "this cell was painted, and how" instead of sampling pixels. A culled/absent widget
+      # has no entry (nil) — exactly the grow-ghost signature.
+      @frame_dispositions = {} of UInt64 => Symbol
+      getter frame_dispositions
+
+      # Override of the shared paint-point hook (no-op in the SFML renderer).
+      protected def record_widget_disposition(widget : Widget, disposition : Symbol) : Nil
+        @frame_dispositions[widget.object_id] = disposition
+      end
+
+      # How was this widget painted in the most recent frame? nil = not painted (culled/absent).
+      def widget_disposition(widget : Widget) : Symbol?
+        @frame_dispositions[widget.object_id]?
+      end
+
       def initialize(width : Int32 = 800, height : Int32 = 600)
         @backend = TestRenderBackend.new(width, height)  # Window buffer
         @scheduler = Scheduler.new
@@ -62,7 +77,26 @@ module CrymbleUI
 
         # Set global scheduler for widgets (shortcut manager not set in headless mode)
         Widget.scheduler = @scheduler
+        # Give widgets a FocusManager so keyboard-driven tests (arrow nav, typed
+        # input) work out of the box. SfmlRenderer sets one UNCONDITIONALLY; here it
+        # is CONDITIONAL so it never clobbers an instance a suite spec_helper or a
+        # spec already set + holds a reference to. crymbleui's spec_helper sets one
+        # at load + clears focus per-test, so this is inert there; for consumers
+        # whose suite does NOT pre-set one (e.g. embrace), this lazily provides a
+        # shared fm — a gui spec that needs clean INITIAL focus should reset it.
+        Widget.focus_manager = FocusManager.new unless Widget.focus_manager?
         # Note: Widget.shortcut_manager not set - headless tests don't test keyboard shortcuts
+      end
+
+      # Resize the window buffer — simulates an OS window resize. The next render_frame lays out
+      # at the new size, while widget/layer backends created at the previous size are REUSED (they
+      # live on the widgets, not here). This is what exposes a stale primitive cache: a fill_rect
+      # cached at the old width re-rendered onto the grown widget_backend leaves a transparent
+      # right-edge strip that composites as the window background — exactly the live symptom. The
+      # two-separate-renderers pattern cannot show this (a fresh renderer first-renders at the new
+      # size, so nothing is stale).
+      def resize(width : Int32, height : Int32)
+        @backend = TestRenderBackend.new(width, height)
       end
 
       # Reset all performance counters
@@ -139,7 +173,12 @@ module CrymbleUI
       # "render this frame?" decision spec-testable: drive an interaction through App.handle_*, then
       # assert render_frame_if_needed — true when the change should repaint, false on an idle no-op.
       def render_frame_if_needed(app : App) : Bool
-        if @render_trigger.should_render?(app)
+        # A pending rebuild is a render signal SEPARATE from the aggregate pull (should_render?): a
+        # structural change or a timer-driven app-state change requests a rebuild off the input path. Honor
+        # it here too — else the rebuild sits unprocessed until some unrelated aggregate change happens to
+        # fire a frame. Mirrors the SFML main loop, which applies needs_rebuild? after timers, not only on
+        # the event path.
+        if app.needs_rebuild? || @render_trigger.should_render?(app)
           render_frame(app)
           @render_trigger.record(app)
           true
@@ -165,6 +204,7 @@ module CrymbleUI
         # Clear widget backends before each frame
         # Backends will re-register as widgets render, ensuring we only count active backends
         @widget_backends.clear
+        @frame_dispositions.clear
 
         begin
           # Process pending rebuild (matches SFML event loop behavior).
@@ -247,6 +287,21 @@ module CrymbleUI
         clip_width = layer.bounds.width.ceil.to_i
         clip_height = layer.bounds.height.ceil.to_i
 
+        # Clip to the ancestor panel INTERIOR so a descendant layer can't paint over
+        # the panel border (MUST match SFML — the interior inset lives in the shared
+        # find_descendant_clip_bounds). Applies to both the viewport_cache and standard
+        # branches below, since they both consume clip_width/clip_height.
+        if clip_bounds = find_descendant_clip_bounds(layer)
+          clip_right = clip_bounds.x + clip_bounds.width
+          clip_bottom = clip_bounds.y + clip_bounds.height
+          if layer.bounds.x + clip_width > clip_right
+            clip_width = Math.max(0, (clip_right - layer.bounds.x).ceil.to_i)
+          end
+          if layer.bounds.y + clip_height > clip_bottom
+            clip_height = Math.max(0, (clip_bottom - layer.bounds.y).ceil.to_i)
+          end
+        end
+
         if layer.viewport_cache
           # Viewport cache compositing: sliding viewport for scrolling layers
           composite_viewport_cache_layer(layer, backend, clip_width, clip_height)
@@ -257,61 +312,32 @@ module CrymbleUI
           @backend_blit_count += 1
         end
 
-        # Draw borders for panels and popups if this layer belongs to them
-        # Borders are NOT cached - drawn fresh each frame to avoid ghost borders during resize
-        # This aligns headless renderer with SFML renderer behavior
-
-        # Detect panel layers by ID (layer.id starts with "panel_")
-        if layer.id.starts_with?("panel_")
-          # Find the panel widget (parent of Chrome/Content widgets in layer)
-          if chrome = layer.widgets.first?
-            if panel = chrome.parent.as?(WindowPanel)
-              draw_panel_border(panel)
-            end
-          end
-        end
-
-        # Detect popup layers by ID (layer.id starts with "popup_")
-        if layer.id.starts_with?("popup_")
-          # Find the popup widget (first widget in layer.widgets)
-          if popup_widget = layer.widgets.first?
-            if popup = popup_widget.as?(Popup)
-              draw_popup_border(popup)
-            end
-          end
+        # Draw the chrome border (e.g. a WindowPanel's) fresh each frame — NOT cached, so a
+        # resize leaves no ghost border. Asked polymorphically (responds_to? :chrome_border),
+        # not by sniffing the layer id + downcasting; mirrors the SFML renderer. A layer's
+        # owner_widget owns it, so this fires once for the panel's own layer, never its
+        # children's. (Popup borders are drawn by Popup#foreground_primitives.)
+        if (owner = layer.owner_widget) && owner.responds_to?(:chrome_border)
+          draw_chrome_border(owner.chrome_border)
         end
       end
 
-      # Draw panel border directly on window buffer (not cached in layer)
-      # Draws border INSIDE bounds (unlike SFML which draws OUTSIDE with outline_thickness)
-      private def draw_panel_border(panel : WindowPanel)
-        border_rect = Rect.new(panel.x, panel.y, panel.width, panel.height)
-        @backend.draw_rect(border_rect, panel.border_color)
+      # Draw a 1px chrome border directly on the window buffer (not cached in any layer).
+      private def draw_chrome_border(border : NamedTuple(bounds: Rect, color: Color))
+        @backend.draw_rect(border[:bounds], border[:color])
       end
 
-      # Draw popup border directly on window buffer (not cached in layer)
-      # Draws border INSIDE bounds (unlike SFML which draws OUTSIDE with outline_thickness)
-      private def draw_popup_border(popup : Popup)
-        abs_bounds = popup.absolute_bounds
-        border_rect = Rect.new(abs_bounds.x, abs_bounds.y, abs_bounds.width, abs_bounds.height)
-        @backend.draw_rect(border_rect, popup.border_color)
-      end
-
-      # Composite viewport_cache layer - apply viewport offset (scroll_offset - buffer_origin)
-      # MUST match SFML's composite_viewport_cache_layer to ensure tests catch same bugs
+      # Composite viewport_cache layer - apply viewport offset (scroll_offset - buffer_origin).
+      # Routes through Layer#viewport_sample_origin — the ONE composite reader (matches SFML exactly, no
+      # hand-mirrored copy that can drift).
       private def composite_viewport_cache_layer(layer : Layer, backend : TestRenderBackend, viewport_width : Int32, viewport_height : Int32)
         dest_x = layer.bounds.x.to_i
         dest_y = layer.bounds.y.to_i
 
-        # Viewport position within buffer = scroll_offset - buffer_origin (MATCHES SFML!)
-        viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
-        viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
+        viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_width, viewport_height)
 
-        # Clamp to valid buffer region
-        buffer_width = backend.width
-        buffer_height = backend.height
-        viewport_x = viewport_x.clamp(0, [buffer_width - viewport_width, 0].max)
-        viewport_y = viewport_y.clamp(0, [buffer_height - viewport_height, 0].max)
+        # invariant: a viewport_cache composite must never CLAMP (origin whole+fitting by construction).
+        layer.assert_composite_fits!(viewport_x, viewport_y)
 
         # Blit from viewport position in buffer (NOT always 0,0)
         backend.blit_region_to(@backend, viewport_x, viewport_y, viewport_width, viewport_height,

@@ -94,10 +94,11 @@ describe "Menu Dropdown Border" do
     popup.should_not be_nil
     popup = popup.as(CrymbleUI::Popup)
 
-    # Verify popup generates border primitive
-    primitives = popup.to_primitives(popup.bounds)
-    has_border = primitives.any? { |p| p.is_a?(CrymbleUI::DrawRect) }
-    has_border.should be_true
+    # the popup is a pure container; its border is a FOREGROUND (drawn over
+    # children, at the edges), NOT in to_primitives.
+    popup.to_primitives(popup.bounds).should be_empty
+    popup.has_foreground?.should be_true
+    popup.foreground_primitives.any? { |p| p.is_a?(CrymbleUI::DrawRect) }.should be_true
 
     # Now check if border is VISIBLE in final composited window output
     # Get window backend (final composited output visible to user)
@@ -150,10 +151,10 @@ describe "Menu Dropdown Border" do
     popup.should_not be_nil
     popup = popup.as(CrymbleUI::Popup)
 
-    # Verify popup generates border primitive
-    primitives = popup.to_primitives(popup.bounds)
-    has_border = primitives.any? { |p| p.is_a?(CrymbleUI::DrawRect) }
-    has_border.should be_true
+    # border is a FOREGROUND (over children), not in to_primitives.
+    popup.to_primitives(popup.bounds).should be_empty
+    popup.has_foreground?.should be_true
+    popup.foreground_primitives.any? { |p| p.is_a?(CrymbleUI::DrawRect) }.should be_true
 
     # Popup should be reasonably tall with 5 items
     popup.bounds.height.should be > 100

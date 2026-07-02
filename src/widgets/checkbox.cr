@@ -205,7 +205,7 @@ module CrymbleUI
 
       primitives do
         if bg = background_color
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+          fill_background(bounds, bg)
         end
         # Box outline + state mark — the shared checkbox visual (PrimitiveBuilder#draw_check_glyph).
         # box_color carries the focus highlight; check_color stays the plain theme color.

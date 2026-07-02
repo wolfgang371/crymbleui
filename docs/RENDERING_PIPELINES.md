@@ -43,7 +43,7 @@ class MyButton < Widget
   reactive_property padding : Float64 = 0.0, layout: true   # also pokes layout (size/position change)
   reactive_property hover : Bool = false, reconcile: true   # value survives a DSL rebuild
   reconcile_property layer : Layer? = nil                   # plain ivar carried across rebuilds (never painted)
-  theme_property accent, :accent_color                      # resolves the global Theme Source live
+  theme_property text_color, button_text                    # getter resolves Theme.current.button_text live
 end
 ```
 
@@ -59,6 +59,12 @@ end
 `render_property` and `layout_property` no longer exist. **See `REACTIVITY.md` for
 the canonical model** (auto-capture, version counting, the pull render trigger, and
 which macro to reach for) — that doc is the single source of truth for the macros.
+
+> **One trap worth knowing up front:** inside a `viewport_cache` layer (VirtualMatrix,
+> ScrollView content) a transient `mark_needs_render` is *silently dropped* — those layers
+> ignore `dirty_widgets` and slot-skip by version, so an appearance change there must move a
+> *version* (a `reactive_property` read, or `mark_needs_layout`). The full "what invalidates
+> what" reference is the **Cache-Coherency Contract** in `LAYER_RENDERING_ARCHITECTURE.md`.
 
 ### 3. Choose a Cache Policy (Optional)
 
@@ -128,7 +134,10 @@ move the layer position, no re-rendering.
 When scrolling moves the viewport beyond the buffer's cache extent:
 1. Compute overlap between old and new buffer regions
 2. Copy overlap to temp → clear buffer → restore at new position
-3. Invalidate widget_backends at the old buffer boundary (prevents truncated blits)
+3. Classify each widget against the copied overlap region:
+   - **Fully inside the overlap**: pixels were faithfully moved — call `shift_slot(dx, dy)` (backend kept, slot stamp updated, no re-render)
+   - **Inside the old buffer but outside the overlap**: backend is valid but was not moved — call `invalidate_slot` (backend kept, slot marked stale for a cheap re-blit)
+   - **Partially clipped at the old buffer edge**: backend holds truncated pixels — dispose `widget_backend` + `background_backend` (full re-render on next pass)
 4. Render only newly-visible edge cells
 
 Cost: O(edge_cells) instead of O(all_visible). For a 1400×900 matrix with 23px
@@ -146,7 +155,10 @@ painter's algorithm that bypasses all caching:
       (parent content already painted by painter's algorithm)
    b. Call `to_primitives()` directly — NOT `get_primitives()`, which would
       return cached primitives for Static/Dynamic policies
-   c. Render primitives on a temp widget-sized backend
+   c. Render primitives on a temp backend sized with `device_pixel_span(start, length)` —
+      the same formula production uses in `render_single_widget`. Using `ceil(length)` instead
+      would add a fractional-edge column absent from the cached buffer and generate false
+      "stale cache" CV mismatches (the instrument, not the cache, would be the bug).
    d. Blit temp backend to viewport surface
 4. Second pass: render foreground primitives for DecoratedContainers
 
@@ -163,6 +175,7 @@ primitive caching, not just rendering caching.
 | (none) | Crymble pipeline only, zero validation overhead |
 | `-Dcache_validation` | Both pipelines run, pixel comparison after each frame |
 | `-Dimmediate_mode_only` | Only immediate-mode pipeline, all caching bypassed |
+| `-Dverify_bounds` | Asserts the viewport-cache `buffer_origin` invariant at its sole writer and at both composite seams (SFMLRenderer + TestRenderer); raises on a non-whole origin or a composite that would clamp. Paired with `-Dcache_validation` by `tools/cv-coherency.sh` as the buffer-origin gate. |
 
 `-Dimmediate_mode_only` is useful for visual debugging: if a rendering bug
 disappears with this flag, the bug is in caching. If it persists, the bug is in
@@ -190,7 +203,7 @@ Any mismatch means a caching bug: the optimized path diverges from ground truth.
 | 3 | Dirty widget tracking | Planned | Selective render missing a dirty widget |
 | 4 | Widget fast-path | Planned | Fast-path blit using stale widget_backend |
 | 5 | Primitive cache | Planned | `@cached_primitives` diverging from `to_primitives()` |
-| 6 | Blit-plan fast-path | Planned | Sticky layer shortcut producing wrong output |
+| 6 | Blit-plan fast-path | Covered via ImmediateMode validator (not a standalone check) | Sticky layer shortcut producing wrong output |
 | 7 | Layout cache | Planned | Skipped layout producing wrong bounds |
 
 ### Runtime Control
@@ -248,6 +261,23 @@ describe "Cache Validation" do
 end
 {% end %}
 ```
+
+### The Cache-Coherency Gate
+
+`tools/cv-coherency.sh` is the dual-renderer gate. It builds with both
+`-Dcache_validation` and `-Dverify_bounds` in a single compile, then runs over
+20 spec files covering VirtualMatrix, ScrollView, and non-matrix overlay specs.
+Any cached-buffer divergence from the immediate-mode ground truth, or any
+buffer-origin invariant violation, raises immediately.
+
+Usage: `source setup.sh && ./tools/cv-coherency.sh`
+
+Non-matrix layers (overlays, combo popups, window-direct) opt in per-layer with
+`layer.cv_validate = true`. The validator condition is
+`(viewport_cache && !sticky) || cv_validate`, so a non-scrolling layer with this
+flag set exercises the full pixel comparison without the scroll-offset complication.
+Sticky layers are excluded — the immediate-mode path mis-positions sticky cells and
+would produce false positives.
 
 ## Performance Model
 

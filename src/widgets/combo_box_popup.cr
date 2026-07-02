@@ -56,6 +56,12 @@ module CrymbleUI
     # Currently highlighted index in filtered list
     @highlighted_index : Int32 = 0
 
+    # in checkable mode the "(select all)" header is a first-class nav
+    # element ABOVE the items. When this is set, the header carries the active
+    # highlight and @highlighted_index is dormant. Always false in non-checkable
+    # mode (no header) → the single ComboBox's index nav is byte-identical.
+    @header_highlighted : Bool = false
+
     # Maximum height before scrolling kicks in
     @max_height : Float64?
 
@@ -132,6 +138,11 @@ module CrymbleUI
       @highlighted_index
     end
 
+    # is the "(select all)" header the active (highlighted) nav element?
+    def header_highlighted? : Bool
+      @header_highlighted
+    end
+
     # Enable checkable mode: items PULL their checked state from `source` and a gutter
     # toggle mutates it + fires `on_change`. Rebuilds the items (with pull closures) and
     # inserts the tristate header. Call before layout. There is NO push/refresh path —
@@ -139,6 +150,7 @@ module CrymbleUI
     def enable_checkable(source : Source(Set(Int32)), on_change : Proc(Nil))
       @selection_source = source
       @on_change = on_change
+      @text_input.toggle_on_space = true # Space toggles the highlighted row/header
       rebuild_items
       rebuild_header
     end
@@ -269,7 +281,18 @@ module CrymbleUI
         move_highlight(-1)
       when .arrow_down?
         move_highlight(+1)
+      when .toggle?
+        toggle_highlighted
       end
+    end
+
+    # Space toggles the active nav element — the header (select-all/none) or
+    # the highlighted row (membership). Both reuse the widget's own on_toggle (the
+    # same path a gutter click takes), so there is one toggle implementation. Keeps
+    # the popup open (the host's on_change fires, the popup is NOT collapsed).
+    private def toggle_highlighted
+      active = @header_highlighted ? @header_item : @item_widgets[@highlighted_index]?
+      active.try { |w| w.on_toggle.try(&.call) }
     end
 
     # Filter items by prefix
@@ -281,27 +304,54 @@ module CrymbleUI
       end
 
       @highlighted_index = 0 # Reset to first match
+      @header_highlighted = false # a keystroke re-homes the highlight to the first match, not the header
       rebuild_items
       mark_needs_layout
     end
 
-    # Move highlight up or down
+    # Move highlight up or down. In checkable mode the "(select all)" header sits
+    # ABOVE the items: ArrowUp from the first item lands on the header; ArrowDown
+    # from the header returns to the first item. Non-checkable mode is unchanged —
+    # plain item-index nav (the header path is dead, @header_highlighted stays false).
     def move_highlight(delta : Int32)
-      return if @filtered_items.empty?
-
-      @highlighted_index = (@highlighted_index + delta).clamp(0, @filtered_items.size - 1)
+      if checkable?
+        if @header_highlighted
+          # Leave the header downward only if there is an item to land on.
+          if delta > 0 && !@filtered_items.empty?
+            @header_highlighted = false
+            @highlighted_index = 0
+          end
+        elsif delta < 0 && @highlighted_index <= 0
+          @header_highlighted = true # step up off the first item onto the header
+        elsif !@filtered_items.empty?
+          @highlighted_index = (@highlighted_index + delta).clamp(0, @filtered_items.size - 1)
+        end
+      else
+        return if @filtered_items.empty?
+        @highlighted_index = (@highlighted_index + delta).clamp(0, @filtered_items.size - 1)
+      end
       update_highlight
       ensure_highlighted_visible
-      mark_needs_render
+      # NO container-level mark_needs_render here. It marked the POPUP itself NeedsRender,
+      # and selective re-render then repainted the container over its CLEAN direct children's
+      # regions without repainting them — blanking the "(select all)" header (the reported
+      # "vanishes on the first arrow" bug). update_highlight's reactive `highlighted=` /
+      # `focus_highlighted=` setters already dirty the widgets that actually changed (items
+      # and/or the header), so they repaint; an unchanged header is left untouched, not wiped.
     end
 
-    # Update visual highlight on items
+    # Update visual highlight on items (and, in checkable mode, the header). Exactly
+    # one element is active: the header when @header_highlighted, else the row at
+    # @highlighted_index. The active element flashes (focus_highlighted) in sync.
     private def update_highlight
       @item_widgets.each_with_index do |item, idx|
-        is_highlighted = (idx == @highlighted_index)
+        is_highlighted = !@header_highlighted && idx == @highlighted_index
         item.highlighted = is_highlighted
-        # Sync flash state with highlighted item
         item.focus_highlighted = is_highlighted && @flash_state
+      end
+      if hdr = @header_item
+        hdr.highlighted = @header_highlighted
+        hdr.focus_highlighted = @header_highlighted && @flash_state
       end
     end
 
@@ -322,8 +372,9 @@ module CrymbleUI
         Widget.scheduler.cancel(timer_id)
         @flash_timer_id = nil
       end
-      # Reset all items to not flashing
+      # Reset all items (and the header) to not flashing
       @item_widgets.each { |item| item.focus_highlighted = false }
+      @header_item.try { |hdr| hdr.focus_highlighted = false }
     end
 
     private def toggle_highlight_flash
@@ -332,8 +383,10 @@ module CrymbleUI
     end
 
     private def update_flash_state(highlighted : Bool)
-      if idx = @highlighted_index
-        @item_widgets[idx]?.try { |item| item.focus_highlighted = highlighted }
+      if @header_highlighted
+        @header_item.try { |hdr| hdr.focus_highlighted = highlighted }
+      else
+        @item_widgets[@highlighted_index]?.try { |item| item.focus_highlighted = highlighted }
       end
     end
 
@@ -343,6 +396,16 @@ module CrymbleUI
     # text falls through to the highlighted item — so navigating the list with
     # arrows and pressing Enter behaves as usual.
     def select_highlighted
+      # in a checkable (multi-select) popup, Enter CONFIRMS the selection
+      # the user built via toggles and CLOSES — it must NOT collapse the selection
+      # to the highlighted row (that is the single-select body-click semantics). The
+      # selection lives in @selection_source, so the close path preserves it; there
+      # is no separate "confirm" callback because closing IS the confirmation.
+      if checkable?
+        @on_cancel.try(&.call) # close; @selection_source already holds the choice
+        return
+      end
+
       if @editable
         typed = @text_input.value
         if idx = @all_items.index(typed)
@@ -405,7 +468,7 @@ module CrymbleUI
           }
         end
 
-        item.highlighted = (idx == @highlighted_index)
+        item.highlighted = (!@header_highlighted && idx == @highlighted_index)
         item.parent = @vstack
         @vstack.children << item
         @item_widgets << item
@@ -581,6 +644,7 @@ module CrymbleUI
 
     # Scroll to ensure highlighted item is visible
     private def ensure_highlighted_visible
+      return if @header_highlighted # the header sits above the scroll area — always visible
       return if @filtered_items.empty?
       return if @highlighted_index < 0 || @highlighted_index >= @item_widgets.size
 

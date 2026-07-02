@@ -12,7 +12,7 @@ module ViewportCacheTestHelper
     # NEW: buffer_origin must be set so viewport samples from correct buffer position
     # viewport_pos = scroll_offset - buffer_origin, so buffer_origin = 0 means
     # viewport samples from scroll_offset position in buffer
-    layer.buffer_origin = CrymbleUI::Vec2.new(0.0, 0.0)
+    layer.set_buffer_origin_for_test(CrymbleUI::Vec2.new(0.0, 0.0))
     layer
   end
 end
@@ -209,6 +209,7 @@ describe "Viewport cache compositor blitting" do
 
       backend = CrymbleUI::Testing::TestRenderBackend.new(120, 120, CrymbleUI::Color.new(0, 0, 0, 0))
       layer.backend = backend
+      layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
       renderer.composite_layer_to_window(layer)
@@ -223,6 +224,7 @@ describe "Viewport cache compositor blitting" do
 
       backend = CrymbleUI::Testing::TestRenderBackend.new(120, 120, CrymbleUI::Color.new(0, 0, 0, 0))
       layer.backend = backend
+      layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
       renderer.composite_layer_to_window(layer)
@@ -236,6 +238,7 @@ describe "Viewport cache compositor blitting" do
 
       backend = CrymbleUI::Testing::TestRenderBackend.new(120, 120, CrymbleUI::Color.new(0, 0, 0, 0))
       layer.backend = backend
+      layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
       renderer.composite_layer_to_window(layer)

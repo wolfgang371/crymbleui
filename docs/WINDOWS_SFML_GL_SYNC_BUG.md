@@ -3,9 +3,12 @@
 > **TL;DR:** On Windows, SFML 3.0.0 + the system OpenGL driver does **not** make
 > glyph atlas uploads visible to subsequent reads in time. The result is
 > stochastic glyph garbling: random characters in rendered text show the
-> *wrong glyph* (e.g. `b` rendered as `Z`, `[` as `]`). The fix is a one-line
-> patch to **SFML's `Texture::resize` and `Texture::update`** that calls
-> `glFinish()` after the GPU upload. Without this patch, **rendering is
+> *wrong glyph* (e.g. `b` rendered as `Z`, `[` as `]`). The fix is a two-part patch: `Texture::resize` in `Texture.cpp` is changed
+> to zero-fill the new texture instead of passing `nullptr`; and
+> `Font::loadGlyph` in `Font.cpp` calls `glFinish()` after the glyph atlas
+> upload. Only `Font::loadGlyph` calls `glFinish()` — adding it to
+> `Texture::resize` too caused ~240 ms of stall per keystroke (~20 ms ×
+> ~12 layer textures per full rebuild). Without this patch, **rendering is
 > non-deterministic across process launches on Windows**.
 
 ## Symptoms
@@ -49,12 +52,16 @@ stalled the CPU until the GPU was idle).
 ### 1. `SFML/src/SFML/Graphics/Texture.cpp` — `Texture::resize`
 
 Replace `glTexImage2D(..., nullptr)` with a `glTexImage2D` call passing a
-zero-filled `std::vector<std::uint8_t>` of the right size, **then call
-`glFinish()`**. The Windows GL drivers leave the new texture content
-undefined when given `nullptr`; pre-zeroing means a later sampler read
-(if it happens before the upload is fully visible) at least sees zeros
-instead of garbage. The `glFinish()` ensures the zero-fill is durable
-before we move on. `Texture::resize` is rare so the cost is negligible.
+zero-filled `std::vector<std::uint8_t>` of the right size. The Windows GL
+drivers leave the new texture content undefined when given `nullptr`;
+pre-zeroing means a later sampler read sees zeros instead of garbage.
+`Texture::resize` does **not** call `glFinish()` — measurement showed a
+~20 ms stall per texture creation, and crymble-ui creates ~12 layer textures
+per full rebuild, making the cumulative cost ~240 ms per keystroke. The
+`Font::loadGlyph` `glFinish()` (Fix 2) is sufficient for correctness. The
+original analysis assumed `Texture::resize` was rare enough that a
+`glFinish()` there would be negligible; that assumption did not survive
+measurement.
 
 ### 2. `SFML/src/SFML/Graphics/Font.cpp` — `Font::loadGlyph`
 
@@ -103,7 +110,7 @@ Test protocol used:
 - **DO NOT** create multiple `SF::Font` instances expecting they will
   produce identical atlases — each one re-runs the broken upload path. The
   upstream fix is in SFML; until that lands you depend on the patched
-  `sfml-graphics-s.lib`.
+  `sfml-graphics.lib`.
 - The single shared font in `SfmlRenderer` (load once at construction,
   never reload on zoom) was already the right call for a different reason
   (avoiding the reload path's churn) — and it also reduces exposure to

@@ -1,7 +1,7 @@
 require "../spec_helper"
 require "../../src/widgets/menu_item"
 
-# T-030 step 5 (user option B): checkable menu items render the REAL checkbox
+# step 5 (user option B): checkable menu items render the REAL checkbox
 # (box + tristate) via the shared draw_check_glyph, and AUTO-CYCLE their own state
 # on click. Existing `checked: Bool` callers are unchanged (back-compat).
 

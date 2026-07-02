@@ -6,7 +6,7 @@ require "../../src/widgets/combo_box_item"
 require "../../src/widgets/menu"
 require "../../src/widgets/window"
 
-# T-031 @hovered cluster: button / menu_item / combo_box_item / menu read a plain
+# @hovered cluster: button / menu_item / combo_box_item / menu read a plain
 # @hovered ivar in to_primitives and re-render only via a manual mark_needs_render in
 # on_mouse_enter/exit. Making `hovered` a reactive_property means the value is captured
 # while painting, so setting it re-renders automatically -- a new hover path can't

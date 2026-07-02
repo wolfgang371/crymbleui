@@ -16,13 +16,18 @@
 #   - Perf-counter specs are excluded — cv's 2nd ground-truth render per frame inflates the
 #     render counters, which is meaningless to assert on.
 #
+# Also built with -Dverify_bounds: the viewport_cache buffer_origin invariant (whole-valued +
+# always-fitting, one reader / one writer) is a raise at the writer and both composite seams. This is the
+# permanent gate for that invariant on the ScrollView/VMatrix specs — one build carries both flags.
+#
 # Usage: source setup.sh && ./tools/cv-coherency.sh
 set -euo pipefail
 
-crystal spec -Dcache_validation \
+crystal spec -Dcache_validation -Dverify_bounds \
   spec/rendering/cache_validation_spec.cr \
   spec/rendering/cache_validation_widen_spec.cr \
   spec/rendering/cv_non_matrix_oracle_spec.cr \
+  spec/rendering/scroll_view_resize_cv_spec.cr \
   spec/autotest/ \
   spec/widgets/virtual_matrix_rendering_spec.cr \
   spec/widgets/virtual_matrix_black_rows_spec.cr \

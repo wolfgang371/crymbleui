@@ -148,27 +148,11 @@ end
 enum CachePolicy
   Static   # Cache aggressively, rarely invalidate
   Dynamic  # Cache but invalidate on state changes
-  Never    # Always render fresh (menus, popups)
-end
-
-class Menu < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Never  # Menus are always dynamic
-  end
-end
-
-class Button < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Dynamic  # Cache until state changes
-  end
-end
-
-class WindowPanel::Chrome < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Static  # Cache until layout changes
-  end
+  Never    # Always render fresh
 end
 ```
+
+In practice, `Dynamic` is the default for all widgets. `Static` is currently unused by any widget. `Never` is declared by the two widgets that must regenerate every frame: `CursorOverlayWidget` (the cursor highlight band in `VirtualMatrix`) and `SimpleGhostWidget` (the drag-ghost preview). All other widgets inherit `Dynamic`.
 
 ### Cache Invalidation Rules
 
@@ -217,6 +201,33 @@ struct DrawCircle < DrawPrimitive
   property color : Color
   property fill : Bool
 end
+
+struct FillTriangle < DrawPrimitive
+  property p1 : Vec2
+  property p2 : Vec2
+  property p3 : Vec2
+  property color : Color
+end
+
+struct DrawRect < DrawPrimitive  # rectangle outline
+  property bounds : Rect
+  property color : Color
+  property width : Float64
+end
+
+# Clipping — see "Clipping" subsection below
+struct PushClip < DrawPrimitive
+  property rect : Rect
+end
+
+struct PopClip < DrawPrimitive
+end
+
+struct DrawImage < DrawPrimitive
+  getter source : ImageSource
+  property bounds : Rect
+  property color : Color  # tint/alpha; Color.white = no tint
+end
 ```
 
 ### Benefits of Primitive-Based Rendering
@@ -247,31 +258,40 @@ module PrimitiveBuilder
   @primitives : Array(DrawPrimitive)?
 
   # DSL entry point
-  def primitives(&block)
+  def primitives(&block) : Array(DrawPrimitive)
     @primitives = [] of DrawPrimitive
     yield
     @primitives.not_nil!
   end
 
   # DSL methods - append to @primitives
-  def fill_rect(bounds : Rect, color : Color)
-    @primitives.not_nil! << FillRect.new(bounds, color)
-  end
-
+  def fill_rect(bounds : Rect, color : Color) ...
+  # fill_background: like fill_rect but uses ceil(width/height) to cover the
+  # pixel-snapped widget backend when the widget sits on a fractional position
+  # (avoids a 1px transparent strip at the right/bottom edge on some window widths).
+  def fill_background(bounds : Rect, color : Color) ...
   def draw_text(text : String, pos : Vec2, color : Color, font_scale : Int32 = 0)
     size = FontSizing.calculate_size(font_scale)
-    left_offset, top_offset = Widget.font.get_text_offsets(text, size)
-    adjusted_pos = Vec2.new(pos.x - left_offset, pos.y - top_offset)
-    @primitives.not_nil! << DrawText.new(text, adjusted_pos, color, size)
+    if font = Widget.font
+      left_offset, top_offset = font.get_text_offsets(text, size)
+      adjusted_pos = Vec2.new(pos.x - left_offset, pos.y - top_offset)
+      @primitives.not_nil! << DrawText.new(text, adjusted_pos, color, size)
+    else
+      @primitives.not_nil! << DrawText.new(text, pos, color, size)  # fallback: no font loaded
+    end
   end
-
-  def draw_line(from : Vec2, to : Vec2, color : Color, width : Float64 = 1.0)
-    @primitives.not_nil! << DrawLine.new(from, to, color, width)
-  end
-
-  def draw_circle(center : Vec2, radius : Float64, color : Color, fill : Bool = true)
-    @primitives.not_nil! << DrawCircle.new(center, radius, color, fill)
-  end
+  # vcentered_text_y: returns the local Y that vertically centres one text line
+  # in a band by the real ink height (reference_height), not the em size.
+  def vcentered_text_y(band_height : Float64, font_scale : Int32 = 0, band_top : Float64 = 0.0) : Float64 ...
+  def draw_line(from : Vec2, to : Vec2, color : Color, width : Float64 = 1.0) ...
+  def draw_circle(center : Vec2, radius : Float64, color : Color, fill : Bool = true) ...
+  def fill_triangle(p1 : Vec2, p2 : Vec2, p3 : Vec2, color : Color) ...
+  def draw_rect(bounds : Rect, color : Color, width : Float64 = 1.0) ...  # outline
+  # Clipping — push/pop a scissor rect; consumed by the renderer (see "Clipping" below)
+  def push_clip(rect : Rect) ...
+  def pop_clip ...
+  # draw_check_glyph: shared checkbox/checkmark glyph (outline box + state mark).
+  def draw_check_glyph(state : CheckState, rect : Rect, box_color : Color, check_color : Color, ...) ...
 end
 ```
 
@@ -404,50 +424,36 @@ end
 
 ### Layer 3: Container Widgets
 
-Layout children, aggregate their primitives:
+Lay out children; the renderer visits each child's layer independently — the parent does **not** aggregate child primitives into its own return. `VStack` and `HStack` emit only an optional background fill (or an empty array):
 
 ```crystal
 class VStack < Widget
   def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-    # After layout phase has set child.bounds
-    children.flat_map { |child| child.to_primitives(child.bounds) }
+    if color = background_color
+      primitives { fill_background(bounds, color) }
+    else
+      [] of DrawPrimitive
+    end
   end
 end
-
-class HStack < Widget
-  def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-    children.flat_map { |child| child.to_primitives(child.bounds) }
-  end
-end
+# HStack is identical in structure
 ```
 
-### Layer 4: Complex Composites
+### Layer 4: Pure Containers
 
-Mix direct primitives with child aggregation:
+Some complex widgets delegate all painting to specialised child widgets on their own layers and return nothing themselves:
 
 ```crystal
 class WindowPanel < Widget
-  include PrimitiveBuilder
-
+  # Chrome and Content are separate child widgets on separate layers;
+  # WindowPanel itself has nothing to paint.
   def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-    prims = [] of DrawPrimitive
-
-    # Panel chrome (direct primitives)
-    prims += primitives do
-      fill_rect(bounds, @bg_color)
-      fill_rect(title_bar_bounds, @title_bg_color)
-      draw_text(@title, title_pos, @title_color)
-    end
-
-    # Content area (aggregate children)
-    prims += children.flat_map { |child| child.to_primitives(child.bounds) }
-
-    prims
+    [] of DrawPrimitive
   end
 end
 ```
 
-**Key**: Every widget implements `to_primitives()`. Composition is natural.
+**Key**: Every widget has a `to_primitives()` method; containers that delegate entirely to children simply return an empty array.
 
 ## Cache Implementation Strategy
 
@@ -501,8 +507,12 @@ abstract class Widget
     CachePolicy::Dynamic
   end
 
-  # Subclasses implement this - just describe what to draw
-  abstract def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+  # Subclasses override this to describe what to draw.
+  # The base class provides a concrete default (empty array) so pure-container
+  # widgets like WindowPanel need not override it.
+  def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+    [] of DrawPrimitive
+  end
 end
 ```
 
@@ -541,78 +551,17 @@ end
 3. Cache strategy can be changed globally
 4. Simple, declarative approach
 
-### Render Cache (Optional - For Expensive Widgets)
+### Layer-Based Render Caching
 
-Some widgets may additionally cache the rendered texture (after executing primitives):
+Texture-level caching is handled by the layer architecture, not a per-widget `RenderCache` object. Each `Layer` owns a `RenderBackend` (an off-screen texture); the `LayerRenderer` composites all layers onto the window each frame. Per-widget render backends (`widget_backend`) are allocated by the renderer and hold the last-painted pixels for that widget — they are blitted from the blit-plan without re-running `to_primitives` when the widget's primitive cache is still fresh. The `buffer_origin` mechanism within viewport-cache layers handles large virtual grids by keeping only a window of rows/columns in GPU memory and shifting the origin on scroll.
 
-```crystal
-class RenderCache
-  # Map widget → cached texture (optional, for expensive rendering)
-  @texture_cache : Hash(Widget, CachedTexture)
-
-  struct CachedTexture
-    property texture : SF::RenderTexture
-    property valid : Bool
-  end
-
-  def get_or_render(widget : Widget, renderer : SFMLRenderer) : SF::Texture
-    # First, get primitives (may be cached)
-    primitives = widget.get_primitives(widget.bounds)
-
-    # Then, optionally cache texture rendering
-    if widget.cache_policy == CachePolicy::Static
-      entry = @texture_cache[widget]?
-      if entry && entry.valid
-        return entry.texture.texture
-      end
-    end
-
-    # Render primitives to texture
-    texture = render_to_texture(primitives, renderer)
-
-    # Cache texture if static policy
-    if widget.cache_policy == CachePolicy::Static
-      @texture_cache[widget] = CachedTexture.new(texture, true)
-    end
-
-    texture.texture
-  end
-
-  private def render_to_texture(primitives, renderer)
-    texture = SF::RenderTexture.new(...)
-    renderer.render_primitives(primitives)
-    texture
-  end
-end
-```
+See `docs/LAYER_RENDERING_ARCHITECTURE.md` for the full layer tree, blit-plan, and buffer-origin model.
 
 ### Cache Benefits with Primitives
 
 1. **Lightweight**: Primitives are small structs, cheap to cache
 2. **Testable**: Assert on cached primitives without rendering
-3. **Flexible**: Can cache primitives, textures, or both
-4. **Clear invalidation**: Primitive cache vs texture cache
-
-**Example**:
-```crystal
-class Menu < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Never  # Menu primitives always regenerated
-  end
-end
-
-class Button < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Dynamic  # Cache primitives until state changes
-  end
-end
-
-class WindowPanel::Chrome < Widget
-  def cache_policy : CachePolicy
-    CachePolicy::Static  # Cache primitives + texture aggressively
-  end
-end
-```
+3. **Clear invalidation**: Primitive-cache staleness (version key) vs layer re-composite
 
 ## The Resulting Architecture
 
@@ -620,7 +569,7 @@ The primitive-based pipeline is fully in place. The durable shape it settled int
 
 - **DrawPrimitive infrastructure**: a `DrawPrimitive` base with concrete structs (`FillRect`, `DrawText`, …) and the `PrimitiveBuilder` DSL mixin. Every widget implements `to_primitives(bounds)`; the old `render(context)`/`PaintContext` path is gone.
 - **Backend-only renderer**: `SFMLRenderer` executes primitives and knows nothing about widgets.
-- **Cache policies**: a `CachePolicy` enum (`Never`/`Dynamic`/`Static`) on `Widget`, with `Dynamic` the default. Menus and popups are `Never`; window chrome is `Static`. There is no ad-hoc per-widget cache-skipping (`is_a?(Popup)` checks) — policy plus the version-keyed node decide everything.
+- **Cache policies**: a `CachePolicy` enum (`Never`/`Dynamic`/`Static`) on `Widget`, with `Dynamic` the default. `Never` is declared by the two widgets that must regenerate every frame: `CursorOverlayWidget` (cursor highlight bands in `VirtualMatrix`) and `SimpleGhostWidget` (drag-ghost preview). `Static` is currently unused by any widget. All other widgets inherit `Dynamic`. There is no ad-hoc per-widget cache-skipping (`is_a?(Popup)` checks) — policy plus the version-keyed node decide everything.
 
 **Optional optimizations not all enabled by default**: texture caching for expensive widgets, dirty-rectangle tracking, batched primitive rendering, GPU acceleration via alternate backends.
 
@@ -913,11 +862,16 @@ SFML text has built-in padding/offsets that must be handled consistently between
 1. **Measurement** (`Widget.measure_text` in widget.cr, delegates to `SFMLFont#measure_text`):
    ```crystal
    def self.measure_text(text : String, size : Float64) : Size
-     # Delegates to Font implementation (SFMLFont or TestFont)
-     font.measure_text(text, size)
+     return Size.new(0.0, 0.0) unless font = @@font
+     key = {text, size}
+     return cached if cached = @@measure_text_cache[key]?  # per-{text,size} memoization
+     result = font.measure_text(text, size)
      # SFMLFont: width = local_bounds.width, height = font.get_line_spacing (consistent across glyphs)
+     @@measure_text_cache[key] = result
+     result
    end
    ```
+   The cache is a class-level `Hash(Tuple(String,Float64), Size)` initialised at startup and flushed whenever the font changes.
 
 2. **Rendering** (`draw_text` in primitive_builder.cr):
    ```crystal
@@ -925,35 +879,41 @@ SFML text has built-in padding/offsets that must be handled consistently between
    def draw_text(text : String, position : Vec2, color : Color, font_scale : Int32 = 0)
      size = FontSizing.calculate_size(font_scale)
      if font = Widget.font
-       # Delegate to font to get SFML local_bounds offsets
+       # Left offset: text's own local_bounds.left.
+       # Top offset: reference_top(size) — cached per font size using the glyph "Ag",
+       #   so all same-size text shares the same baseline regardless of content.
        left_offset, top_offset = font.get_text_offsets(text, size)
-       # Compensate for SFML offsets so visual glyphs appear at requested position
        adjusted_position = Vec2.new(position.x - left_offset, position.y - top_offset)
        @primitives.not_nil! << DrawText.new(text, adjusted_position, color, size)
+     else
+       @primitives.not_nil! << DrawText.new(text, position, color, size)  # no font loaded
      end
    end
    ```
 
-3. **Clipping** (renderer automatically clips rendering leaves to bounds):
+3. **Clipping** (explicit `PushClip`/`PopClip` primitives in the draw list):
+
+   Clipping is not applied automatically by the renderer — widgets that need to clip their content emit `PushClip`/`PopClip` structs via the `push_clip(rect)` / `pop_clip` DSL helpers in `PrimitiveBuilder`:
+
    ```crystal
-   # In sfml_renderer.cr, before executing primitives:
-   if widget.rendering_leaf? && ctx.is_a?(SFMLPaintContext)
-     ctx.push_clip(widget.bounds)  # Clip to measured bounds
-   end
+   # In a widget's to_primitives:
+   push_clip(clip_rect)
+   # ... primitives that must be clipped ...
+   pop_clip
    ```
 
+   The renderer executes `PushClip`/`PopClip` in the primitive stream as a scissor stack. The `rendering_leaf?` method exists on `Widget` but is not part of the clipping pipeline.
+
 **How it works**:
-- `measure_text` returns visual size: width from `local_bounds.width`, height from `font.get_line_spacing` (consistent across glyphs)
+- `measure_text` returns visual size: width from `local_bounds.width`, height from `font.get_line_spacing` (consistent across glyphs); results are memoized
 - Widget.bounds is sized using measured size plus padding
-- `draw_text` queries `font.get_text_offsets` (which reads `local_bounds.left/top`) and shifts the position so visual glyphs appear at the requested position
-- Visual glyphs render exactly at requested position
-- Text stays within measured bounds (no overflow)
+- `draw_text` calls `font.get_text_offsets`: left comes from the text's `local_bounds.left`; top comes from a per-size reference glyph ("Ag") so all text at the same size shares the same baseline
+- Visual glyphs render exactly at the requested position
 
 **Why Option A**:
 - Simple: One measurement function, one rendering function
-- Safe: Automatic clipping prevents overflow artifacts
 - Consistent: Bounds match actual rendering extent
-- No stale bounds issues: Even if bounds are slightly stale, clipping prevents artifacts
+- Explicit: Clipping is declared by the widget, not inferred by the renderer
 
 **Alternative Options Rejected**:
 - **Option B** (Measure excluding padding, render excluding padding): Would show SFML baseline artifacts
@@ -1006,6 +966,67 @@ Similarly, sprite positions for layer compositing must be rounded (see commit 7f
 sub-pixel sprite positioning caused ghosted text in viewport_cache layers).
 
 **History**: Fixed in commit 20a683b (blurry button text) and commit 7fb1c03 (ghosted text).
+
+## Intrinsic Minimum Size & the WindowPanel Content Floor
+
+`measure(constraints)` answers "how big do I *want* to be." A separate, parallel query —
+`Widget#min_intrinsic_height(width)` — answers "what's the *smallest* height at which I still render
+acceptably." It runs on its **own** recursive chain (not through `BoxConstraints`), because an
+unbounded request mid-compose would be silently clamped: `VStack#measure` turns `INFINITY` into
+`Float64::MAX`, which is `.finite?`, so a greedy widget keyed on `.finite?` never sees "unbounded."
+
+- **Default** = `measure(...).height` — correct for leaves (they can't shrink below their content).
+- **Containers override** to compose children's min the way they stack them: `VStack` sums,
+  `Expanded`/`DropZoneBox` pass through, `TreeNode` = header + (expanded) indented children,
+  `Content` = menubar + padding + body. A container that *forgets* to override falls through to the
+  greedy `measure` default — a `-Dverify_bounds` warning fires when that happens on a widget that has
+  children (the generic missed-container guard).
+- **Shrinkable widgets report a small floor**: a `ScrollView` returns `0` (it scrolls); a fill
+  `VirtualMatrix` returns `ruler + 1 row` (a virtual grid scrolls, so one row is its floor — a
+  generic fact, not app policy). `VirtualMatrix#measure` itself is untouched.
+
+`WindowPanel` uses this so its flexible content (e.g. a data grid) can never be starved to nothing by
+rigid content above it: `panel_min = @content.min_intrinsic_height + chrome`, cached in
+`perform_layout` (recomputed only on a *structural* change — expand/collapse/rebuild — and merely
+READ by the resize fast-path, so a resize frame stays O(1); `@@min_floor_recompute_count` guards
+this). The panel **won't resize below** `panel_min`, and **grows to it before** laying content out
+(so opening a section enlarges the panel in a single pass). Growth is **downward-only** and
+**grow-only** — collapsing a section does NOT shrink the panel back; a `maximized` panel skips the
+floor and clips rather than overflow.
+
+**Both axes.** The same protocol exists for WIDTH — `min_intrinsic_width(height)`: `HStack` sums
+(width is *its* stacking axis; `HStack` also gains the cross-axis `min_intrinsic_height` twin),
+`VStack`/`TreeNode`/`Content` take the MAX (width is their cross axis), `FlowLayout` reports its widest
+single child (it wraps to one-per-row), and width-greedy widgets that fill (`MenuBar`, `ScrollView`,
+fill `VirtualMatrix`) override or they poison the floor (`MenuBar` = Σ its menus; `VirtualMatrix` =
+ruler-col + 1 col). `WindowPanel` floors **and grows-at-build on WIDTH exactly like height**. The
+governing principle (the user's law): **scrolling is OPT-IN** — wrap content in a `ScrollView` (reports
+min 0 on both axes) and the panel can shrink past it while the ScrollView clips/scrolls; otherwise the
+floor guarantees **nothing clips**. The lib never imposes a scrollbar. **Window-boundary caveat**:
+"never clips" holds only while the window can *contain* the content — a `maximized` panel (or a
+free-floating one whose content exceeds the window) clips-to / overflows the window, exactly as the
+height axis already did; the genuinely content-bigger-than-window case is a deferred follow-on
+(auto-collapse chrome under pressure).
+
+**Loose content + relaxation-skip (grow is O(1)).** A panel hands its content a **loose** box
+(`min 0`, `max` = content area), NOT a tight one. So a non-fill body takes its **intrinsic** size (and
+sits top-left with margin), while a fill body (`ScrollView`, statusbar, a full-width `VirtualMatrix`)
+measures to the max and fills — standard loose-constraint semantics. This is what makes a resize *grow*
+cheap: `Widget#can_skip_layout?` skips not only on identical constraints but on a **relaxation the body
+didn't use** — if the last size still fits the new constraints and, in each axis whose max grew, the
+body wasn't already at the old max (i.e. it wasn't filling), the layout can't have changed, so the whole
+content subtree is skipped (zero re-measures). A fill body (size == max) fails the test and re-lays-out,
+correctly. The one exception is a widget whose *arrangement* depends on the available space while its own
+size stays sub-max — a wrapping `FlowLayout` re-packs rows against `max_width` — which would be silently
+skipped; such widgets override `layout_depends_on_available_space? → true` to opt out of the relaxation
+branch (they re-flow on any constraint change). Before this, panel content got a tight width that changed
+every grow-frame ⇒ the entire content tree was re-measured per frame (an ~30%-CPU live-resize cost). Consequence to know: **content no
+longer auto-stretches to the panel width** — use a fill widget (or an explicit width) if you want that.
+Pinned by `spec/rendering/grow_resize_perf_spec.cr` (measure/grow-frame is content-independent).
+
+*Deferred extensions*: a remembered desired-height to shrink back on collapse; growing **upward** /
+clamping when a panel is pinned to the screen bottom (today an over-tall panel's bottom edge can go
+off-screen, recoverable by dragging the title bar up).
 
 ## Event Handling and Input
 

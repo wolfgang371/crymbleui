@@ -208,6 +208,30 @@ module CrymbleUI
       constraints.constrain(Size.new(max_width, total_height))
     end
 
+    # Min height = header + (expanded ? Σ dsl_children.min at the indented width). Mirrors measure's
+    # header + indented-children stacking, composing children's min instead of natural.
+    def min_intrinsic_height(width : Float64) : Float64
+      h = @header_widget.min_intrinsic_height(width)
+      if expanded
+        dsl_children.each do |child|
+          h += child.min_intrinsic_height((width - INDENT).clamp(0.0, width))
+        end
+      end
+      h
+    end
+
+    # Min width = MAX(header, INDENT + each expanded child) — width is the CROSS axis, so MAX (not the Σ
+    # the height version uses); children are indented by INDENT. The width dual.
+    def min_intrinsic_width(height : Float64) : Float64
+      w = @header_widget.min_intrinsic_width(height)
+      if expanded
+        dsl_children.each do |child|
+          w = Math.max(w, INDENT + child.min_intrinsic_width(height))
+        end
+      end
+      w
+    end
+
     # Layout header and children
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       size = measure(constraints)

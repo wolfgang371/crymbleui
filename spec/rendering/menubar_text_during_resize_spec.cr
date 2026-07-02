@@ -39,25 +39,26 @@ describe "MenuBar text during resize" do
     renderer.mouse_down(panel_right_edge, 150.0)
     renderer.render_frame(app)
 
-    # Reset counters to measure just the resize frame
-    renderer.reset_counters
-
     # Drag to resize panel by 50px (DURING resize, before mouse_up)
     renderer.mouse_move(panel_right_edge + 50.0, 150.0)
-
-    # Check dirty_widgets BEFORE render (render clears them)
-    panel_layer = panel.layer.not_nil!
-    dirty_widgets = panel_layer.dirty_widgets.dup  # Copy before render clears it
-    menu_in_dirty = dirty_widgets.any? { |w| w.is_a?(CrymbleUI::Menu) }
-
     renderer.render_frame(app)
 
     # Panel bounds should be updated
     panel.width.should eq(350.0)
 
-    # Verify Menu was in dirty_widgets (the fix adds it during resize)
-    # Without fix (BUG): Only Chrome + MenuBar are dirty, Menu is missing
-    menu_in_dirty.should be_true,
-      "Menu should be in dirty_widgets during resize (dirty: #{dirty_widgets.map(&.class.name).join(", ")})"
+    # The menu text must be VISIBLE during the resize — the original bug blanked it until mouse-up.
+    # renders it via the full-content layout during resize (the Content layer re-renders the
+    # whole menubar; no per-Menu dirty-marking needed). Behaviour check: sample the menu's composited
+    # region for glyph pixels (non-background) — the honest signal, not dirty-set membership.
+    mb = menu.absolute_bounds
+    bg = CrymbleUI::Theme.current.menubar_background
+    text_px = 0
+    ((mb.x.to_i + 2)...(mb.x + mb.width).to_i - 2).each do |px|
+      ((mb.y.to_i + 2)...(mb.y + mb.height).to_i - 2).each do |py|
+        c = renderer.backend.get_pixel(px, py)
+        text_px += 1 if c && c != bg
+      end
+    end
+    text_px.should be > 0
   end
 end

@@ -154,50 +154,30 @@ describe CrymbleUI::Popup do
         end
     end
 
-    describe "#to_primitives" do
-        it "generates background and border primitives" do
+    # the popup is a PURE CONTAINER — to_primitives is empty (no self-fill under
+    # children), the background is supplied to the LAYER (compute_background_for_layer →
+    # layer clear), and the border is a FOREGROUND (drawn over children, at the edges).
+    # A selective re-render is then a pure-container skip that can't wipe clean children.
+    describe "#to_primitives + background/border (pure container)" do
+        it "to_primitives is EMPTY — paints nothing under children" do
             popup = CrymbleUI::Popup.new(width: 200.0, height: 150.0)
-            bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 150.0)
-
-            primitives = popup.to_primitives(bounds)
-
-            # Should have background + border
-            primitives.size.should eq(2)
-            primitives[0].should be_a(CrymbleUI::FillRect)
-            primitives[1].should be_a(CrymbleUI::DrawRect)
+            popup.to_primitives(CrymbleUI::Rect.new(0.0, 0.0, 200.0, 150.0)).should be_empty
         end
 
-        it "background primitive has correct bounds and color" do
+        it "supplies its background to the layer (not a self-fill)" do
             bg_color = CrymbleUI::Color.blue
-            popup = CrymbleUI::Popup.new(
-                width: 200.0,
-                height: 150.0,
-                background_color: bg_color
-            )
-            bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 150.0)
-
-            primitives = popup.to_primitives(bounds)
-            bg = primitives[0].as(CrymbleUI::FillRect)
-
-            bg.bounds.x.should eq(0.0)
-            bg.bounds.y.should eq(0.0)
-            bg.bounds.width.should eq(200.0)
-            bg.bounds.height.should eq(150.0)
-            bg.color.should eq(bg_color)
+            popup = CrymbleUI::Popup.new(width: 200.0, height: 150.0, background_color: bg_color)
+            # compute_background_for_layer returns this → the layer clears to it, so no
+            # under-children self-fill is needed (and can't wipe children on re-render).
+            popup.background_color.should eq(bg_color)
         end
 
-        it "border primitive has correct bounds and color" do
+        it "draws its border as a FOREGROUND (over children), correct bounds and color" do
             border_color = CrymbleUI::Color.red
-            popup = CrymbleUI::Popup.new(
-                width: 200.0,
-                height: 150.0,
-                border_color: border_color
-            )
-            bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 150.0)
-
-            primitives = popup.to_primitives(bounds)
-            border = primitives[1].as(CrymbleUI::DrawRect)
-
+            popup = CrymbleUI::Popup.new(width: 200.0, height: 150.0, border_color: border_color)
+            popup.bounds = CrymbleUI::Rect.new(0.0, 0.0, 200.0, 150.0)
+            popup.has_foreground?.should be_true
+            border = popup.foreground_primitives.find { |p| p.is_a?(CrymbleUI::DrawRect) }.not_nil!.as(CrymbleUI::DrawRect)
             border.bounds.x.should eq(0.0)
             border.bounds.y.should eq(0.0)
             border.bounds.width.should eq(200.0)

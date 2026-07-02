@@ -39,11 +39,18 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
             if color = background_color
                 primitives do
-                    fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), color)
+                    fill_background(bounds, color)
                 end
             else
                 [] of DrawPrimitive
             end
+        end
+
+        # A FlowLayout re-packs its rows against the available width, so a width change can change its
+        # arrangement even when its own size (the widest row) stays sub-max. Opt out of the layout
+        # relaxation-skip: it must re-flow on any constraint change, not just fill it. (See can_skip_layout?.)
+        def layout_depends_on_available_space? : Bool
+            true
         end
 
         # Measure by simulating row packing. Linear in children count.
@@ -88,6 +95,20 @@ module CrymbleUI
 
             size = Size.new(used_width + padding * 2, total_height + padding * 2)
             constraints.constrain(size)
+        end
+
+        # Min width = the WIDEST single child (+ padding) — a FlowLayout wraps, so it can place one child
+        # per row; the floor is the widest child, NOT the packed-into-one-row Σ the greedy measure(INFINITY)
+        # default computes. Height has no override: the default min_intrinsic_height already wraps correctly
+        # at the given width.
+        def min_intrinsic_width(height : Float64) : Float64
+            return padding * 2 if @children.empty?
+            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            widest = 0.0
+            @children.each do |child|
+                widest = Math.max(widest, child.min_intrinsic_width(inner_max_height))
+            end
+            widest + padding * 2
         end
 
         def perform_layout(constraints : BoxConstraints, position : Vec2)

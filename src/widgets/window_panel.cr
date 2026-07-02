@@ -37,6 +37,30 @@ module CrymbleUI
             Rect.new(x, y, width, height)
         end
 
+        # The bounds DESCENDANT layers must be clipped to: the panel rectangle INSIDE
+        # its 1px border. The border is drawn fresh after content (at the panel edges),
+        # so a squeezed/overflowing child (e.g. a VirtualMatrix in a too-short panel)
+        # must be clipped one pixel in, or it overpaints the border. The compositor
+        # discovers this polymorphically (responds_to?) — it never type-checks the panel.
+        def descendant_layer_clip_bounds : Rect
+            Rect.new(x + 1, y + 1, Math.max(0.0, width - 2), Math.max(0.0, height - 2))
+        end
+
+        # A WindowPanel is a compositing z-boundary: its layers (and its descendants')
+        # composite at the panel's z_index. The renderer asks this polymorphically
+        # (find_panel_z_index) instead of type-checking WindowPanel.
+        def compositing_z_index : Int32
+            z_index
+        end
+
+        # A WindowPanel draws a 1px chrome border at its edges, fresh each frame (never
+        # cached, so a resize leaves no ghost border). The renderer asks for it
+        # polymorphically (responds_to? :chrome_border) instead of sniffing the layer id
+        # and downcasting to WindowPanel.
+        def chrome_border : NamedTuple(bounds: Rect, color: Color)
+            {bounds: Rect.new(x, y, width, height), color: border_color}
+        end
+
         # Pull-based layer background: the panel layer clears to the LIVE panel background so a
         # Theme.set recolors it without a rebuild. background_color is the live getter (override-or-theme).
         def compute_background_for_layer(layer : Layer) : Color?
@@ -51,6 +75,52 @@ module CrymbleUI
         # collapses to a size where its content area (width - 2*CONTENT_PADDING)
         # would go negative and feed a negative texture dimension downstream.
         MIN_PANEL_SIZE = 100.0
+
+        # content-aware floor. The panel won't shrink below its content's intrinsic minimum,
+        # so a flexible data grid (e.g. the Shape's matrix) can't be starved to nothing by config
+        # sections above it. content_min depends only on STRUCTURE (which sections are expanded), not
+        # on panel size, so it's recomputed in perform_layout and READ by the resize hot-path — O(1)
+        # per resize frame. The grow is downward-only (no shrink-back; an off-screen bottom is
+        # recoverable by dragging the title bar up).
+        # Extension: a remembered desired-height (shrink-back on collapse); grow-upward when pinned
+        # to the screen bottom.
+        @content_min_height : Float64 = 0.0
+        # The width dual: smallest content width, cached like @content_min_height.
+        @content_min_width : Float64 = 0.0
+
+        # Debug counter: how many times content_min was RECOMPUTED (a structural-change cost). The
+        # resize hot-path must NOT bump it (it reads the cache). Asserted by the perf-budget spec.
+        @@min_floor_recompute_count = 0
+
+        def self.min_floor_recompute_count : Int32
+            @@min_floor_recompute_count
+        end
+
+        def self.reset_min_floor_recompute_count : Nil
+            @@min_floor_recompute_count = 0
+        end
+
+        # Recompute the cached content minimum from the content tree's min_intrinsic_height. Called
+        # from perform_layout (structural-change path), never from the resize fast-path.
+        private def recompute_content_min : Nil
+            content_w = Math.max(0.0, width - CONTENT_PADDING * 2)
+            content_h = Math.max(0.0, height - title_bar_height - CONTENT_PADDING * 2)
+            @content_min_height = @content.min_intrinsic_height(content_w)
+            @content_min_width = @content.min_intrinsic_width(content_h)
+            @@min_floor_recompute_count += 1 # ONE bump covers both walks — the perf-guard counts structural recomputes
+        end
+
+        # Smallest height this panel may have: its content's intrinsic minimum + chrome (title bar +
+        # 2·CONTENT_PADDING, matching Content#measure's inset), never below MIN_PANEL_SIZE.
+        private def panel_min_height : Float64
+            Math.max(MIN_PANEL_SIZE, @content_min_height + title_bar_height + CONTENT_PADDING * 2)
+        end
+
+        # Smallest width this panel may have: its content's intrinsic minimum + 2·CONTENT_PADDING (no title
+        # bar on the width axis), never below MIN_PANEL_SIZE. The width dual of panel_min_height.
+        private def panel_min_width : Float64
+            Math.max(MIN_PANEL_SIZE, @content_min_width + CONTENT_PADDING * 2)
+        end
 
         reactive_property title : String
 
@@ -409,6 +479,37 @@ module CrymbleUI
                 Size.new(width, height)
             end
 
+            # Shared by perform_layout + min_intrinsic_height so the menubar split can't drift.
+            private def split_menubar : {Widget?, Array(Widget)}
+                {@children.find { |c| c.is_a?(MenuBar) }, @children.reject { |c| c.is_a?(MenuBar) }}
+            end
+
+            # Min content-area height: the MenuBar (full panel width, flush) + CONTENT_PADDING below it
+            # + Σ content children's min — mirroring perform_layout's stack, composing min not natural.
+            def min_intrinsic_height(width : Float64) : Float64
+                menubar, content = split_menubar
+                h = 0.0
+                if mb = menubar
+                    h += mb.min_intrinsic_height(panel.width) + CONTENT_PADDING
+                end
+                content.each { |child| h += child.min_intrinsic_height(width) }
+                h
+            end
+
+            # Min content-area WIDTH = MAX(menubar, content children) min-width — width is the CROSS axis so
+            # MAX (not the Σ the height version uses); the MenuBar lays out edge-to-edge so it contributes
+            # its min-width directly (no CONTENT_PADDING transpose — that was the vertical gap below it).
+            # The width dual.
+            def min_intrinsic_width(height : Float64) : Float64
+                menubar, content = split_menubar
+                w = 0.0
+                if mb = menubar
+                    w = Math.max(w, mb.min_intrinsic_width(height))
+                end
+                content.each { |child| w = Math.max(w, child.min_intrinsic_width(height)) }
+                w
+            end
+
             # Content computes its own position internally (below title bar + padding)
             # based on panel.title_bar_height and MenuBar presence.
             #
@@ -426,8 +527,7 @@ module CrymbleUI
 
             def perform_layout(constraints : BoxConstraints, position : Vec2)
                 # Separate menubar from other content (like Window does)
-                menubar = @children.find { |c| c.is_a?(MenuBar) }
-                content = @children.reject { |c| c.is_a?(MenuBar) }
+                menubar, content = split_menubar
 
                 # Content area positioning depends on whether MenuBar exists
                 content_x = CONTENT_PADDING
@@ -463,9 +563,13 @@ module CrymbleUI
                 # Layout content widgets below menubar, stacking vertically
                 content_height = @bounds.height - current_y
                 content.each do |child|
-                    # Each widget gets remaining height, positioned at current_y
+                    # Each widget gets the content area as a LOOSE box (max = content width/remaining
+                    # height, min 0). Loose — not tight — so a non-fill body takes its intrinsic size and
+                    # a resize grow becomes a can_skip_layout? no-op (it didn't use the slack); a fill body
+                    # (ScrollView, statusbar) still measures to the max and re-lays-out. This is what keeps
+                    # a floored panel's grow O(1) instead of re-measuring the whole content tree per frame.
                     child_constraints = BoxConstraints.new(
-                        min_width: @bounds.width,
+                        min_width: 0.0,
                         max_width: @bounds.width,
                         min_height: 0.0,
                         max_height: content_height
@@ -541,9 +645,7 @@ module CrymbleUI
         def perform_layout(constraints : BoxConstraints, position : Vec2)
             # Panel is positioned absolutely at x, y
             # (ignoring position parameter - panels float)
-            @bounds = Rect.new(x, y, width, height)
-
-            # Update internal layer
+            # Update internal layer (pull-based bounds reflect the live width/height)
             if layer = @internal_layer
                 # Sync layer z_index with panel z_index (important after reconciliation)
                 layer.z_index = z_index
@@ -557,14 +659,31 @@ module CrymbleUI
                 layer.widgets << @content
             end
 
-            # Layout chrome (title bar area)
+            # recompute the content floor (structure may have changed — e.g. a section was
+            # expanded) and grow the panel to it BEFORE laying out the chrome or content, so BOTH are
+            # laid out at the settled width in a single pass — the Shape enlarges when you open a treenode.
+            # Skip while maximized (the window owns the size; let content clip rather than overflow) and
+            # while interactively resizing (the resize clamp owns the height then).
+            recompute_content_min
+            unless maximized || interaction_mode == InteractionMode::Resizing
+                floor = panel_min_height
+                self.height = floor if height < floor
+                # X: width grows-at-build exactly like height, so chrome never clips even when the
+                # panel is built/rebuilt narrower than its content (window-permitting). Same guard.
+                wfloor = panel_min_width
+                self.width = wfloor if width < wfloor
+            end
+
+            # Layout chrome (title bar area) — independent of content height, at the now-settled width.
+            # MUST come after the width floor-grow above: laying the title bar out at the pre-grow width
+            # left a stale background strip on the right when a panel floored wider than its built/zoomed
+            # width (the title-bar fill is sized from panel.width).
             chrome_constraints = BoxConstraints.tight(Size.new(width, title_bar_height))
             @chrome.layout(chrome_constraints, Vec2.zero)
+            @bounds = Rect.new(x, y, width, height)
 
-            # Layout content (below title bar with padding)
-            # Content widget handles its own children layout (computes its own position)
-            content_constraints = BoxConstraints.tight(Size.new(width, height))
-            @content.layout(content_constraints, Vec2.zero)
+            # Layout content (below title bar with padding); Content positions its own children
+            @content.layout(BoxConstraints.tight(Size.new(width, height)), Vec2.zero)
 
             # Track position when layout happened (for drag offset calculation)
             @children_layout_position = Vec2.new(x, y)
@@ -822,35 +941,37 @@ module CrymbleUI
                 # Update size/position based on resize edge
                 # (writes use in-place .set: hot resize loop)
                 rsb = resize_start_bounds
+                min_h = panel_min_height # cached content floor (recomputed only on structural relayout)
+                min_w = panel_min_width  # the width dual (cached; the resize fast-path reads it)
                 case resize_edge
                 when ResizeEdge::Right
-                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    @width.set((rsb.width + dx).clamp(min_w, Float64::MAX))
                 when ResizeEdge::Bottom
-                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    @height.set((rsb.height + dy).clamp(min_h, Float64::MAX))
                 when ResizeEdge::Left
-                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_width = (rsb.width - dx).clamp(min_w, Float64::MAX)
                     @x.set(rsb.x + (rsb.width - new_width))
                     @width.set(new_width)
                 when ResizeEdge::Top
-                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_height = (rsb.height - dy).clamp(min_h, Float64::MAX)
                     @y.set(rsb.y + (rsb.height - new_height))
                     @height.set(new_height)
                 when ResizeEdge::BottomRight
-                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
-                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    @width.set((rsb.width + dx).clamp(min_w, Float64::MAX))
+                    @height.set((rsb.height + dy).clamp(min_h, Float64::MAX))
                 when ResizeEdge::BottomLeft
-                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_width = (rsb.width - dx).clamp(min_w, Float64::MAX)
                     @x.set(rsb.x + (rsb.width - new_width))
                     @width.set(new_width)
-                    @height.set((rsb.height + dy).clamp(MIN_PANEL_SIZE, Float64::MAX))
+                    @height.set((rsb.height + dy).clamp(min_h, Float64::MAX))
                 when ResizeEdge::TopRight
-                    @width.set((rsb.width + dx).clamp(MIN_PANEL_SIZE, Float64::MAX))
-                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    @width.set((rsb.width + dx).clamp(min_w, Float64::MAX))
+                    new_height = (rsb.height - dy).clamp(min_h, Float64::MAX)
                     @y.set(rsb.y + (rsb.height - new_height))
                     @height.set(new_height)
                 when ResizeEdge::TopLeft
-                    new_width = (rsb.width - dx).clamp(MIN_PANEL_SIZE, Float64::MAX)
-                    new_height = (rsb.height - dy).clamp(MIN_PANEL_SIZE, Float64::MAX)
+                    new_width = (rsb.width - dx).clamp(min_w, Float64::MAX)
+                    new_height = (rsb.height - dy).clamp(min_h, Float64::MAX)
                     @x.set(rsb.x + (rsb.width - new_width))
                     @y.set(rsb.y + (rsb.height - new_height))
                     @width.set(new_width)
@@ -861,52 +982,17 @@ module CrymbleUI
                 @bounds = Rect.new(x, y, width, height)
                 # Pull-based: layer.bounds auto-updates from compute_bounds_for_layer
 
-                # Update Chrome bounds directly (flex widget - width changed)
-                @chrome.bounds = Rect.new(0.0, 0.0, width, title_bar_height)
-                # Invalidate background - old cached background doesn't cover new width
-                @chrome.background_backend = nil
-                @chrome.mark_needs_render
-
-                # Update Content bounds directly (position stays same, size changes)
-                content_x = CONTENT_PADDING
-                content_y = if @content.children.any? { |c| c.is_a?(MenuBar) }
-                  title_bar_height  # MenuBar: no padding above
-                else
-                  title_bar_height + CONTENT_PADDING  # No MenuBar: add padding
-                end
-                content_width = Math.max(0.0, width - (CONTENT_PADDING * 2))
-                content_height = Math.max(0.0, height - title_bar_height - (CONTENT_PADDING * 2))
-                @content.bounds = Rect.new(content_x, content_y, content_width, content_height)
-
-                # Layout MenuBar with new panel width (edge-to-edge, must extend)
-                # Don't layout all Content children - too expensive at 60fps
-                menubar = @content.children.find { |c| c.is_a?(MenuBar) }
-                if mb = menubar
-                    # MenuBar gets full panel width, flexible height
-                    menubar_constraints = BoxConstraints.new(
-                        min_width: width,
-                        max_width: width,
-                        min_height: 0.0,
-                        max_height: Math.max(0.0, height - title_bar_height)
-                    )
-                    # Position at negative offset to account for Content padding
-                    mb.layout(menubar_constraints, Vec2.new(-CONTENT_PADDING, mb.bounds.y))
-                    # Invalidate background - old cached background doesn't cover new width
-                    mb.background_backend = nil
-                    mb.mark_needs_render
-                    # Also mark Menu children dirty so their text labels render during resize
-                    mb.children.each(&.mark_needs_render)
-                end
-
-                # Notify layer owners of resize. Pass both the cumulative delta
-                # (for panel-spanning layers) and the panel's CURRENT content
-                # rectangle (so narrow inner layers clip to the live edge instead
-                # of over-shrinking by the whole panel delta).
-                delta_width = width - resize_start_bounds.width
-                delta_height = height - resize_start_bounds.height
-                delta_x = x - resize_start_bounds.x
-                delta_y = y - resize_start_bounds.y
-                @content.notify_layer_owners_resize_move(delta_width, delta_height, delta_x, delta_y, content_clip_bounds)
+                # Coalesce the re-layout to ONCE PER FRAME, and keep the render SELECTIVE. The event
+                # loop drains every pending mouse-move then renders once, so laying out per event ran
+                # the full content layout dozens of times per frame (measures exploded, drag jerky).
+                # And mark_needs_layout would force the panel layer to NeedsLayout → a FULL render that
+                # re-composites every cached widget each frame (the 400-button re-blit cost). Instead:
+                # flag the panel + mark_needs_render; pre_render_flush runs layout_children ONCE per
+                # frame, before the layer collects its dirty widgets. layout_children marks only the
+                # children whose bounds actually changed (the revealed/reflowed ones), so the layer
+                # renders SELECTIVELY — not a full re-blit.
+                @resize_relayout_pending = true
+                mark_needs_render
             end
         end
 
@@ -915,13 +1001,9 @@ module CrymbleUI
             was_dragging = interaction_mode == InteractionMode::Dragging
             was_resizing = interaction_mode == InteractionMode::Resizing
 
-            # Notify layer owners that resize ended (cleanup state)
-            if was_resizing
-              @content.notify_layer_owners_resize_end
-            end
-
             # Update children positions/sizes after drag or resize
             if was_dragging || was_resizing
+                @resize_relayout_pending = false # the layout below + the on-release full layout cover it
                 layout_children
             end
 
@@ -1138,6 +1220,20 @@ module CrymbleUI
         # Moves panel by relative offset and updates child positions
         def move_by(dx : Float64, dy : Float64)
             move_to(x + dx, y + dy)
+        end
+
+        # Set by on_mouse_move during a resize drag; consumed once per frame by pre_render_flush.
+        @resize_relayout_pending : Bool = false
+
+        # Once-per-frame coalescing hook (called by the renderer before the layer collects its
+        # dirty widgets). A fast resize drag fires many mouse-moves between frames; each only flags
+        # this, so the full content layout runs exactly ONCE per frame here — and because
+        # layout_children marks only changed children needs_render, the layer renders selectively.
+        def pre_render_flush
+            if @resize_relayout_pending
+                @resize_relayout_pending = false
+                layout_children
+            end
         end
 
         # Re-layout children within the panel (must match perform_layout logic)

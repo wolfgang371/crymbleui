@@ -11,17 +11,17 @@ VirtualMatrix is a high-performance virtual grid widget that renders only the ce
 ## File Structure
 
 ```
-src/widgets/virtual_matrix.cr              (1910 lines) Core class, layout, cell management
-src/widgets/virtual_matrix/adapter.cr      (114 lines)  MatrixAdapter interface for data binding
-src/widgets/virtual_matrix/cursor.cr       (312 lines)  Cursor navigation, snap_to_cursor, proxy focus
-src/widgets/virtual_matrix/cursor_overlay.cr (106 lines) CursorOverlayWidget (highlight bands)
-src/widgets/virtual_matrix/event_handlers.cr (387 lines) Mouse/keyboard/text event dispatch
-src/widgets/virtual_matrix/ruler_widget.cr (286 lines)  4 ruler widgets (col/row/corner/corner_row_strip)
-src/widgets/virtual_matrix/sticky_reposition.cr (223 lines) Sticky cell screen-space repositioning
-src/widgets/virtual_matrix/sticky_math.cr  (109 lines)  Pure geometry: visibility ranges, sticky offsets
-src/widgets/virtual_matrix/blit_plan.cr    (154 lines)  Fast-path blit plans for sticky cells
+src/widgets/virtual_matrix.cr              (2184 lines) Core class, layout, cell management
+src/widgets/virtual_matrix/adapter.cr      (199 lines)  MatrixAdapter interface for data binding
+src/widgets/virtual_matrix/cursor.cr       (327 lines)  Cursor navigation, snap_to_cursor, proxy focus
+src/widgets/virtual_matrix/cursor_overlay.cr (152 lines) CursorOverlayWidget (highlight bands)
+src/widgets/virtual_matrix/event_handlers.cr (639 lines) Mouse/keyboard/text event dispatch
+src/widgets/virtual_matrix/ruler_widget.cr (188 lines)  4 ruler widgets (col/row/corner/corner_row_strip)
+src/widgets/virtual_matrix/sticky_reposition.cr (240 lines) Sticky cell screen-space repositioning
+src/widgets/virtual_matrix/sticky_math.cr  (275 lines)  Pure geometry: visibility ranges, sticky offsets
+src/widgets/virtual_matrix/blit_plan.cr    (426 lines)  Fast-path blit plans for sticky cells
                                            ─────────
-                                           3601 lines total
+                                           4630 lines total
 ```
 
 ## Class Structure
@@ -76,13 +76,13 @@ VirtualMatrix uses five rendering layers, each with different scroll behavior:
 Layer Stack (z-index ascending)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 z = base+1    content_layer          viewport_cache, scrolls X+Y
-z = base+2..6 ScrollView layers      sticky_row, sticky_col, sticky_corner, scrollbars
+z = base+3..7 ScrollView layers      internal, sticky_row, sticky_col, sticky_corner, scrollbars
 z = base+8    cursor_overlay_layer   non-scrolling, additive/subtractive blend
 
-ScrollView provides 3 sticky sub-layers:
-  sticky_row_layer       scrolls X only, fixed Y   (column headers + ColumnRulerWidget)
-  sticky_col_layer       scrolls Y only, fixed X   (row headers + RowRulerWidget)
-  sticky_corner_layer    no scroll, fixed both      (corner cells + CornerRulerWidget + CornerRowStripWidget)
+ScrollView provides 3 sticky sub-layers (VM passes base_z+2 as parent_z; SV adds +1..+5):
+  sticky_row_layer       scrolls X only, fixed Y   (column headers + ColumnRulerWidget)  z = base+4
+  sticky_col_layer       scrolls Y only, fixed X   (row headers + RowRulerWidget)        z = base+5
+  sticky_corner_layer    no scroll, fixed both      (corner cells + CornerRulerWidget + CornerRowStripWidget) z = base+6
 ```
 
 ### Layer Ownership and Scroll Behavior
@@ -116,6 +116,34 @@ ScrollView provides 3 sticky sub-layers:
 **Sticky layers**: Owned by the child ScrollView. Cells on sticky layers are repositioned to screen-space coordinates every frame (via `reposition_sticky_cells` or the fast-path `compute_sticky_blit_plans`), because these layers do NOT use viewport_cache.
 
 **cursor_overlay_layer**: Owned directly by VirtualMatrix. Renders cross-hair highlight bands via CursorOverlayWidget using additive blend (dark themes, positive `cursor_highlight_delta`) or subtractive blend (light themes, negative delta). Transparent background color `(0,0,0,0)`.
+
+### Buffer-origin contract — one reader, one writer
+
+A `viewport_cache` layer's `buffer_origin` (the content coordinate at buffer pixel `(0,0)`) obeys one
+invariant: it is **always whole-valued** and positioned so the viewport **fits** the buffer at it — per
+axis `(scroll − origin).to_i ∈ [0, buffer − ceil(viewport)]`, degenerating to `floor(scroll)` only at zero
+margin. Whole-valued is load-bearing: the render path subtracts `buffer_origin.to_i` (truncate-first) while
+the composite truncates `(scroll − buffer_origin)` (subtract-first) — they agree only for an integer origin,
+else a 1px seam.
+
+The invariant is kept correct-by-construction by collapsing the math to **one reader and one writer**:
+
+- **One reader** — `Layer#viewport_sample_origin(bw, bh, vw, vh)`: THE composite authority for "where in the
+  buffer does the viewport start". Every composite path routes through it — `SFMLRenderer`, the
+  `TestRenderer`, the `immediate_mode_only` ground-truth blit, and the `-Dcache_validation` instrument
+  (`validate_immediate_mode`) — so no hand-mirrored copy can drift (the 2026-06-05 "content offset" hunt
+  ended with a correct compositor and a drifted capture mirror; that class is now structurally impossible).
+  The `.clamp` inside it is a **defensive memory-safety bound** on the texture read (prevents an OOB
+  `blit_region`), **provably identity** under the invariant — not a behavioral fallback.
+- **One writer** — `Layer#compute_buffer_origin(bw, bh)` computes the always-whole, always-fitting origin
+  (preserving the `cache_extent` quantization grid away from capacity); `recenter_origin!` is the only
+  public mutator and all first-render / needs_clear / recenter sites funnel through it.
+- **Derived predicate** — the recenter gate `Layer#viewport_fits_buffer?` is *derived from the reader*
+  (clamped == unclamped), so "gate says fits" ⟺ "composite won't clamp"; they cannot diverge.
+
+Enforcement: under `-Dverify_bounds` the writer asserts the fit at the source and both composite seams
+`raise` if a `viewport_cache` composite ever clamps (the invariant broke). CI runs the ScrollView/VMatrix
+cache-validation job with this flag on.
 
 ## Three Coordinate Systems
 
@@ -519,9 +547,12 @@ The newly-exposed area then retains whatever was there before (old highlight
 pixels, or uninitialized memory for a fresh texture) — producing a cursor
 band that stops one row short, or a ghost row below the data.
 
-`setup_cursor_overlay_layer` defends against this by comparing the new
-`overlay_bounds` against `last_rendered_bounds`; if either dimension grew,
-it explicitly calls `mark_needs_clear_and_render`.
+`setup_cursor_overlay_layer` defends against this declaratively: it sets
+`@cursor_overlay_layer.not_nil!.clear_on_grow = true`. The renderer's
+size-change handler checks `Layer#grew?` (compares `@last_rendered_bounds`
+against current bounds) and clears the whole layer on a grow before the
+partial painter runs. This is a generic Layer property, not a per-widget
+guard — any partial-painter layer can opt in the same way.
 
 ## Interactive Resize
 
@@ -705,7 +736,7 @@ Per-resize (invalidated by invalidate_dimension_caches):
   @cached_sticky_row_count/col_count Int32  Derived sticky counts
 
 Per-scroll (keyed on bsearch boundary):
-  @last_col_sticky_key -> @last_col_sticky_result    Full StickyMath output
+  @last_col_sticky_key -> @last_col_sticky_result    sticky_fast() output (5th element: ShiftedSet, not Set(Int32))
   @last_row_sticky_key -> @last_row_sticky_result
   @cached_first_visible_cols/rows                    calc_visibles output
 
@@ -729,7 +760,7 @@ Per-scroll (creation/destruction regions):
 
 2. **Cells have fixed content-space positions**: Content cells are positioned at `ruler_offset + physical_cumulative[index]` and never move. The viewport_cache compositor handles viewport shifting. Only sticky cells need repositioning per frame.
 
-3. **update_visible_cells is self-throttling**: It is called synchronously on each scroll event but, via the `@last_visible_key` cell-set gate, does no create/destroy work when the visible index set is unchanged, so per-event calls are inexpensive (the old `@pending_scroll_update` batching flag was removed). Per-cell content re-render is decided separately at render time by the Pull/SlotBuffer per-slot check.
+3. **Scroll cell-management is coalesced to once-per-frame**: The scrollbar thumb path (`sync_from_scroll_view`) is deferred — it applies the compositing offset immediately but only sets `@pending_scroll_update`; `pre_render_flush` drains it once per frame, calling `update_visible_cells` exactly once for the scroll position the user actually sees. The wheel/snap path (`apply_scroll`) calls `update_visible_cells` synchronously because wheel events are discrete. Within `update_visible_cells` the `@last_visible_key` cell-set gate skips create/destroy work entirely when the visible index set is unchanged. Per-cell content re-render is decided separately at render time by the Pull/SlotBuffer per-slot check.
 
 4. **Sticky cells use screen-space coordinates**: Sticky layers are non-viewport_cache. Cells on these layers must be manually positioned using true content positions minus scroll_offset (for the non-fixed dimension).
 

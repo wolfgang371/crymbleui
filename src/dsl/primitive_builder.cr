@@ -30,6 +30,18 @@ module CrymbleUI
       @primitives.not_nil! << FillRect.new(bounds, color)
     end
 
+    # Fill a widget's ENTIRE background. Use this — not fill_rect(Rect.new(0,0,bounds.width,
+    # bounds.height)) — for a full-area background. The widget_backend is pixel-snapped to
+    # floor(abs_right)-floor(abs_left), which is up to 1px WIDER than the logical bounds.width when
+    # the widget sits on a fractional position (e.g. a half-pixel from an Expanded 50/50 split). A
+    # fill of the logical width then leaves that last column transparent — a 1px white "strip" at the
+    # widget's right/bottom edge that blinks in at the window widths where the split lands on x.5.
+    # ceil covers the snapped backend in every case (ceil(bounds.width) >= widget_width); the fill is
+    # clamped to the backend, so it never bleeds onto a sibling.
+    def fill_background(bounds : Rect, color : Color)
+      @primitives.not_nil! << FillRect.new(Rect.new(0.0, 0.0, bounds.width.ceil, bounds.height.ceil), color)
+    end
+
     # Draw text at a position with automatic SFML offset compensation
     #
     # SFML's sf::Text has internal offsets (local_bounds.left/top) that shift where

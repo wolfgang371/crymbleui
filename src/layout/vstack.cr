@@ -24,7 +24,7 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
             if color = background_color
                 primitives do
-                    fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), color)
+                    fill_background(bounds, color)
                 end
             else
                 [] of DrawPrimitive
@@ -60,6 +60,31 @@ module CrymbleUI
             # Add padding to total size
             size = Size.new(max_width + padding * 2, total_height + padding * 2)
             constraints.constrain(size)
+        end
+
+        # Min height = Σ children.min at the padded inner width + spacing + padding — mirrors measure's
+        # stacking, composing children's min instead of natural. Own chain, so no INFINITY→MAX clamp.
+        def min_intrinsic_height(width : Float64) : Float64
+            return padding * 2 if @children.empty?
+            inner_max_width = (width - padding * 2).clamp(0.0, Float64::MAX)
+            total_height = 0.0
+            @children.each_with_index do |child, index|
+                total_height += child.min_intrinsic_height(inner_max_width)
+                total_height += spacing if index < @children.size - 1
+            end
+            total_height + padding * 2
+        end
+
+        # Min width = MAX child min-width at the padded inner height (width is the CROSS axis of a vertical
+        # stack — mirrors measure's max_width; no spacing). The width dual of min_intrinsic_height.
+        def min_intrinsic_width(height : Float64) : Float64
+            return padding * 2 if @children.empty?
+            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            max_width = 0.0
+            @children.each do |child|
+                max_width = Math.max(max_width, child.min_intrinsic_width(inner_max_height))
+            end
+            max_width + padding * 2
         end
 
         # Layout children vertically with flex support

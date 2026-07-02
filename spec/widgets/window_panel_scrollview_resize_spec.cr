@@ -45,6 +45,7 @@ describe "WindowPanel with ScrollView resize" do
       delta_height = -50.0
       new_point = CrymbleUI::Vec2.new(resize_point.x + delta_width, resize_point.y + delta_height)
       panel.on_mouse_move(new_point)
+      panel.pre_render_flush # resize layout is deferred to the once-per-frame pre_render_flush
 
       # Get updated layer bounds during resize
       resized_layer_bounds = scroll.layer.not_nil!.bounds
@@ -104,6 +105,7 @@ describe "WindowPanel with ScrollView resize" do
       # Resize by growing
       new_point = CrymbleUI::Vec2.new(resize_point.x + 100.0, resize_point.y + 100.0)
       panel.on_mouse_move(new_point)
+      panel.pre_render_flush # resize layout is deferred to the once-per-frame pre_render_flush
 
       # Layer position should NOT change during resize
       resized_layer_x = scroll.layer.not_nil!.bounds.x
@@ -142,6 +144,7 @@ describe "WindowPanel with ScrollView resize" do
       # Shrink panel significantly
       new_point = CrymbleUI::Vec2.new(resize_point.x - 150.0, resize_point.y - 100.0)
       panel.on_mouse_move(new_point)
+      panel.pre_render_flush # resize layout is deferred to the once-per-frame pre_render_flush
 
       # Get layer bounds
       layer_bounds = scroll.layer.not_nil!.bounds

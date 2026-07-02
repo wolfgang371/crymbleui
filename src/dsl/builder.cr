@@ -269,6 +269,7 @@ module CrymbleUI
                 width : Float64? = nil,
                 id : String? = nil,
                 summary : (Set(Int32) -> String)? = nil,
+                text_background_colors : Array(Color)? = nil,
                 &block : Set(Int32) -> Nil
             )
                 ensure_container_stack
@@ -278,6 +279,7 @@ module CrymbleUI
                     width: width,
                     id: id,
                     summary: summary,
+                    text_background_colors: text_background_colors,
                     &block
                 )
                 if @container_stack && !@container_stack.not_nil!.empty?
@@ -292,7 +294,8 @@ module CrymbleUI
                 selected : Set(Int32),
                 width : Float64? = nil,
                 id : String? = nil,
-                summary : (Set(Int32) -> String)? = nil
+                summary : (Set(Int32) -> String)? = nil,
+                text_background_colors : Array(Color)? = nil
             )
                 ensure_container_stack
                 widget = MultiComboBox.new(
@@ -300,7 +303,8 @@ module CrymbleUI
                     selected: selected,
                     width: width,
                     id: id,
-                    summary: summary
+                    summary: summary,
+                    text_background_colors: text_background_colors
                 )
                 if @container_stack && !@container_stack.not_nil!.empty?
                     @container_stack.not_nil!.last.add_child(widget)

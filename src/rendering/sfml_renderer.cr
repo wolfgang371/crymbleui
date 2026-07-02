@@ -8,7 +8,6 @@ require "../core/font_sizing"
 require "../input/shortcut_manager"
 require "../input/focus_manager"
 require "../widgets/window_panel"
-require "../widgets/popup"
 require "./sfml_paint_context"
 require "./sfml_font"
 require "./sfml_clipboard"
@@ -269,14 +268,14 @@ module CrymbleUI
       clip_height = layer.bounds.height.ceil.to_i
 
       # Clip to ancestor panel bounds — layers must not extend beyond their panel
-      if panel_bounds = find_ancestor_panel_bounds(layer)
-        panel_right = panel_bounds.x + panel_bounds.width
-        panel_bottom = panel_bounds.y + panel_bounds.height
-        if layer.bounds.x + clip_width > panel_right
-          clip_width = Math.max(0, (panel_right - layer.bounds.x).ceil.to_i)
+      if clip_bounds = find_descendant_clip_bounds(layer)
+        clip_right = clip_bounds.x + clip_bounds.width
+        clip_bottom = clip_bounds.y + clip_bounds.height
+        if layer.bounds.x + clip_width > clip_right
+          clip_width = Math.max(0, (clip_right - layer.bounds.x).ceil.to_i)
         end
-        if layer.bounds.y + clip_height > panel_bottom
-          clip_height = Math.max(0, (panel_bottom - layer.bounds.y).ceil.to_i)
+        if layer.bounds.y + clip_height > clip_bottom
+          clip_height = Math.max(0, (clip_bottom - layer.bounds.y).ceil.to_i)
         end
       end
 
@@ -305,109 +304,52 @@ module CrymbleUI
         window.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
       end
 
-      # Draw borders for panels and popups if this layer belongs to them
-      # Borders are NOT cached - drawn fresh each frame to avoid ghost borders during resize
-
-      # Detect panel layers by ID (layer.id starts with "panel_")
-      if layer.id.starts_with?("panel_")
-        # Find the panel widget (parent of Chrome/Content widgets in layer)
-        if chrome = layer.widgets.first?
-          if panel = chrome.parent.as?(WindowPanel)
-            draw_panel_border(window, panel)
-          end
-        end
-      end
-
-      # Detect popup layers by ID (layer.id starts with "popup_")
-      if layer.id.starts_with?("popup_")
-        # Find the popup widget (first widget in layer.widgets)
-        if popup_widget = layer.widgets.first?
-          if popup = popup_widget.as?(Popup)
-            draw_popup_border(window, popup)
-          end
-        end
+      # Draw the chrome border (e.g. a WindowPanel's) fresh each frame — NOT cached, so a
+      # resize leaves no ghost border. Asked polymorphically (responds_to? :chrome_border),
+      # not by sniffing the layer id + downcasting. A layer's owner_widget is the widget that
+      # owns it, so this fires once for the panel's own layer and never for its children's.
+      # (Popup borders are drawn by Popup#foreground_primitives, after its children.)
+      if (owner = layer.owner_widget) && owner.responds_to?(:chrome_border)
+        draw_chrome_border(window, owner.chrome_border)
       end
     end
 
-    # Find ancestor WindowPanel bounds for compositor clipping.
-    # Returns nil for root/overlay layers (no panel ancestor).
-    private def find_ancestor_panel_bounds(layer : Layer) : Rect?
-      widget = layer.owner_widget
-      while widget
-        if widget.is_a?(WindowPanel)
-          return widget.compute_bounds_for_layer(widget.layer.not_nil!)
-        end
-        widget = widget.parent
-      end
-      nil
-    end
+    # Descendant-layer clipping lives in the shared LayerRenderer
+    # (find_descendant_clip_bounds), which asks the ancestor chain polymorphically
+    # (responds_to? :descendant_layer_clip_bounds) — a WindowPanel returns its interior
+    # so content can't overpaint the border. No type-checking of concrete widgets here.
 
-    # Draw panel border directly on window (not cached in layer)
-    # Draw as 4 separate rectangles instead of outline_thickness for pixel-perfect alignment
-    private def draw_panel_border(window : SF::RenderWindow, panel : WindowPanel)
-      border_color = to_sf_color(panel.border_color)
-      x = panel.x.to_f32
-      y = panel.y.to_f32
-      w = panel.width.to_f32
-      h = panel.height.to_f32
+    # Draw a 1px chrome border directly on the window (not cached in any layer).
+    # 4 separate rectangles instead of outline_thickness, for pixel-perfect alignment.
+    private def draw_chrome_border(window : SF::RenderWindow, border : NamedTuple(bounds: Rect, color: Color))
+      color = to_sf_color(border[:color])
+      x = border[:bounds].x.to_f32
+      y = border[:bounds].y.to_f32
+      w = border[:bounds].width.to_f32
+      h = border[:bounds].height.to_f32
 
       # Top edge
       top = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
       top.position = SF.vector2f(x, y)
-      top.fill_color = border_color
+      top.fill_color = color
       window.draw(top)
 
       # Bottom edge
       bottom = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
       bottom.position = SF.vector2f(x, y + h - 1.0_f32)
-      bottom.fill_color = border_color
+      bottom.fill_color = color
       window.draw(bottom)
 
       # Left edge
       left = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
       left.position = SF.vector2f(x, y)
-      left.fill_color = border_color
+      left.fill_color = color
       window.draw(left)
 
       # Right edge
       right = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
       right.position = SF.vector2f(x + w - 1.0_f32, y)
-      right.fill_color = border_color
-      window.draw(right)
-    end
-
-    # Draw popup border directly on window (not cached in layer)
-    # Draw as 4 separate rectangles for pixel-perfect alignment
-    private def draw_popup_border(window : SF::RenderWindow, popup : Popup)
-      border_color = to_sf_color(popup.border_color)
-      abs_bounds = popup.absolute_bounds
-      x = abs_bounds.x.to_f32
-      y = abs_bounds.y.to_f32
-      w = abs_bounds.width.to_f32
-      h = abs_bounds.height.to_f32
-
-      # Top edge
-      top = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
-      top.position = SF.vector2f(x, y)
-      top.fill_color = border_color
-      window.draw(top)
-
-      # Bottom edge
-      bottom = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
-      bottom.position = SF.vector2f(x, y + h - 1.0_f32)
-      bottom.fill_color = border_color
-      window.draw(bottom)
-
-      # Left edge
-      left = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
-      left.position = SF.vector2f(x, y)
-      left.fill_color = border_color
-      window.draw(left)
-
-      # Right edge
-      right = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
-      right.position = SF.vector2f(x + w - 1.0_f32, y)
-      right.fill_color = border_color
+      right.fill_color = color
       window.draw(right)
     end
 
@@ -420,14 +362,14 @@ module CrymbleUI
       dest_y = layer.bounds.y.round(:ties_away).to_f32
 
       # Clip to ancestor panel bounds — layers must not extend beyond their panel
-      if panel_bounds = find_ancestor_panel_bounds(layer)
-        panel_right = panel_bounds.x + panel_bounds.width
-        panel_bottom = panel_bounds.y + panel_bounds.height
-        if dest_x + viewport_width > panel_right
-          viewport_width = Math.max(0, (panel_right - dest_x).ceil.to_i)
+      if clip_bounds = find_descendant_clip_bounds(layer)
+        clip_right = clip_bounds.x + clip_bounds.width
+        clip_bottom = clip_bounds.y + clip_bounds.height
+        if dest_x + viewport_width > clip_right
+          viewport_width = Math.max(0, (clip_right - dest_x).ceil.to_i)
         end
-        if dest_y + viewport_height > panel_bottom
-          viewport_height = Math.max(0, (panel_bottom - dest_y).ceil.to_i)
+        if dest_y + viewport_height > clip_bottom
+          viewport_height = Math.max(0, (clip_bottom - dest_y).ceil.to_i)
         end
       end
 
@@ -441,6 +383,9 @@ module CrymbleUI
 
       # Viewport position within buffer — shared math (Layer#viewport_sample_origin)
       viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_width, viewport_height)
+
+      # invariant: a viewport_cache composite must never CLAMP (origin whole+fitting by construction).
+      layer.assert_composite_fits!(viewport_x, viewport_y)
 
       # TRACE: Log viewport cache compositor details with calculated sample position
       if ENV["CRYMBLE_TRACE"]? == "1"
@@ -625,21 +570,24 @@ module CrymbleUI
           end
         end
 
-        # Check if any event triggered a rebuild request or render need
-        if event_count > 0
-          if app.needs_rebuild?
-            {% if flag?(:DEBUG_RENDER) %}
-              puts "\n[REBUILD CHECK @ event_loop] needs_rebuild? = true (#{event_count} events)"
-              app.root.try { |root| app.find_widgets_needing_layout(root) }
-            {% end %}
-            # App state changed - rebuild tree with reconciliation
-            app.rebuild
-            needs_redraw = true
-          elsif any_layer_needs_render?(app)
-            # Render needed (no rebuild) — decided by the aggregate-rev pull, which subsumes the old
-            # root.needs_layout? / needs_render? dirty checks (layout_rev/content_rev are in the aggregate).
-            needs_redraw = true
-          end
+        # Apply a pending rebuild — requested by an EVENT handler OR a TIMER callback that changed app
+        # state. This runs every iteration, NOT only `if event_count > 0`: a timer-driven request_rebuild
+        # (a live clock, polled data, a state-based animation) used to be dropped when idle and deferred to
+        # the next input event — the "frozen until you move the mouse, then a rebuild on every move" class.
+        # (Timer-driven mark_needs_render was already honored via any_layer_needs_render? above; only the
+        # separate needs_rebuild? signal was gated on input.)
+        if app.needs_rebuild?
+          {% if flag?(:DEBUG_RENDER) %}
+            puts "\n[REBUILD CHECK @ loop] needs_rebuild? = true (#{event_count} events)"
+            app.root.try { |root| app.find_widgets_needing_layout(root) }
+          {% end %}
+          # App state changed - rebuild tree with reconciliation
+          app.rebuild
+          needs_redraw = true
+        elsif !needs_redraw
+          # Render needed (no rebuild) — decided by the aggregate-rev pull, which subsumes the old
+          # root.needs_layout? / needs_render? dirty checks (layout_rev/content_rev are in the aggregate).
+          needs_redraw = any_layer_needs_render?(app)
         end
 
         # Render once per frame with latest state (after processing all events)

@@ -43,15 +43,18 @@ Then copy `sfml-install\lib\sfml-graphics-s.lib` to this directory as
 
 ## What the patch does
 
-Two changes in `Texture.cpp`:
+Two changes, in `Texture.cpp` and `Font.cpp`:
 
-1. **`Texture::resize`**: replaces `glTexImage2D(..., nullptr)` with a
-   zero-filled buffer + `glFinish()`. The `nullptr` form leaves the GPU
-   texture content undefined; on Windows GL drivers this leaks into rendered
-   glyphs.
+1. **`Texture::resize`** (`Texture.cpp`): replaces `glTexImage2D(..., nullptr)`
+   with a zero-filled buffer. The `nullptr` form leaves the GPU texture content
+   undefined; on Windows GL drivers this leaks into rendered glyphs.
+   `Texture::resize` does **not** call `glFinish()` — that caused a ~20 ms
+   stall per texture creation (~240 ms per keystroke at ~12 layer textures per
+   rebuild).
 
-2. **`Texture::update(const std::uint8_t*, ...)`**: adds `glFinish()` after
-   `glTexSubImage2D`. Without this, the upload is queued asynchronously and
+2. **`Font::loadGlyph`** (`Font.cpp`): adds `glFinish()` after the
+   `page.texture.update(...)` call that uploads the rasterised glyph bitmap
+   into the atlas. Without this, the upload is queued asynchronously and
    `SF::Text` may sample the atlas before the upload has applied, producing
    random wrong glyphs.
 

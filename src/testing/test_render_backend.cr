@@ -170,14 +170,20 @@ module CrymbleUI
         @pixels.fill(color)
       end
 
-      # Fill rectangle with color
+      # Fill rectangle with color.
+      # Pixel-coverage MUST match the SFML GPU rasterizer: a pixel is filled iff its CENTER
+      # (i + 0.5) lies inside the rect — NOT floor(edge). The old floor(x+w) under-filled the right/
+      # bottom edge by 1px whenever the edge fell on a fractional coordinate, so the headless backend
+      # DIVERGED from SFML at sub-pixel boundaries — inventing 1px edge strips that don't exist live
+      # and making headless pixel tests untrustworthy. Center-coverage: first covered pixel i has
+      # i+0.5 >= left  → i = ceil(left - 0.5); past-the-end has i+0.5 >= right → i = ceil(right - 0.5).
       def fill_rect(bounds : Rect, color : Color)
         @primitive_count += 1  # Count all primitives
         @fill_rect_count += 1
-        x1 = bounds.x.to_i.clamp(0, @width - 1)
-        y1 = bounds.y.to_i.clamp(0, @height - 1)
-        x2 = (bounds.x + bounds.width).to_i.clamp(0, @width)
-        y2 = (bounds.y + bounds.height).to_i.clamp(0, @height)
+        x1 = (bounds.x - 0.5).ceil.to_i.clamp(0, @width)
+        y1 = (bounds.y - 0.5).ceil.to_i.clamp(0, @height)
+        x2 = (bounds.x + bounds.width - 0.5).ceil.to_i.clamp(0, @width)
+        y2 = (bounds.y + bounds.height - 0.5).ceil.to_i.clamp(0, @height)
         return if x1 >= x2 || y1 >= y2
 
         cols = x2 - x1

@@ -14,8 +14,7 @@ uses these fields.
 ### 1. Read the getter, never the `@ivar`
 
 The `@field` ivar is now the `Source` object, not the value. Only the **getter** returns the value *and*
-registers the auto-capture dependency. A raw `@field` read won't even compile (it's a `Source(T)`, not a `T`)
-for non-nilable fields — and for nilable ones it silently breaks reactivity, so sweep them.
+registers the auto-capture dependency. A raw `@field` read won't even compile regardless of nilability — the ivar is always a `Source(T)`, never `T` or `T?`.
 
 ```crystal
 # before
@@ -102,7 +101,8 @@ reconcile_property mode : Mode              reactive_property mode : Mode, recon
   `self` before all ivars are initialized makes Crystal treat later ivars as indirectly-initialized.
 - `reconcile_property X` holding a **value** → `reactive_property X, reconcile: true`.
 
-`reconcile_property` is **kept but narrowed**: it now declares only *non-reactive* infrastructure that must
-survive a rebuild — a managed `Layer`/`Widget` ref. It stays a plain ivar (not a `Source`); use it in place
-of a hand-written `@[Reconcile]` annotation. Reactive values never use it. The rule of thumb is
-**Source-back what renders**.
+`reconcile_property` is **kept but narrowed**: it now declares any *non-reactive*, plain-ivar state that must
+survive a rebuild. Managed `Layer`/`Widget` refs are the prototypical case, but non-reactive interaction
+state — drag anchors, scrollbar-mode enums, layout caches, bool flags — qualifies equally. It stays a plain
+ivar (not a `Source`); use it in place of a hand-written `@[Reconcile]` annotation. Reactive values always
+use `reactive_property` (optionally `reconcile: true`). The rule of thumb is **Source-back what renders**.

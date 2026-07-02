@@ -242,6 +242,11 @@ module CrymbleUI
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       display_text = "»#{selected_value || ""}"
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
+      # A disabled combo renders dimmed and does not open (mirrors Button) — for
+      # callers that keep the control in place when there's nothing to pick (e.g.
+      # embrace's merge-source picker when no branch is mergeable).
+      txt_color = Theme.current.combo_text
+      txt_color = Color.new(txt_color.r, txt_color.g, txt_color.b, (txt_color.a // 3).to_u8) unless enabled?
 
       primitives do
         # Background — override-able so callers can tint the cell (e.g. to
@@ -250,12 +255,11 @@ module CrymbleUI
         # Border
         draw_rect(local_bounds, Theme.current.combo_border)
         # Text (vertically centered in content area, matching TextInput alignment)
-        font_size = FontSizing.calculate_size(FONT_SCALE)
         content_y = BORDER_WIDTH + PADDING
         content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
         text_y = vcentered_text_y(content_height, FONT_SCALE, content_y)
         text_pos = Vec2.new(PADDING, text_y)
-        draw_text(display_text, text_pos, Theme.current.combo_text, FONT_SCALE)
+        draw_text(display_text, text_pos, txt_color, FONT_SCALE)
       end
     end
 
@@ -291,6 +295,7 @@ module CrymbleUI
 
     # Expand - open popup with TextInput and filtered list
     def expand(initial_char : Char? = nil)
+      return unless enabled? # disabled combos don't open
       return if popup_open
 
 

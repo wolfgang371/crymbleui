@@ -1,162 +1,139 @@
 require "../src/crymble-ui"
 
-# FlashingButton - Button that flashes when selected
-class FlashingButton < CrymbleUI::Button
-  reconcile_property timer_id : Int32? = nil
-  reconcile_property flash_on : Bool = false
-  reconcile_property base_background_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 0, 0, 0)
-  reconcile_property base_border_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 0, 0, 0)
-
-  def initialize(
-    text : String,
-    id : String? = nil,
-    font_scale : Int32 = 0,
-    text_color : CrymbleUI::Color = CrymbleUI::Color.new(255, 255, 255, 255),
-    background_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 120, 215, 255),
-    border_color : CrymbleUI::Color = CrymbleUI::Color.new(0, 100, 180, 255),
-    padding : Float64 = 10.0,
-    &block : -> Nil
-  )
-    super(text, shortcut: nil, id: id, font_scale: font_scale, text_color: text_color, background_color: background_color, border_color: border_color, padding: padding, on_click: block)
-    @base_background_color = background_color
-    @base_border_color = border_color
-  end
-
-  def start_flashing : Int32
-    return @timer_id.not_nil! if @timer_id
-
-    @flash_on = true
-    update_colors
-
-    timer_id = schedule_timer(400.milliseconds, repeating: true) {
-      @flash_on = !@flash_on
-      update_colors
-    }
-    @timer_id = timer_id
-    timer_id
-  end
-
-  def stop_flashing
-    if timer_id = @timer_id
-      cancel_timer(timer_id)
-      @timer_id = nil
-      @flash_on = false
-      update_colors
-    end
-  end
-
-  private def update_colors
-    if @flash_on
-      self.background_color = CrymbleUI::Color.new(255, 165, 0, 255)
-      self.border_color = CrymbleUI::Color.new(255, 140, 0, 255)
-    else
-      self.background_color = @base_background_color
-      self.border_color = @base_border_color
-    end
-  end
-end
-
-# Stress Panel Demo: 400 buttons in a resizable panel
+# Stress Panel Demo: the SAME 400-button grid in two panels — floored (never clips) vs ScrollView.
+#
+# The "flashing selected cell" is a LOCALIZED reactive update, the way every flash in crymbleui works
+# (text_input cursor, focus highlight, …): one App-owned clock toggles a `@blink_on` phase and re-colours
+# ONLY the selected cell(s) via find(id) + the reactive colour setter — a single-widget re-render, NOT an
+# app `state` change. A `state`-driven blink would `app.rebuild` every 400ms, and a rebuild blanket-repaints
+# all 800 cells (app.cr:372) → ~70% CPU and an unresponsive window. Buttons carry stable ids ("gf::r,c" /
+# "gs::r,c") so the clock can reach the current instance after any rebuild; build() derives each cell's
+# initial colour from the same (selected, blink_on), so a click-rebuild shows the right colour with no flicker.
 class StressPanelDemo < CrymbleUI::App
   ROWS          = 20
   COLS          = 20
   TOTAL_BUTTONS = ROWS * COLS
 
+  ORANGE        = CrymbleUI::Color.new(255, 165, 0, 255)
+  ORANGE_BORDER = CrymbleUI::Color.new(255, 140, 0, 255)
+  BASE          = CrymbleUI::Color.new(0, 120, 215, 255)
+  BASE_BORDER   = CrymbleUI::Color.new(0, 100, 180, 255)
+
   state click_count : Int32 = 0
   state last_clicked : String = "none"
 
-  @selected_button_id : String? = nil
-  @active_timer_id : Int32? = nil
+  # Plain ivars — the flash must NOT go through app `state` (that rebuilds). @selected keys by grid prefix.
+  @selected = {} of String => String # "gf" | "gs" => selected label
+  @blink_on = false
+  @clock : Int32? = nil
+
+  # One repeating clock (started on the first click). Each tick flips the phase and re-colours ONLY the
+  # selected cell(s) in place — find(id) + colour setter marks that one widget for re-render, no rebuild.
+  private def ensure_clock
+    return if @clock
+    return unless scheduler_ready?
+    @clock = CrymbleUI::Widget.scheduler.schedule(400.milliseconds, repeating: true) do
+      @blink_on = !@blink_on
+      repaint_selected
+    end
+  end
+
+  private def scheduler_ready? : Bool
+    CrymbleUI::Widget.scheduler
+    true
+  rescue
+    false
+  end
+
+  private def lit?(prefix : String, label : String) : Bool
+    @blink_on && @selected[prefix]? == label
+  end
+
+  private def repaint_selected
+    @selected.each do |prefix, label|
+      if btn = find("#{prefix}::#{label}").as?(CrymbleUI::Button)
+        btn.background_color = lit?(prefix, label) ? ORANGE : BASE
+        btn.border_color = lit?(prefix, label) ? ORANGE_BORDER : BASE_BORDER
+      end
+    end
+  end
+
+  private def click(prefix : String, label : String)
+    ensure_clock
+    @selected[prefix] = label
+    @blink_on = true
+    # click_count/last_clicked are state → one rebuild (rare) updates the counter text; build() re-derives
+    # every cell's colour, so the newly-selected cell is orange immediately.
+    self.click_count += 1
+    self.last_clicked = label
+  end
+
+  private def grid(prefix : String) : CrymbleUI::VStack
+    g = CrymbleUI::VStack.new(id: prefix, spacing: 2.0)
+    ROWS.times do |row|
+      hs = CrymbleUI::HStack.new(spacing: 2.0)
+      COLS.times do |col|
+        label = "#{row},#{col}"
+        hs.add_child(CrymbleUI::Button.new(
+          label,
+          id: "#{prefix}::#{label}",
+          font_scale: -5,
+          padding: 3.0,
+          background_color: lit?(prefix, label) ? ORANGE : BASE,
+          border_color: lit?(prefix, label) ? ORANGE_BORDER : BASE_BORDER,
+        ) { click(prefix, label) })
+      end
+      g.add_child(hs)
+    end
+    g
+  end
 
   def build : CrymbleUI::Widget
-    window("CrymbleUI - Stress Test in Panel", 1200, 900) do
+    window("CrymbleUI - Floor vs Scroll", 1400, 950) do
       # Instructions
       vstack(spacing: 5.0) do
         cpu_monitor
         text(
-          "Stress Panel Demo: #{TOTAL_BUTTONS} Buttons in Resizable Panel",
-
+          "The SAME #{TOTAL_BUTTONS}-button grid in two panels — drag each panel's right edge inward:",
           font_scale: 2,
           color: CrymbleUI::Color.new(0, 100, 180, 255)
         )
-
         text(
-          "• Drag panel by title bar (test event coalescing)",
+          "• LEFT (floored, no ScrollView): the panel FLOORS at the grid's width — it won't shrink past the content, so nothing clips.",
           font_scale: -1
         )
-
         text(
-          "• Resize panel edges (test clipping)",
+          "• RIGHT (ScrollView, opt-in): the panel shrinks freely and the ScrollView scrolls the grid.",
           font_scale: -1
         )
-
-        text(
-          "• Click buttons inside panel",
-          font_scale: -1
-        )
-
         text(
           "Clicks: #{@click_count} | Last: #{@last_clicked}",
-
           font_scale: -1,
           color: CrymbleUI::Color.new(180, 0, 0, 255)
         )
       end
 
-      # Stress test panel with 400 buttons
-      window_panel(
-        "Stress Test (#{TOTAL_BUTTONS} buttons)",
-        x: 50.0,
-        y: 150.0,
-        width: 700.0,
-        height: 600.0,
-      ) do
-        vstack(spacing: 2.0) do
-          # Create 20x20 grid of buttons
-          ROWS.times do |row|
-            hstack(spacing: 2.0) do
-              COLS.times do |col|
-                button_label = "#{row},#{col}"
-                button_id = "btn_#{row}_#{col}"
+      # LEFT — grid directly: floors at the grid's content size, never clips.
+      window_panel("Floored — never clips", x: 20.0, y: 170.0, width: 700.0, height: 620.0) do
+        current_container.add_child(grid("gf"))
+      end
 
-                btn = FlashingButton.new(
-                  button_label,
-                  font_scale: -5,
-                  padding: 3.0
-                ) {
-                  # Cancel old timer before state change
-                  @active_timer_id.try { |id| CrymbleUI::Widget.scheduler.cancel(id) }
-                  @active_timer_id = nil
-
-                  @selected_button_id = button_id
-
-                  self.click_count += 1
-                  self.last_clicked = button_label
-                }
-
-                # Restore flashing after rebuild
-                if @selected_button_id == button_id
-                  @active_timer_id.try { |id| CrymbleUI::Widget.scheduler.cancel(id) }
-                  @active_timer_id = btn.start_flashing
-                end
-
-                current_container.add_child(btn)
-              end
-            end
-          end
-        end
+      # RIGHT — grid in a ScrollView(Both): opt-in shrink + scroll.
+      window_panel("ScrollView(Both) — shrinks + scrolls", x: 750.0, y: 170.0, width: 420.0, height: 620.0) do
+        scroll = CrymbleUI::ScrollView.new(direction: CrymbleUI::ScrollDirection::Both, id: "scroll")
+        scroll.set_content(grid("gs"))
+        current_container.add_child(scroll)
       end
     end
   end
 end
 
 # Run the demo
-puts "Starting Stress Panel Demo..."
-puts "Features to test:"
-puts "  • Drag panel slowly to test event coalescing"
-puts "  • Resize panel smaller to test content clipping"
-puts "  • Click buttons inside panel to test hit testing"
-puts "  • #{StressPanelDemo::TOTAL_BUTTONS} buttons inside a draggable/resizable panel"
+puts "Starting Floor-vs-Scroll Demo..."
+puts "Both panels hold the SAME #{StressPanelDemo::TOTAL_BUTTONS}-button grid:"
+puts "  • LEFT  (floored)    — drag the right edge in: it stops at the grid width (no clip)"
+puts "  • RIGHT (ScrollView) — drag the right edge in: it shrinks and scrolls"
+puts "  • Click a cell: it flashes orange (localized — one cell re-renders per tick, no rebuild)"
 puts ""
 
 CrymbleUI.run(StressPanelDemo.new)

@@ -202,7 +202,16 @@ describe "History Selection matrix: shrink_to_content destructive measure" do
     wide_cols = vm.test_col_pixel_widths
     wide_cols.sum.should be > 100.0 # sanity
 
-    drag_panel_width(app, renderer, 100.0) # narrow to the clamp
+    # X: a free-floating panel now FLOORS at its content width, so the matrix can be forced
+    # narrower than its content only at the WINDOW boundary — maximize into a window narrower than the
+    # content (constrain_to_window_bounds is below the floor by design). The clip-not-scale behaviour is
+    # what we verify there.
+    panel = app.find("panel").as(CrymbleUI::WindowPanel)
+    panel.toggle_maximize
+    app.root.try &.mark_needs_layout
+    narrow = CrymbleUI::Testing::TestRenderer.new(300, 800) # window narrower than the ~471px content
+    app.root.try &.mark_needs_layout
+    narrow.settle_rendering(app)
 
     vm = app.find("changes").as(CrymbleUI::VirtualMatrix)
     narrow_cols = vm.test_col_pixel_widths

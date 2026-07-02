@@ -2,6 +2,7 @@ require "../core/widget"
 require "../core/types"
 require "../core/layer"
 require "../core/layer_owner"
+require "../core/overlay"
 require "../dsl/primitive_builder"
 
 module CrymbleUI
@@ -27,6 +28,7 @@ module CrymbleUI
     class MenuBar < Widget
         include PrimitiveBuilder
         include LayerOwner
+        include Dismissable  # outside-click / ESC deactivates the menu system
 
         # Border width at bottom of menubar
         BORDER_WIDTH = 1.0
@@ -58,6 +60,13 @@ module CrymbleUI
             self.menu_system_active = false
         end
 
+        # Dismissable: an outside-click or ESC deactivates the menu system (hover-to-open off).
+        # A menubar has no "open" state of its own, so it never reports a close.
+        def dismiss_overlay : Bool
+            deactivate_menu_system
+            false
+        end
+
         # No manual copy_state_from needed - reactive_property (reconcile) handles it automatically!
 
         def initialize(
@@ -85,6 +94,13 @@ module CrymbleUI
         def measure(constraints : BoxConstraints) : Size
             width = constraints.max_width.finite? ? constraints.max_width : 800.0
             Size.new(width, menubar_height)
+        end
+
+        # Min width = Σ the menus' natural widths (the bar lays them edge-to-edge, no spacing). The bar is
+        # WIDTH-GREEDY (measure fills to max_width / an 800px fallback at INFINITY), so without this override
+        # the greedy default would poison a panel's content-width floor and balloon the panel.
+        def min_intrinsic_width(height : Float64) : Float64
+            @children.sum(&.min_intrinsic_width(height))
         end
 
         # Layout menubar and its menu items horizontally
@@ -122,9 +138,20 @@ module CrymbleUI
                 x_offset += child_size.width
             end
 
-            # Don't add children to layer.widgets - they're already rendered recursively
-            # when menubar is rendered (see layer_renderer.cr render_widget_to_backend)
-            # Adding them here causes double-rendering (visible as "bold" text)
+            # Don't add children to layer.widgets — the recursive widget collection already renders
+            # them as their own same-layer widgets (on top of this strip). Adding them here too would
+            # double-render (visible as "bold" text).
+        end
+
+        # Our chrome backend spans the full strip and is BlendNone-blitted over its whole area —
+        # including where our Menu children sit (separate same-layer widgets rendered ON TOP of the
+        # strip). The renderer's O(1) chrome/content NON-OVERLAP invariant (widget.cr:550) does not
+        # hold for us: our content overlaps our chrome. So whenever WE re-render, our menus must
+        # re-render too, else the strip's re-blit erases their text mid-resize. Declared local
+        # exception — cheap (a handful of menus); the general selective-render path stays O(1).
+        def mark_needs_render
+            super
+            @children.each(&.mark_needs_render)
         end
 
         # Generate primitives for rendering

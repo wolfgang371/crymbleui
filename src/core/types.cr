@@ -153,6 +153,12 @@ module CrymbleUI
                 bottom < other.top || top > other.bottom)
         end
 
+        # Is `other` fully contained within this rect (inclusive of edges)?
+        def contains?(other : Rect) : Bool
+            other.left >= left && other.top >= top &&
+                other.right <= right && other.bottom <= bottom
+        end
+
         def ==(other : Rect) : Bool
             @position == other.position && @size == other.size
         end

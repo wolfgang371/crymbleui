@@ -3,7 +3,7 @@ require "../../src/testing/test_renderer"
 require "../../src/widgets/tree_node"
 require "../../src/widgets/window"
 
-# T-031: TreeNodeHeader used to read a raw @expanded ivar in to_primitives, kept in
+# TreeNodeHeader used to read a raw @expanded ivar in to_primitives, kept in
 # sync only by the parent pushing it every perform_layout + an unconditional
 # mark_needs_render -- so the triangle updated ONLY because toggling forced a layout
 # (a latent freeze if expanded ever changed without one). The header now PULLS the

@@ -138,7 +138,7 @@ describe "VirtualMatrix grid reconfiguration", tags: "slow" do
     pre_reconfig_offset = content_layer.scroll_offset
 
     # Reconfigure: change grid dimensions (nrhl 2→1) triggers copy_state_from
-    # which resets buffer_origin to Vec2.zero and sets needs_clear=true
+    # which sets needs_clear=true → next render recomputes buffer_origin (no Vec2.zero pin)
     app.nrhl = 1
     app.rebuild
     renderer.settle_rendering(app)
@@ -150,7 +150,7 @@ describe "VirtualMatrix grid reconfiguration", tags: "slow" do
     new_layer.scroll_offset.x.should be > 0
 
     # CRITICAL: buffer_origin must NOT be Vec2.zero when scroll_offset is large.
-    # The needs_clear branch must call quantized_buffer_origin to recenter.
+    # The needs_clear branch must recompute buffer_origin (recenter_origin!/compute_buffer_origin).
     # Without the fix, buffer_origin=0 while scroll_offset≈500 → compositor
     # tries viewport_x=500 in a buffer that only extends ~cache_extent past 0.
     cache_extent = new_layer.cache_extent
@@ -158,7 +158,7 @@ describe "VirtualMatrix grid reconfiguration", tags: "slow" do
       "buffer_origin.x should be recentered near scroll_offset, not stuck at 0"
 
     # buffer_origin should be within cache_extent of scroll_offset
-    # (quantized_buffer_origin rounds to cache_extent grid)
+    # (compute_buffer_origin rounds to the cache_extent grid)
     delta_x = (new_layer.scroll_offset.x - new_layer.buffer_origin.x).abs
     delta_x.should be <= cache_extent * 2,
       "buffer_origin.x should be within 2*cache_extent of scroll_offset " \

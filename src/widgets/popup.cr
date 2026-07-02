@@ -2,6 +2,7 @@ require "../core/widget"
 require "../core/types"
 require "../core/layer"
 require "../core/layer_owner"
+require "../core/overlay"
 require "../dsl/primitive_builder"
 
 module CrymbleUI
@@ -28,6 +29,7 @@ module CrymbleUI
     class Popup < Widget
         include PrimitiveBuilder
         include LayerOwner
+        include OverlaySurface  # a click inside a popup is not a dismiss gesture
 
         # Layout constants
         MIN_AUTO_WIDTH = 120.0       # Minimum width when auto-sizing with no children
@@ -48,6 +50,12 @@ module CrymbleUI
 
         # Z-ordering (higher = on top)
         property z_index : Int32
+
+        # A popup is an overlay: it (and its descendants) composite ABOVE all panels.
+        # The renderer asks this polymorphically (find_panel_z_index), not via is_a?(Popup).
+        def compositing_z_index : Int32
+            Int32::MAX
+        end
 
         # @internal_layer provided by LayerOwner mixin
 
@@ -199,16 +207,25 @@ module CrymbleUI
         # Generate primitives for rendering
         # Primitives are in widget-local coordinates (0,0 origin)
         # Renderer will add widget.bounds offset when drawing
+        # The popup paints NOTHING under its children. Its background comes
+        # solely from the LAYER CLEAR (compute_background_for_layer → background_color),
+        # so the popup is a PURE CONTAINER: a self-mark / selective re-render skips it
+        # entirely (layer_renderer pure-container skip) and therefore CANNOT blit its
+        # full backend over its clean direct children's regions — the "(select all)
+        # vanishes" footgun is structurally impossible, not merely avoided per-caller.
+        # The border is drawn as a FOREGROUND (after children, at the edges only), so it
+        # never overlaps the interior where children live.
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+            [] of DrawPrimitive
+        end
 
-            # Local bounds rect
-            local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
+        def has_foreground? : Bool
+            true
+        end
 
+        def foreground_primitives : Array(DrawPrimitive)
+            local_bounds = Rect.new(0.0, 0.0, @bounds.width, @bounds.height)
             primitives do
-                # Draw background
-                fill_rect(local_bounds, background_color)
-
-                # Draw border
                 draw_rect(local_bounds, border_color)
             end
         end

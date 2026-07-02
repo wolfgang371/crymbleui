@@ -1,6 +1,6 @@
 # Graceful Degradation
 
-This document describes CrymbleUI's two-layer defense strategy for handling render-time failures.
+This document describes CrymbleUI's three-layer defense strategy for handling render-time failures.
 
 ## Problem
 
@@ -10,9 +10,9 @@ In a retained-mode UI framework, rendering exceptions can leave the system in an
 - Interaction state (hover, mouse_down) may reference invalid widgets
 - Next frame may crash due to corrupted state
 
-## Solution: Two-Layer Defense
+## Solution: Three-Layer Defense
 
-CrymbleUI uses two complementary strategies:
+CrymbleUI uses three complementary strategies:
 
 ### Layer 1: Validation-Before-Render (Option C)
 
@@ -27,18 +27,24 @@ CrymbleUI uses two complementary strategies:
 
 ```crystal
 private def valid_layer_dimensions?(layer : Layer) : Bool
-  layer.bounds.width > 0 && layer.bounds.height > 0 &&
-  layer.bounds.width.finite? && layer.bounds.height.finite?
+  return false unless layer.bounds.width > 0 && layer.bounds.height > 0 &&
+    layer.bounds.width.finite? && layer.bounds.height.finite?
+  if owner = layer.owner_widget
+    return owner.ancestry_bounds_valid?
+  end
+  true
 end
 
 private def valid_widget_dimensions?(widget : Widget) : Bool
   abs = widget.absolute_bounds
   abs.width > 0 && abs.height > 0 &&
-  abs.width.finite? && abs.height.finite?
+    abs.width.finite? && abs.height.finite?
 end
 ```
 
-**Behavior**: Invalid widgets/layers are silently skipped (logged with `-Ddebug_render`).
+The ancestry branch in `valid_layer_dimensions?` handles overlay and popup layers whose owner widget's parent chain contains a zero-bounds ancestor (e.g. a closed `WindowPanel`). The layer's own stored bounds may be stale after a parent collapses; walking up via `ancestry_bounds_valid?` catches it and suppresses compositing.
+
+**Behavior**: Invalid widgets/layers are silently skipped. The dimension-check call sites carry no debug-logging wrapper; `-DDEBUG_RENDER` covers geometric culling, not these NaN/zero-size validation guards.
 
 ### Layer 2: Frame-Boundary Exception Handling (Option A)
 
@@ -51,15 +57,16 @@ def render_frame(app : App)
   begin
     # ... layout and render ...
   rescue exception
-    handle_frame_exception(exception, app)
+    handle_frame_exception(exception, app, window)
   end
 end
 
-private def handle_frame_exception(exception : Exception, app : App)
+private def handle_frame_exception(exception : Exception, app : App, window : SF::RenderWindow)
   STDERR.puts "[GRACEFUL_DEGRADATION] Frame exception: #{exception.message}"
   STDERR.puts "  #{exception.backtrace?.try(&.first(3).join("\n  "))}"
   app.reset_all_caches
   app.root.try(&.mark_needs_layout)
+  window.display  # a stale frame is better than a black hole
 end
 ```
 
@@ -67,13 +74,23 @@ end
 1. Log exception to STDERR (visible but doesn't pollute stdout)
 2. Reset all caches (can't know what's corrupted)
 3. Force re-layout (safest recovery path)
-4. Next frame renders from clean state
+4. Always call `window.display` — a stale frame is better than a blank/black display
+5. Next frame renders from clean state
+
+### Layer 3: Input-Path Exception Handling
+
+**Catch exceptions during event processing** to prevent a bad input handler from breaking the event loop.
+
+**Location**: `sfml_renderer.cr`
+
+`handle_event` wraps `handle_event_impl` in a rescue. If `app.on_event_exception` is set (a `Proc(String, Nil)?`), the error message is forwarded there (e.g. for a status-bar warning); otherwise the full backtrace goes to STDERR. The method returns `false` (no redraw) and the frame loop continues normally. This path resets no caches — a bad event handler does not leave the render state partially modified.
 
 ## Cache Reset Methods
 
 ### Widget.reset_render_caches_recursive
 Clears all render caches on widget tree:
 - `@cached_primitives`
+- `@primitives_node.try(&.touch)` (touches the reactive signal to force primitive recomputation next frame)
 - `@widget_backend`
 - `@background_backend`
 - `@rendered_to_layer_at_current_bounds`
@@ -89,7 +106,7 @@ Resets layer to clean state:
 Full app reset for recovery:
 - Calls `reset_render_caches_recursive` on root
 - Calls `reset_for_recovery` on all layers
-- Clears interaction state (`@hovered_widget`, `@mouse_down_widget`)
+- Clears interaction state (`@hovered_widget`, `@mouse_down_widget`, `@topmost_panel`)
 - Cancels any in-progress drag operation
 
 ## What Still Asserts vs. What Validates
@@ -107,10 +124,10 @@ Full app reset for recovery:
 
 ## Debug Output
 
-Enable with `-Ddebug_render` flag:
+Enable with `-DDEBUG_RENDER` flag:
 
 ```
-crystal build -Ddebug_render src/main.cr
+crystal build -DDEBUG_RENDER src/main.cr
 ```
 
 This enables verbose logging of render operations, including skipped widgets.

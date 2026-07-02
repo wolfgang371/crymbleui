@@ -4,7 +4,7 @@ require "../../src/widgets/combo_box"
 require "../../src/widgets/multi_combo_box"
 require "../../src/widgets/window"
 
-# T-029: a multi-select ComboBox via the `selected : Set(Int32)` overload.
+# a multi-select ComboBox via the `selected : Set(Int32)` overload.
 # Clicking a row's ✓ gutter TOGGLES membership and keeps the popup open;
 # clicking the row body selects-only-that and closes. The selection must
 # SURVIVE a DSL rebuild (the reconcile bug the gate caught: a build-shadow

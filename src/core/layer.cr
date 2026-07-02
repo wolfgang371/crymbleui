@@ -87,10 +87,6 @@ module CrymbleUI
     # Track bounds from last render for change detection
     @last_rendered_bounds : Rect?
 
-    # Baseline bounds captured at resize start for apply_resize_clip.
-    # Prevents cumulative drift when last_rendered_bounds updates every frame.
-    property resize_baseline : Rect?
-
     # Tree structure
     property parent : Layer?
     property children : Array(Layer)
@@ -170,7 +166,42 @@ module CrymbleUI
 
     property viewport_cache : Bool = false
     property cache_extent : Float64 = 0.0     # Extra pixels to pre-render beyond viewport
-    property buffer_origin : Vec2 = Vec2.zero # Content coord at buffer position (0,0)
+    getter buffer_origin : Vec2 = Vec2.zero   # Content coord at buffer position (0,0)
+
+    # The whole-valued backstop: render subtracts buffer_origin.to_i (truncate-first), the composite
+    # truncates scroll-buffer_origin (subtract-first) — they agree only for a whole origin, else a 1px seam.
+    # PRODUCTION has no public buffer_origin writer: every write funnels through recenter_origin! (the one
+    # writer), which is the only caller of this backstop besides the test seam below.
+    private def write_buffer_origin(value : Vec2)
+      {% if flag?(:verify_bounds) %}
+        if @viewport_cache && (value.x != value.x.round || value.y != value.y.round)
+          raise "buffer_origin must be whole-valued for viewport_cache layer '#{@id}' (got #{value})"
+        end
+      {% end %}
+      @buffer_origin = value
+    end
+
+    # Test-only seam (mirrors ScrollView#set_scroll_offset_for_test): set an arbitrary origin to exercise
+    # the reader/clamp in isolation. Keeps the whole-valued backstop; production never calls this.
+    def set_buffer_origin_for_test(value : Vec2)
+      write_buffer_origin(value)
+    end
+
+    # Composite-seam invariant: a viewport_cache composite must NEVER clamp — the origin is
+    # whole+fitting by construction. The renderers pass the sample they will actually blit from; if it
+    # differs from the unclamped (scroll-origin), the invariant broke → fail loudly. Checks THIS composite's
+    # actual (post-clip) sample, so a legitimately clipped viewport (which only relaxes the clamp) can't
+    # false-raise. Extracted so SFMLRenderer and TestRenderer share ONE check, not two copies.
+    def assert_composite_fits!(sample_x : Int32, sample_y : Int32) : Nil
+      {% if flag?(:verify_bounds) %}
+        if @viewport_cache &&
+           (sample_x != (@scroll_offset.x - @buffer_origin.x).to_i ||
+           sample_y != (@scroll_offset.y - @buffer_origin.y).to_i)
+          raise "composite clamped viewport_cache layer '#{@id}' — buffer_origin invariant broken " \
+                "(scroll=#{@scroll_offset} origin=#{@buffer_origin})"
+        end
+      {% end %}
+    end
     # Opt a NON-matrix layer into -Dcache_validation immediate-mode validation.
     # The validator auto-covers viewport_cache content layers; non-matrix overlay/window-direct
     # layers (combo popups, menus, buttons) are blind to it. A non-scrolling layer has scroll_offset=0
@@ -186,9 +217,65 @@ module CrymbleUI
     # margin — the instrument was the bug, not the renderer).
     def viewport_sample_origin(buffer_width : Int32, buffer_height : Int32,
                                viewport_width : Int32, viewport_height : Int32) : {Int32, Int32}
+      # The clamp is a defensive memory-safety bound on the texture read. This method is PURE (no raise):
+      # it is also the fit PROBE (`viewport_fits_buffer?` derives from it), so it must be able to observe a
+      # clamp without failing. The invariant "a viewport_cache composite never clamps" is asserted at the
+      # WRITER (`recenter_origin!`) and at the composite seam (both renderers) under -Dverify_bounds.
       x = (@scroll_offset.x - @buffer_origin.x).to_i.clamp(0, {buffer_width - viewport_width, 0}.max)
       y = (@scroll_offset.y - @buffer_origin.y).to_i.clamp(0, {buffer_height - viewport_height, 0}.max)
       {x, y}
+    end
+
+    # The sole writer of buffer_origin for a viewport_cache layer. Returns an ALWAYS-WHOLE origin,
+    # positioned so the viewport fits the buffer at it — per axis `(scroll - origin).to_i ∈ [0, buffer -
+    # ceil(viewport)]` — so `viewport_sample_origin` (the one reader) never clamps and render/composite,
+    # which truncate the origin differently, agree. Preserves the cache_extent quantization grid away from
+    # capacity (the scroll round-trip "19px shift" guard); clamps to whole bounds near capacity; and at zero
+    # margin (empty integer range) uses floor(scroll) — the sub-pixel-best whole origin, tear-free.
+    def compute_buffer_origin(buffer_width : Int32, buffer_height : Int32) : Vec2
+      Vec2.new(
+        compute_buffer_origin_axis(@scroll_offset.x, buffer_width, bounds.width),
+        compute_buffer_origin_axis(@scroll_offset.y, buffer_height, bounds.height)
+      )
+    end
+
+    private def compute_buffer_origin_axis(scroll : Float64, buffer : Int32, viewport : Float64) : Float64
+      ce = @cache_extent
+      return scroll.floor if ce <= 0.0
+      q = (((scroll - ce) / ce).round * ce).round # quantized ideal, whole even for a fractional cache_extent
+      vw = viewport.ceil.to_i
+      lo = (scroll - (buffer - vw)).ceil # smallest whole origin with (scroll-origin) <= buffer-vw
+      hi = scroll.floor                  # largest whole origin with (scroll-origin) >= 0
+      lo <= hi ? q.clamp(lo, hi) : hi    # empty range (zero margin) -> floor(scroll)
+    end
+
+    # Does the viewport fit the buffer at the LIVE buffer_origin — i.e. will the one reader
+    # (`viewport_sample_origin`) return WITHOUT clamping? Derived from the reader so the predicate cannot
+    # drift from the composite. One-directional: the live composite may pass a smaller ancestor-clipped
+    # viewport, which only relaxes the clamp, so a `true` here never yields a shift (a `false` in the
+    # clipped band is at worst a harmless extra recenter).
+    def viewport_fits_buffer?(buffer_width : Int32, buffer_height : Int32) : Bool
+      vw = bounds.width.ceil.to_i
+      vh = bounds.height.ceil.to_i
+      sample = viewport_sample_origin(buffer_width, buffer_height, vw, vh)
+      unclamped = { (@scroll_offset.x - @buffer_origin.x).to_i, (@scroll_offset.y - @buffer_origin.y).to_i }
+      sample == unclamped
+    end
+
+    # The one production writer of buffer_origin: compute (or accept a pre-computed) whole+fitting
+    # origin and set it, asserting the fit at the source under -Dverify_bounds. All viewport_cache
+    # recenter/first-render sites funnel through this. The blit-shift path already computes the origin for
+    # its overlap math, so it passes it in to avoid recomputing (compute_buffer_origin is pure). Returns the
+    # new origin (the recenter blit-shift needs it as a value).
+    def recenter_origin!(buffer_width : Int32, buffer_height : Int32, origin : Vec2? = nil) : Vec2
+      origin ||= compute_buffer_origin(buffer_width, buffer_height)
+      write_buffer_origin(origin)
+      {% if flag?(:verify_bounds) %}
+        raise "recenter_origin! produced a non-fitting origin for '#{@id}' " \
+              "(scroll=#{@scroll_offset} origin=#{origin} buffer=#{buffer_width}x#{buffer_height})" \
+          unless viewport_fits_buffer?(buffer_width, buffer_height)
+      {% end %}
+      origin
     end
     # Flag set during buffer recenter - widgets should fill with bg color, not capture from stale texture
     property buffer_just_cleared : Bool = false
@@ -418,6 +505,20 @@ module CrymbleUI
       last.width != current.width || last.height != current.height
     end
 
+    # True iff the bounds GREW (not merely changed) since the last render — a grown layer's
+    # newly-exposed area holds prior/uninitialized pixels.
+    def grew? : Bool
+      last = @last_rendered_bounds
+      return false if last.nil?
+      bounds.width > last.width || bounds.height > last.height
+    end
+
+    # A layer whose widgets are CachePolicy::Never partial-painters (e.g. a cursor highlight band)
+    # sets this; the renderer's size-change handler then clears the whole layer on a grow, because
+    # the newly-exposed area would otherwise keep stale pixels the partial painter never overwrites.
+    # Declarative + generic — replaces a per-widget mark_needs_clear_and_render guard.
+    property clear_on_grow : Bool = false
+
     # Check if current backend is large enough for current bounds
     def backend_fits_bounds? : Bool
       return false unless b = @backend
@@ -437,12 +538,6 @@ module CrymbleUI
     # Reset first_render flag (called when backend recreated)
     def reset_first_render
       @last_rendered_bounds = nil
-    end
-
-    # Restore first_render state (called when backend resized but content preserved)
-    # Sets last_rendered_bounds to current bounds to indicate content exists
-    def restore_first_render_state
-      @last_rendered_bounds = bounds.dup
     end
 
     # Reset layer for recovery after exception (graceful degradation)
@@ -484,9 +579,12 @@ module CrymbleUI
       return true unless backend = @backend # No backend yet
 
       if @viewport_cache
-        # For viewport_cache layers, compare required buffer size (includes cache extent)
-        required_width, required_height = calculate_buffer_size_with_cache
-        required_width > backend.width || required_height > backend.height
+        # Resize only when the viewport is dimensionally too BIG for the buffer — NOT when the 2×cache_extent
+        # margin is merely sub-ideal (which reallocated + re-blit the whole buffer every grow-frame — the
+        # ScrollView resize storm), and NOT when the viewport merely moved (a scroll — that is the recenter's
+        # blit-shift job, not a resize). A grow that still fits keeps the buffer; the recenter re-positions
+        # buffer_origin (clamped so the viewport fits — see compute_buffer_origin) to avoid a shifted composite.
+        bounds.width > backend.width || bounds.height > backend.height
       else
         content_width > backend.width || content_height > backend.height
       end

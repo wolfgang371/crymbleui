@@ -156,7 +156,7 @@ module CrymbleUI
         sticky_cols = @matrix.sticky_col_count
 
         primitives do
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), VirtualMatrix.ruler_bg_color)
+          fill_background(bounds, VirtualMatrix.ruler_bg_color)
           if col_sizes
             draw_labels(bounds, col_sizes, 0...sticky_cols, :col, ruler_w)
           end
@@ -177,7 +177,7 @@ module CrymbleUI
         sticky_rows = @matrix.sticky_row_count
 
         primitives do
-          fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), VirtualMatrix.ruler_bg_color)
+          fill_background(bounds, VirtualMatrix.ruler_bg_color)
           if row_sizes
             draw_labels(bounds, row_sizes, 0...sticky_rows, :row, 0.0)
           end

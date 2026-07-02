@@ -9,15 +9,14 @@ require "../../src/testing/test_renderer"
 # the layer buffer contains stale pixels from destroyed cells.
 #
 # Key detection points:
-# 1. needs_fresh_background flag: New cells MUST have this flag set to prevent
-#    capturing ghost pixels from the layer buffer during background memorization
+# 1. Fresh-background detection: a new cell has last_rendered_layer_position == nil, so the
+#    renderer recaptures its background from the layer instead of memorizing ghost pixels
 # 2. Pixel opacity: All rendered pixels should be fully opaque (alpha=255)
 #    Transparent pixels indicate contamination from uninitialized buffer regions
 # 3. Sticky layer configuration: VirtualMatrix with sticky headers should properly
 #    configure the ScrollView with sticky layer parameters
 #
-# These tests serve as REGRESSION tests - if the ghosting fix is removed
-# (e.g., line 789 in virtual_matrix.cr), the first test will fail.
+# These tests serve as REGRESSION tests - if the ghosting fix is removed, the first test fails.
 
 # Adapter with sticky headers (row 0, col 0 are sticky)
 class StickyGhostTestAdapter

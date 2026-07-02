@@ -26,6 +26,12 @@ module CrymbleUI
 
         # @internal_layer provided by LayerOwner mixin
 
+        # A LayerBox is its own compositing z-boundary (asked by the renderer's
+        # find_panel_z_index polymorphically, not via is_a?(LayerBox)).
+        def compositing_z_index : Int32
+            z_index
+        end
+
         def initialize(x : Float64, y : Float64, width : Float64?, height : Float64?,
                        @z_index : Int32 = 1, id : String? = nil,
                        @alignment : Alignment = Alignment::None,
@@ -109,7 +115,7 @@ module CrymbleUI
 
             # Render full-bounds background rectangle in widget-local coordinates
             primitives do
-                fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), background_color)
+                fill_background(bounds, background_color)
             end
         end
 

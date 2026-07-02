@@ -155,26 +155,24 @@ describe CrymbleUI::ComboBoxPopup do
         end
     end
 
-    describe "#to_primitives" do
-        it "generates background and border" do
+    # the popup is a PURE CONTAINER — it paints NOTHING under its children.
+    # Its background comes from the layer clear (compute_background_for_layer), and its
+    # border is a FOREGROUND (drawn after children, at the edges). This makes a
+    # self-mark / selective re-render a pure-container skip that can't blit over the
+    # clean children (the "(select all) vanishes" footgun, structurally closed).
+    describe "#to_primitives + border (pure container)" do
+        it "to_primitives is EMPTY — no self-fill under children (background comes from the layer clear)" do
             popup = CrymbleUI::ComboBoxPopup.new
-            bounds = CrymbleUI::Rect.new(0, 0, 150, 100)
-
-            primitives = popup.to_primitives(bounds)
-
-            primitives.any? { |p| p.is_a?(CrymbleUI::FillRect) }.should be_true
-            primitives.any? { |p| p.is_a?(CrymbleUI::DrawRect) }.should be_true
+            popup.to_primitives(CrymbleUI::Rect.new(0, 0, 150, 100)).should be_empty
         end
 
-        it "uses widget-local coordinates" do
+        it "draws its border as a FOREGROUND (over children), in widget-local coordinates" do
             popup = CrymbleUI::ComboBoxPopup.new
-            bounds = CrymbleUI::Rect.new(50, 100, 150, 100)
-
-            primitives = popup.to_primitives(bounds)
-            bg = primitives.find { |p| p.is_a?(CrymbleUI::FillRect) }.as(CrymbleUI::FillRect)
-
-            bg.bounds.x.should eq(0.0)
-            bg.bounds.y.should eq(0.0)
+            popup.bounds = CrymbleUI::Rect.new(50, 100, 150, 100)
+            popup.has_foreground?.should be_true
+            border = popup.foreground_primitives.find { |p| p.is_a?(CrymbleUI::DrawRect) }.not_nil!.as(CrymbleUI::DrawRect)
+            border.bounds.x.should eq(0.0)
+            border.bounds.y.should eq(0.0)
         end
     end
 

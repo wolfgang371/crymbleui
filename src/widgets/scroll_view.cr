@@ -59,13 +59,6 @@ module CrymbleUI
       @sticky_background_color = value
     end
 
-    # When true (set by an embedded shrink_to_content VirtualMatrix), layers clip
-    # to the resizing ancestor's content rect during resize instead of shrinking
-    # by the ancestor's delta — so a narrow inner table's header doesn't
-    # over-shrink ("Ta…") while its data stays full width. Default false keeps
-    # the delta-based clip used by full-size, panel-spanning scroll views.
-    property clip_to_ancestor_content : Bool = false
-
     @content_widget : Widget?
     @visible_widgets : Set(Widget) = Set(Widget).new  # Track which widgets are in viewport
     @last_visibility_offset : Vec2 = Vec2.new(-1.0, -1.0)  # Last offset where visibility was updated (for dedup)
@@ -156,47 +149,7 @@ module CrymbleUI
         abs
       end
 
-      # Embedded shrink_to_content matrix: clip every layer (incl. the sticky
-      # header) to the ancestor's live content rect, so the header doesn't
-      # over-shrink while the data stays full width.
-      if @clip_to_ancestor_content && (clip = @resize_clip_bounds)
-        return intersect_bounds(natural, clip)
-      end
-
-      result = if delta = @resize_clip_delta
-        dw, dh, dx, dy = delta
-        orig = layer.resize_baseline || begin
-          layer.resize_baseline = natural
-          natural
-        end
-        # Clamp: only shrink, never expand (prevents ghost pixels during resize)
-        clamped_dw = {dw, 0.0}.min
-        clamped_dh = {dh, 0.0}.min
-        case layer
-        when @sticky_row_layer
-          # Row header: only width changes, height is fixed
-          Rect.new(orig.x + dx, orig.y + dy,
-            Math.max(0.0, orig.width + clamped_dw), orig.height)
-        when @sticky_col_layer
-          # Column header: only height changes, width is fixed
-          Rect.new(orig.x + dx, orig.y + dy,
-            orig.width, Math.max(0.0, orig.height + clamped_dh))
-        when @sticky_corner_layer
-          # Corner: fixed size, only position changes
-          Rect.new(orig.x + dx, orig.y + dy, orig.width, orig.height)
-        else
-          # Content and scrollbar: both dimensions change
-          Rect.new(orig.x + dx, orig.y + dy,
-            Math.max(0.0, orig.width + clamped_dw),
-            Math.max(0.0, orig.height + clamped_dh))
-        end
-      else
-        layer.resize_baseline = nil
-        natural
-      end
-
-
-      result
+      natural
     end
 
     # Content layer (viewport_cache for efficient scrolling)
@@ -304,6 +257,20 @@ module CrymbleUI
       end
 
       Size.new(width, height)
+    end
+
+    # A ScrollView scrolls its content, so it imposes NO intrinsic height floor — it can shrink to
+    # any viewport and scroll the rest. (Without this it falls through to the greedy measure default
+    # and forces its container taller than it needs to be.)
+    def min_intrinsic_height(width : Float64) : Float64
+      0.0
+    end
+
+    # A ScrollView scrolls horizontally too, so it imposes NO intrinsic WIDTH floor either — the width
+    # dual. This is the OPT-IN escape valve: embed shrinkable content in a ScrollView and the panel can
+    # shrink past it (the floor is 0); otherwise the content's own min floors the panel.
+    def min_intrinsic_width(height : Float64) : Float64
+      0.0
     end
 
     def perform_layout(constraints : BoxConstraints, position : Vec2)
@@ -548,12 +515,27 @@ module CrymbleUI
     ARROW_SIZE = 16.0
     THUMB_MIN_SIZE = 30.0
 
-    private def needs_vertical_scrollbar? : Bool
-      @content_size.height > @viewport_size.height
+    # Scrollbars are resolved JOINTLY: each scrollbar steals SCROLLBAR_WIDTH from the OTHER axis, so a
+    # borderline overflow on one axis can be *created* by the other axis's scrollbar. Fixed-point it
+    # (mirrors VirtualMatrix#effective_content_size, which was already joint): seed both from the raw
+    # viewport, then if vertical is needed recheck horizontal against width-SB, and if horizontal then
+    # becomes needed recheck vertical against height-SB (2 rechecks converge). The old non-joint checks
+    # disagreed with the matrix's joint reservation at the boundary band -> the bottom partial row
+    # landed in a 16px limbo strip the two layers disagreed about.
+    private def resolve_scrollbars : Tuple(Bool, Bool) # {vertical, horizontal}
+      v = @content_size.height > @viewport_size.height
+      h = @content_size.width > @viewport_size.width
+      h = @content_size.width > @viewport_size.width - SCROLLBAR_WIDTH if v && !h
+      v = @content_size.height > @viewport_size.height - SCROLLBAR_WIDTH if h && !v
+      {v, h}
     end
 
-    private def needs_horizontal_scrollbar? : Bool
-      @content_size.width > @viewport_size.width
+    def needs_vertical_scrollbar? : Bool
+      resolve_scrollbars[0]
+    end
+
+    def needs_horizontal_scrollbar? : Bool
+      resolve_scrollbars[1]
     end
 
     # Effective viewport dimensions (excluding scrollbar space when scrollbars are visible)

@@ -1,5 +1,6 @@
 require "./widget"
 require "./drag_manager"
+require "./overlay"
 require "../dsl/builder"
 
 module CrymbleUI
@@ -548,9 +549,8 @@ module CrymbleUI
       if widget = root.hit_test(point)
         @mouse_down_widget = widget
 
-        # Check if click is outside all Popups and Menus
-        # If so, close all open menus by calling their toggle callbacks
-        unless is_inside_popup_or_menu?(widget)
+        # A click outside every overlay surface dismisses the open menus.
+        unless is_inside_overlay_surface?(widget)
           close_all_menus(root)
         end
 
@@ -580,11 +580,13 @@ module CrymbleUI
       end
     end
 
-    # Check if widget is inside a Popup or Menu (including itself)
-    private def is_inside_popup_or_menu?(widget : Widget) : Bool
+    # Did the mouse-down land inside a click-interactive overlay SURFACE (a Popup or an open
+    # Menu)? If so it's an interaction with that surface, not a dismiss gesture, so menus stay
+    # open. Asked via the OverlaySurface capability — the App never type-checks Popup/Menu.
+    private def is_inside_overlay_surface?(widget : Widget) : Bool
       current = widget
       while current
-        return true if current.is_a?(Popup) || current.is_a?(Menu)
+        return true if current.is_a?(OverlaySurface)
         current = current.parent
       end
       false
@@ -600,22 +602,15 @@ module CrymbleUI
       nil
     end
 
-    # Close all open menus by calling their toggle callbacks
+    # Dismiss every dismissable overlay in the tree (close menus, deactivate menubars).
+    # Returns true iff something was actually open — so ESC can report it consumed the key.
+    # Dispatched via the Dismissable capability; the App never type-checks Menu/MenuBar.
     private def close_all_menus(widget : Widget) : Bool
-      # Find all Menu widgets that are open
-      menus = widget.find_all { |w| w.is_a?(Menu) && w.as(Menu).open? }
-      had_open = !menus.empty?
-      menus.each do |menu|
-        # Call the menu's toggle callback to close it
-        menu.as(Menu).trigger_toggle
+      dismissed = false
+      widget.find_all { |w| w.is_a?(Dismissable) }.each do |w|
+        dismissed = true if w.as(Dismissable).dismiss_overlay
       end
-
-      # Deactivate all MenuBars (disables hover-to-open)
-      menubars = widget.find_all { |w| w.is_a?(MenuBar) }
-      menubars.each do |menubar|
-        menubar.as(MenuBar).deactivate_menu_system
-      end
-      had_open
+      dismissed
     end
 
     # Handle ESC key press - cancels drags and closes menus

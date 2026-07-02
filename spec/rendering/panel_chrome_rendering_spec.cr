@@ -135,23 +135,22 @@ describe "WindowPanel Chrome Rendering" do
 
       backend = renderer.backend
 
-      # Button should be in content area
-      # Sample pixel where button should be (in window coordinates)
+      # The button's default fill (#0078D7) must be painted somewhere inside its bounds. Scan the
+      # interior rather than probing one point: a non-fill body takes its INTRINSIC width inside the
+      # panel (it needn't span the whole content area), so the centered white label sits near the
+      # left edge — a single upper-left probe would land on the glyph, not the fill.
       abs_bounds = button.absolute_bounds
-      button_x = abs_bounds.x.to_i + 10
-      button_y = abs_bounds.y.to_i + 10
-
-      pixel = backend.get_pixel(button_x, button_y)
-      pixel.should_not be_nil
-
-      if pix = pixel
-        # Button should have distinct color (blue-ish for default button)
-        is_white = (pix.r == 255 && pix.g == 255 && pix.b == 255)
-        is_transparent = (pix.a == 0)
-
-        (is_white || is_transparent).should be_false
-
+      found_fill = false
+      x0 = abs_bounds.x.to_i
+      y0 = abs_bounds.y.to_i
+      (2...(abs_bounds.width.to_i - 2)).step(2) do |dx|
+        (2...(abs_bounds.height.to_i - 2)).step(2) do |dy|
+          if px = backend.get_pixel(x0 + dx, y0 + dy)
+            found_fill = true if px.r == 0 && px.g == 120 && px.b == 215
+          end
+        end
       end
+      found_fill.should be_true
     end
   end
 

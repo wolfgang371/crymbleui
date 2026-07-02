@@ -1,6 +1,7 @@
 require "../core/widget"
 require "../core/types"
 require "../core/font_scalable"
+require "../core/overlay"
 require "../dsl/primitive_builder"
 require "./popup"
 
@@ -19,6 +20,8 @@ module CrymbleUI
     class Menu < Widget
         include PrimitiveBuilder
         include FontScalable
+        include Dismissable     # outside-click / ESC closes it
+        include OverlaySurface  # a click inside it is not a dismiss gesture
 
         # Border color (dynamic - must follow theme changes)
 
@@ -281,9 +284,12 @@ module CrymbleUI
             end
         end
 
-        # For compatibility with App.close_all_menus
-        def trigger_toggle
+        # Dismissable: an outside-click or ESC closes this menu. Returns true iff it was open
+        # (so close_all_menus can report whether anything actually closed).
+        def dismiss_overlay : Bool
+            return false unless @open
             close
+            true
         end
 
         # Mouse enter - highlight menu and auto-open if menu system is active

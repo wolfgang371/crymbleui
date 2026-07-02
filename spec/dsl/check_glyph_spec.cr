@@ -2,7 +2,7 @@ require "../spec_helper"
 require "../../src/dsl/primitive_builder"
 require "../../src/core/types"
 
-# T-030 step 1: the shared checkbox-glyph drawer extracted from Checkbox#to_primitives,
+# step 1: the shared checkbox-glyph drawer extracted from Checkbox#to_primitives,
 # reused by ComboBoxItem's multi-select gutter and menu_item (option B). It draws the
 # REAL checkbox visual (box outline + state mark), NOT a text glyph — so its guard is a
 # primitive-SHAPE assertion per CheckState, not a rendered string.

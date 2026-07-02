@@ -35,6 +35,18 @@ module CrymbleUI
       @children.first.measure(constraints)
     end
 
+    # Passthrough: the flex contributes nothing of its own; its min is its child's min.
+    def min_intrinsic_height(width : Float64) : Float64
+      return 0.0 if @children.empty?
+      @children.first.min_intrinsic_height(width)
+    end
+
+    # Passthrough on the width axis too — the width dual.
+    def min_intrinsic_width(height : Float64) : Float64
+      return 0.0 if @children.empty?
+      @children.first.min_intrinsic_width(height)
+    end
+
     def perform_layout(constraints : BoxConstraints, position : Vec2)
       # Measure child to get natural size
       child_size = Size.zero

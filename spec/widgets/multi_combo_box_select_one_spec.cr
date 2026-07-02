@@ -4,7 +4,7 @@ require "../../src/widgets/combo_box"
 require "../../src/widgets/multi_combo_box"
 require "../../src/widgets/window"
 
-# T-030 follow-up (user 2026-06-20): clicking a row's BODY (the text, not the ✓ gutter)
+# follow-up (user 2026-06-20): clicking a row's BODY (the text, not the ✓ gutter)
 # must SELECT ONLY THAT ITEM and close — like a regular single-select ComboBox —
 # regardless of the prior selection. It must NOT toggle (toggle = depends on prior
 # membership, which is the gutter's job). This exhaustively checks every prior state.

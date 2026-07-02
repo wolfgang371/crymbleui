@@ -52,8 +52,10 @@ node.version = node.local_rev  +  Σ (dep.version for each captured dep)
 - Reading `node.version` re-folds the (cheap) dep sum; a clean node returns a memoized fold with **zero**
   dep-walk. The expensive `to_primitives` recompute is deferred until something actually reads the value.
 
-The frame trigger (`RenderTrigger`) sums every widget's version into one aggregate and renders a frame **iff
-the aggregate moved**. No change → same number → 0% idle CPU, no diffing, no dirty-walk. This is the same
+The frame trigger (`RenderTrigger`) sums every widget's version into one aggregate — along with each layer's
+`scroll_rev`, `position_rev`, and `clear_rev`, so a scroll or a panel drag moves the aggregate without any
+widget re-rendering — and renders a frame **iff the aggregate moved**. No change → same number → 0% idle
+CPU, no diffing, no dirty-walk. This is the same
 idea as Salsa / incremental-computation frameworks: identity by version, not by deep comparison.
 
 ## Two orthogonal axes (the thing to keep straight)
@@ -63,7 +65,9 @@ live. These are independent:
 
 1. **Dependency freshness** — auto-captured reads + the version fold. "Are my primitives up to date?"
 2. **Spatial coherence** — a geometric key (a buffer position) carried in lockstep, e.g. the VirtualMatrix
-   viewport-cache slot. "Where do my cached pixels sit, and did the viewport move?"
+   viewport-cache slot. "Where do my cached pixels sit, and did the viewport move?" The concrete class is
+   `KeyedCached(T, K)` (`cached.cr`): it recomputes on *either* a version change or a key change
+   (`@value_stale || @key != key`), where the key is a geometric position that never enters the version sum.
 
 Conflating them is what makes scroll/cache code confusing. Scroll is *mostly* axis 2 (re-blit the buffer at a
 new offset — no widget re-renders); a value edit is axis 1. Keep them apart and each is simple.
@@ -98,13 +102,15 @@ and notify." Read the getter (`color`, **never `@color`** — that's the raw `So
 `theme_property name, key` is `reactive_property`'s cousin for theme colors, and the one real difference is
 **the default**. A `reactive_property` freezes a *constant* default (`= Color::White`); `theme_property`
 defaults to `nil` meaning *follow the theme* — its getter resolves `Theme.current.key` live at read time, and
-since `Theme.current` is itself a `Source`, a `Theme.set` re-renders every follower for free. An explicit
-`Color` is a sticky override that wins; set `nil` again to follow once more. So `nil`/unset is the whole
-distinction: a frozen value vs the live theme color. (The override's setter is the one `mark_needs_render`
+since `Theme.current` calls `@@current_source.get` — the `Source(ThemeData)` that holds the active theme — reading it in `to_primitives` auto-captures that edge, so a `Theme.set` re-renders every follower for free. An explicit
+`Color` is a sticky override that wins; set `nil` again to follow once more. A `ThemeColorRef`
+(built with `Theme.ref(&.ruler_label)`) is a third state: a live reference resolved against a *different*
+theme key at read time (via `v.resolve`). The full set is: `nil` (follow this property's own default theme
+key), `Color` (frozen override), `ThemeColorRef` (live redirect to another key). (The override's setter is the one `mark_needs_render`
 left in the macros — it fires only on an explicit, rare override; the theme-following default needs no push.)
 
 The rule of thumb is **Source-back what renders.** A field never read while painting doesn't earn a `Source`:
-a managed object uses `reconcile_property`; core widget *state* (`visible`/`enabled`/`focus_highlighted`)
+a managed object uses `reconcile_property`; core widget *state* (`enabled`/`focus_highlighted`)
 keeps an explicit `mark_needs_render` — a structural gate, not paint content; and hot per-frame fields stay
 plain ivars for speed (next section).
 
@@ -137,3 +143,10 @@ frame, e.g. an animating cursor overlay) has *no* node, so it cannot auto-captur
 another widget. Those rare cross-layer reads need an explicit signal (or the reader made node-backed). This
 is a real boundary, not a wart — it's the seam between the per-node pull model and genuinely
 render-every-frame widgets.
+
+### Timer-driven rebuilds
+
+The SFML render loop checks `app.needs_rebuild?` on every iteration, not only after input events; the test
+renderer's `render_frame_if_needed` does the same. A timer callback that mutates app state and calls
+`request_rebuild` therefore fires a frame without waiting for the next mouse move or keypress — making the
+pull model equally reliable for clock displays, polled data, and state-based animations.

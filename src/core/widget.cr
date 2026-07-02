@@ -83,6 +83,26 @@ module CrymbleUI
         # Measure count instrumentation (for testing VStack/HStack optimization)
         @@measure_count : Int32 = 0
 
+        # absolute_bounds invocation instrumentation. absolute_bounds is UNCACHED and O(depth) (it
+        # re-walks the parent chain on every call), so calling it once per widget over a whole subtree
+        # is O(content·depth) — the shape of the resize regression a per-frame grow walk re-introduced
+        # (the repaint marking walk). This counter guards the grow path against re-introducing an
+        # O(content) absolute_bounds storm: a pure grow must call it O(1) in content size, not O(n).
+        @@absolute_bounds_count : Int32 = 0
+
+        # mark_needs_render PROPAGATION instrumentation. Each call walks the parent chain to a
+        # layer + does a set-insert (propagate_to_layer) — the "method calls, set operations, layer
+        # traversals" overhead that regressed live resize historically (be1ffa9) and is INVISIBLE to
+        # primitive_count (a mark-storm over culled widgets renders nothing). This counter guards
+        # the live-resize policy against re-introducing that propagation wall.
+        @@mark_render_count : Int32 = 0
+
+        # Text-measurement cache (text+size → visual Size). measure_text is a layout HOT PATH: every
+        # Button/Text re-measures each layout pass, so a live panel resize fired hundreds of SFML
+        # font queries per frame (~40ms, the resize-CPU cost). The result is deterministic per font,
+        # so cache it; cleared on font change (font=). Bounded to cap growth from dynamic text.
+        @@measure_text_cache = Hash(Tuple(String, Float64), Size).new
+
         # Control warnings for conflicts (duplicate IDs, duplicate shortcuts, etc.)
         # Can be disabled for tests
         @@enable_warnings : Bool = true
@@ -135,6 +155,7 @@ module CrymbleUI
         # Set the global font (called by renderer)
         def self.font=(font : Font)
             @@font = font
+            @@measure_text_cache.clear # font changed → cached measurements are invalid
         end
 
         # Get the global font
@@ -171,8 +192,15 @@ module CrymbleUI
         def self.measure_text(text : String, size : Float64) : Size
             return Size.new(0.0, 0.0) unless font = @@font
 
+            key = {text, size}
+            if cached = @@measure_text_cache[key]?
+                return cached
+            end
             # Delegate to Font implementation (SFML or headless)
-            font.measure_text(text, size)
+            result = font.measure_text(text, size)
+            @@measure_text_cache.clear if @@measure_text_cache.size > 20_000 # bound dynamic-text growth
+            @@measure_text_cache[key] = result
+            result
         end
 
         # Instance method for convenience
@@ -224,6 +252,33 @@ module CrymbleUI
             @@measure_count += 1
         end
 
+        # Get absolute_bounds invocation count for testing
+        def self.absolute_bounds_count : Int32
+            @@absolute_bounds_count
+        end
+
+        # Reset absolute_bounds invocation count for testing
+        def self.reset_absolute_bounds_count
+            @@absolute_bounds_count = 0
+        end
+
+        # Increment absolute_bounds count for instrumentation. Called via the explicit `Widget.` class
+        # qualifier (NOT a bare `@@` from the instance method): a bare class-var write from an instance
+        # method targets the RUNTIME subclass's own copy (Crystal gives each subclass a separate copy),
+        # so the counts would scatter across Button/VStack/… and Widget's would stay 0. Same idiom as
+        # increment_measure_count.
+        def self.increment_absolute_bounds_count
+            @@absolute_bounds_count += 1
+        end
+
+        def self.mark_render_count : Int32
+            @@mark_render_count
+        end
+
+        def self.reset_mark_render_count
+            @@mark_render_count = 0
+        end
+
         def self.increment_render_count
             @@render_count += 1
         end
@@ -268,6 +323,7 @@ module CrymbleUI
         # Calculate absolute window coordinates from parent-relative bounds
         # Traverses parent chain to convert relative position to absolute
         def absolute_bounds : Rect
+            Widget.increment_absolute_bounds_count
             if parent = @parent
                 parent_abs = parent.absolute_bounds
                 Rect.new(
@@ -511,6 +567,7 @@ module CrymbleUI
         # Mark widget as needing render (visual change only)
         # Does not trigger layout unless already needed
         def mark_needs_render
+            @@mark_render_count &+= 1  # instrumentation: count the propagation (see @@mark_render_count)
             @content_rev &+= 1  # bump content axis (any visual change)
             @primitives_node.try(&.touch) # signal the pull node (content is an intrinsic change)
             # Don't downgrade from NeedsLayout to NeedsRender
@@ -721,13 +778,42 @@ module CrymbleUI
             @state = WidgetState::Clean
         end
 
-        # Check if layout can be skipped (incremental layout optimization)
-        # Returns true if widget is clean AND constraints match last layout AND zoom unchanged
+        # Half-pixel slack for the "did I fill?" test below. Erring toward "filled" (< EPS below max ⇒
+        # treat as filling ⇒ re-layout) is the SAFE direction: at worst we re-layout a body that would
+        # have been stable; the unsafe direction (skipping a fill body) would leave it the wrong size.
+        LAYOUT_FILL_EPS = 0.5
+
+        # Does this widget's child arrangement depend on the incoming constraint's AVAILABLE space, beyond
+        # just its own resulting size? A wrapping/packing layout (FlowLayout) does — it re-packs rows
+        # against max_width, so a width change can change its layout even though its own size stayed a
+        # sub-max "widest row". Such a widget must NOT take the can_skip_layout? relaxation branch (which
+        # assumes a sub-max body is intrinsic and unaffected by more space); it skips only on identical
+        # constraints. Default false. Override → true to opt out of relaxation.
+        def layout_depends_on_available_space? : Bool
+            false
+        end
+
+        # Check if layout can be skipped (incremental layout optimization).
+        # Skips when the widget is clean, zoom is unchanged, and the new constraints can't change its
+        # layout — either identical constraints, OR a RELAXATION the widget didn't use (its last size
+        # still fits the new constraints and, in each axis whose max grew, it wasn't already filling the
+        # old max). The relaxation case is what lets a floored panel's non-fill content skip a resize
+        # grow (intrinsic body: size < max ⇒ a bigger max changes nothing); a fill body (size == max)
+        # re-lays-out, since it grows into the new space.
         protected def can_skip_layout?(constraints : BoxConstraints) : Bool
             return false if needs_layout?
-            return false if @last_constraints.nil?
             return false if @last_zoom_epoch != FontSizing.zoom_epoch
-            @last_constraints == constraints
+            old = @last_constraints
+            return false if old.nil?
+            return true if old == constraints
+            return false if layout_depends_on_available_space?
+
+            sz = @bounds.size
+            return false unless constraints.min_width <= sz.width <= constraints.max_width
+            return false unless constraints.min_height <= sz.height <= constraints.max_height
+            return false if constraints.max_width > old.max_width && sz.width >= old.max_width - LAYOUT_FILL_EPS
+            return false if constraints.max_height > old.max_height && sz.height >= old.max_height - LAYOUT_FILL_EPS
+            true
         end
 
         # Invalidate cached constraints (forces re-layout on next pass)
@@ -787,6 +873,37 @@ module CrymbleUI
         # Measure widget size given constraints
         # Returns the size the widget wants to be
         abstract def measure(constraints : BoxConstraints) : Size
+
+        # Smallest height at which this widget still renders acceptably, at the given width.
+        # Its own chain (NOT BoxConstraints-clamped like measure) so an unbounded request can't be
+        # turned finite mid-compose. Default = the natural measured height — correct for LEAVES,
+        # which can't shrink below their content. A CONTAINER with a shrinkable descendant (e.g. a
+        # fill VirtualMatrix) MUST override, composing children's min the way its measure/perform_layout
+        # stacks them; otherwise this default measures the greedy fill and the floor is wrong.
+        def min_intrinsic_height(width : Float64) : Float64
+            h = measure(BoxConstraints.new(min_width: 0.0, max_width: width, min_height: 0.0, max_height: Float64::INFINITY)).height
+            {% if flag?(:verify_bounds) %}
+                if !@children.empty? && h > 100_000.0
+                    STDERR.puts "[min_intrinsic_height] #{self.class.name} fell through to the greedy measure default (#{h.round(0)}) — a container with a shrinkable descendant needs an override"
+                end
+            {% end %}
+            h
+        end
+
+        # The WIDTH dual of min_intrinsic_height: smallest width at which this widget still renders
+        # acceptably, at the given height. Own chain (NOT BoxConstraints-clamped), default = the natural
+        # measured width — correct for LEAVES. A CONTAINER with a width-shrinkable descendant (a fill
+        # VirtualMatrix / ScrollView) MUST override, composing children's min the way measure/perform_layout
+        # arranges them on the WIDTH axis; otherwise this greedy-measures the fill and the floor is wrong.
+        def min_intrinsic_width(height : Float64) : Float64
+            w = measure(BoxConstraints.new(min_width: 0.0, max_width: Float64::INFINITY, min_height: 0.0, max_height: height)).width
+            {% if flag?(:verify_bounds) %}
+                if !@children.empty? && w > 100_000.0
+                    STDERR.puts "[min_intrinsic_width] #{self.class.name} fell through to the greedy measure default (#{w.round(0)}) — a container with a width-shrinkable descendant needs an override"
+                end
+            {% end %}
+            w
+        end
 
         # Layout widget and children at given position
         # Template method: handles skip check, then delegates to perform_layout
@@ -941,9 +1058,10 @@ module CrymbleUI
         # Dynamic widget this is the pull node's version (auto-captured theme/zoom + touch-driven local
         # rev) — so the trigger moves iff this widget's primitives WOULD change, correct-by-construction
         # and more precise than the global rev (only widgets that read theme move on a theme swap). For
-        # Static (cached forever), Never (re-rendered every frame, triggered elsewhere), and a not-yet-
-        # rendered Dynamic widget, fall back to the hand-rolled primitive_cache_rev (a documented residual
-        # until those policies are reseated). version() is CHEAP — it re-folds, never recomputes the value.
+        # Static (cached forever — currently unused by any widget), Never (re-rendered every frame,
+        # triggered elsewhere — drag ghost, cursor overlay), and a not-yet-rendered Dynamic widget fall
+        # back to the hand-rolled primitive_cache_rev — a DECIDED PERMANENT residual (reseating these
+        # no-node cases onto Cached nodes is awkward + zero value). version() is CHEAP — re-folds, never recomputes.
         def primitives_version : UInt64
             if cache_policy == CachePolicy::Dynamic && (node = @primitives_node)
                 node.version
@@ -1446,26 +1564,6 @@ module CrymbleUI
         # Used by WindowPanel to notify ScrollView (and other layer owners) of
         # size/z-index changes without direct type coupling.
         # Position changes are handled by pull-based bounds (compute_bounds_for_layer).
-
-        # Broadcast resize move to all LayerOwner descendants
-        protected def notify_layer_owners_resize_move(dw : Float64, dh : Float64, dx : Float64 = 0.0, dy : Float64 = 0.0, clip_bounds : Rect? = nil)
-          @children.each do |child|
-            if child.responds_to?(:on_ancestor_resize_move)
-              child.on_ancestor_resize_move(dw, dh, dx, dy, clip_bounds)
-            end
-            child.notify_layer_owners_resize_move(dw, dh, dx, dy, clip_bounds)
-          end
-        end
-
-        # Broadcast resize end to all LayerOwner descendants
-        protected def notify_layer_owners_resize_end
-          @children.each do |child|
-            if child.responds_to?(:on_ancestor_resize_end)
-              child.on_ancestor_resize_end
-            end
-            child.notify_layer_owners_resize_end
-          end
-        end
 
         # Broadcast z-index change to all LayerOwner descendants
         protected def notify_layer_owners_z_index_changed(new_z : Int32)

@@ -133,5 +133,24 @@ describe CrymbleUI::FlowLayout do
             ys = narrow.children.map(&.bounds.y).uniq.sort
             ys.size.should be >= 2   # at least two rows
         end
+
+        # The SAME instance narrow→wide: a FlowLayout re-packs rows against the available width, but its
+        # own size is the widest row (sub-max), so the layout relaxation-skip (which treats a sub-max body
+        # as intrinsic) would wrongly SKIP the re-flow on a grow and leave the stale, too-tall row layout.
+        # FlowLayout opts out of that skip (layout_depends_on_available_space?). Guards that.
+        it "re-flows the SAME instance when a width grow lets children collapse to fewer rows" do
+            f = CrymbleUI::FlowLayout.new(hspacing: 5.0, vspacing: 4.0)
+            3.times { f.add_child(TestWidget.new(measured_size: CrymbleUI::Size.new(40.0, 20.0))) }
+
+            # Narrow (100): 40,5,40 fill row 1; the 3rd wraps → 2 rows.
+            f.layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(100.0, 999.0)), CrymbleUI::Vec2.zero)
+            f.children.map(&.bounds.y).uniq.size.should eq(2)
+            narrow_height = f.bounds.height
+
+            # Wide (300): all three fit on one row → 1 row, shorter.
+            f.layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(300.0, 999.0)), CrymbleUI::Vec2.zero)
+            f.children.map(&.bounds.y).uniq.size.should eq(1)
+            f.bounds.height.should be < narrow_height
+        end
     end
 end

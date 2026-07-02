@@ -24,7 +24,7 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
             if color = background_color
                 primitives do
-                    fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), color)
+                    fill_background(bounds, color)
                 end
             else
                 [] of DrawPrimitive
@@ -60,6 +60,32 @@ module CrymbleUI
             # Add padding to total size
             size = Size.new(total_width + padding * 2, max_height + padding * 2)
             constraints.constrain(size)
+        end
+
+        # Min width = Σ children.min at the padded inner height + spacing + padding (width is HStack's
+        # STACKING axis — the dual of VStack/height). Own chain, no clamp.
+        def min_intrinsic_width(height : Float64) : Float64
+            return padding * 2 if @children.empty?
+            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            total_width = 0.0
+            @children.each_with_index do |child, index|
+                total_width += child.min_intrinsic_width(inner_max_height)
+                total_width += spacing if index < @children.size - 1
+            end
+            total_width + padding * 2
+        end
+
+        # Min height = MAX child min-height at the padded inner width (height is the CROSS axis for a
+        # horizontal stack — MAX, no spacing). The cross-axis twin never added; needed once an HStack
+        # holds a height-shrinkable child (a fill VirtualMatrix).
+        def min_intrinsic_height(width : Float64) : Float64
+            return padding * 2 if @children.empty?
+            inner_max_width = (width - padding * 2).clamp(0.0, Float64::MAX)
+            max_height = 0.0
+            @children.each do |child|
+                max_height = Math.max(max_height, child.min_intrinsic_height(inner_max_width))
+            end
+            max_height + padding * 2
         end
 
         # Layout children horizontally with flex support

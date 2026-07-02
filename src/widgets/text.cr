@@ -63,7 +63,7 @@ module CrymbleUI
 
             primitives do
                 if bg = background_color
-                    fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), bg)
+                    fill_background(bounds, bg)
                 end
                 text_y = vcentered_text_y(bounds.height - padding * 2, font_scale, padding)
                 draw_text(text, Vec2.new(padding, text_y), color, font_scale)

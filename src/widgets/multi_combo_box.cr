@@ -60,6 +60,11 @@ module CrymbleUI
 
     reconcile_property popup_open : Bool = false
 
+    # per-item background colors for the popup rows — mirrors ComboBox's
+    # `text_background_colors`. The shared ComboBoxPopup applies `colors[original_index]`;
+    # embrace uses it to highlight the pinned branch and mute the non-mergeable ones.
+    reactive_property text_background_colors : Array(Color)?
+
     @explicit_width : Float64?
     @summary : (Set(Int32) -> String)?
     # The host callback: handed the COMPLETE new selection after any change (gutter
@@ -93,6 +98,7 @@ module CrymbleUI
       width : Float64? = nil,
       id : String? = nil,
       summary : (Set(Int32) -> String)? = nil,
+      text_background_colors : Array(Color)? = nil,
       &block : Set(Int32) -> Nil
     )
       super(id: id)
@@ -103,6 +109,7 @@ module CrymbleUI
       @_build_selected = selected.dup
       @explicit_width = width
       @summary = summary
+      @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @on_change = block
     end
 
@@ -113,6 +120,7 @@ module CrymbleUI
       width : Float64? = nil,
       id : String? = nil,
       summary : (Set(Int32) -> String)? = nil,
+      text_background_colors : Array(Color)? = nil,
     )
       super(id: id)
       @items = items
@@ -120,6 +128,7 @@ module CrymbleUI
       @_build_selected = selected.dup
       @explicit_width = width
       @summary = summary
+      @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @on_change = nil
     end
 
@@ -255,7 +264,8 @@ module CrymbleUI
       popup = ComboBoxPopup.new(
         items: @items,
         selected_index: selected.first? || 0,
-        max_height: 200.0
+        max_height: 200.0,
+        text_background_colors: text_background_colors
       )
 
       # Checkable mode: items PULL their checked state from @selection and mutate it on a

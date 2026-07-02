@@ -47,10 +47,12 @@ jobs:
           source setup.sh
           crystal spec -- --tag '~slow'
 
-  # Cache-coherency gate (T-028 Phase 0): build the matrix/ScrollView coherency specs with
+  # Cache-coherency gate: build the matrix/ScrollView coherency specs with
   # -Dcache_validation, which re-renders each content layer from scratch and pixel-compares it
-  # against the cached buffer — failing on the stale-cache ghost class (T-018/19/21). Separate
+  # against the cached buffer — failing on the stale-cache ghost class. Separate
   # job because it ~doubles render work and is incompatible with perf-counter specs.
+  # cv-coherency.sh also carries -Dverify_bounds: the viewport_cache buffer_origin
+  # invariant (whole + always-fitting) raises at the writer + both composite seams here.
   cache-validation:
     runs-on: ubuntu-latest
     steps:

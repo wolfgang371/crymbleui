@@ -10,7 +10,9 @@ The UI has a hierarchical widget tree with **layers** as the rendering abstracti
 ```
 Window (root)
 └── WindowPanel
-    └── BlackRectWidget
+    ├── @chrome (Chrome, title bar)
+    └── @content (Content, container)
+        └── BlackRectWidget
 ```
 
 ### Layer Structure
@@ -26,8 +28,8 @@ Layer "panel_<id>" (WindowPanel's internal layer)
 
 **Widget tree (`@children`):**
 - Window has WindowPanel as child
-- WindowPanel has BlackRectWidget as child
-- Standard parent-child hierarchy
+- WindowPanel.@children = `[@chrome, @content]`; Chrome is first (renders first), Content is second
+- BlackRectWidget (user-added child) lives under `@content`; `add_child` redirects all user additions to `@content`
 
 **Layer structure (`layer.widgets`):**
 - WindowPanel creates an internal layer (`@internal_layer`)
@@ -72,7 +74,20 @@ content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(WindowPanel) }
 
 **Internal structure:**
 - `@internal_layer` - Layer for panel chrome + content
-- `@children` - child widgets (content)
+- `@children` - `[@chrome, @content]` (Chrome is a genuine child of WindowPanel, not merely a content wrapper)
+
+**Mixin: `include LayerOwner`** (src/core/layer_owner.cr)
+
+WindowPanel includes `LayerOwner`, the required mixin for any widget that owns a rendering layer. The mixin provides:
+- `can_skip_layout?` — returns `false` while the widget has a live layer, preventing stale `layer.widgets`
+- `compute_bounds_for_layer` — default implementation; WindowPanel overrides it to return `Rect(x, y, width, height)`
+- `on_ancestor_z_index_changed` — default no-op; overridden when the widget needs to propagate z-index updates
+
+Any new layer-owning widget must `include LayerOwner` and create its layer in `initialize`.
+
+**Positional fields are `reactive_property`** (widget.cr)
+
+`x`, `y`, `width`, `height`, `z_index`, `title`, `closed`, `maximized`, and similar fields are declared with the `reactive_property` macro, which wraps each value in a `Source(T)`. The generated setter calls `@field.set(value)`, notifying any pull-node that reads it, rather than issuing a blanket `mark_needs_render`. Behaviour from the caller's perspective is identical to a plain ivar — `panel.width = 300` works as expected — but internal resize hot-paths exploit the `.set(...)` bypass to avoid full repaints when only geometry changes.
 
 **Layout logic** (see `WindowPanel#perform_layout`, window_panel.cr):
 ```crystal
@@ -81,7 +96,15 @@ layer.widgets.clear
 layer.widgets << @chrome   # Chrome (title bar) renders first
 layer.widgets << @content  # Content container renders second
 
-# Layout chrome (title bar area)
+# Grow the panel to its content-aware floor (both axes) BEFORE laying out the chrome,
+# so the title bar is laid out at the settled width. Laying the chrome out first and
+# growing width afterwards left a stale title-bar fill on the right when the panel
+# floored wider than its built/zoomed width. Skipped while maximized or resizing.
+recompute_content_min
+self.height = panel_min_height if height < panel_min_height
+self.width  = panel_min_width  if width  < panel_min_width
+
+# Layout chrome (title bar area) at the now-settled width
 # Layout content (content widget computes its own position below title bar)
 # Track position for drag offset
 
@@ -127,11 +150,25 @@ widgets_to_render = all_widgets.select { |w| dirty_set.includes?(w) }
 ### collect_all_widgets_recursive (see `LayerRenderer#collect_all_widgets_recursive`, layer_renderer.cr)
 ```crystal
 private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget), target_layer : Layer)
+  # Zero-size early return: skip widget AND all its descendants.
+  # Collapsed TreeNode children retain stale bounds; this prevents ghost rendering.
+  return if widget.bounds.width <= 0.0 || widget.bounds.height <= 0.0
+
   result << widget        # Add parent first
-  # Stop recursion at layer boundaries: children of widgets with their own
-  # layer belong to that layer, not the parent layer
+
+  # If this widget itself owns a different layer, its children belong there — stop.
+  if widget.responds_to?(:layer)
+    return if (wl = widget.layer) && wl != target_layer
+  end
+
   widget.children.each do |child|
-    collect_all_widgets_recursive(child, result, target_layer)  # Then recurse to children
+    # Layer-owning children are ENTIRELY EXCLUDED: neither added to result nor recursed.
+    # Their own layer handles them in a separate collection pass.
+    if child.responds_to?(:layer) && child.layer
+      next  # skip entirely
+    else
+      collect_all_widgets_recursive(child, result, target_layer)
+    end
   end
 end
 ```

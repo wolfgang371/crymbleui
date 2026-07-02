@@ -37,6 +37,10 @@ module CrymbleUI
     class_property frame_blit_plan_count : Int32 = 0              # sticky layers rendered via blit-plan fast path
     class_property frame_boundary_cells_invalidated : Int32 = 0   # cells at buffer boundary invalidated after blit-shift
     class_property frame_layer_recollect_count : Int32 = 0       # times collect_layers was called (expensive O(n) tree walk)
+    # viewport-cache recenter instrumentation (comparative perf gate — measure the delta, not an absolute):
+    class_property frame_full_recenter_count : Int32 = 0          # viewport_cache recenters with NO overlap (clear + full re-render)
+    class_property frame_blit_shift_count : Int32 = 0             # viewport_cache recenters via blit-shift (overlap kept, edges re-rendered)
+    class_property frame_realloc_count : Int32 = 0               # layer backends reallocated (buffer grow — the storm we killed)
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
     class_property rendered_layer_ids : Array(String) = [] of String # Layer IDs rendered this frame
 
@@ -61,6 +65,9 @@ module CrymbleUI
       @@frame_blit_plan_count = 0
       @@frame_boundary_cells_invalidated = 0
       @@frame_layer_recollect_count = 0
+      @@frame_full_recenter_count = 0
+      @@frame_blit_shift_count = 0
+      @@frame_realloc_count = 0
       @@rendered_widgets.clear
       @@rendered_layer_ids.clear
       @@phase_layout_ms = 0.0
@@ -252,15 +259,35 @@ module CrymbleUI
       layers.each do |layer|
         if layer.size_changed?
           if layer.viewport_cache
-            layer.backend = nil  # Force new backend at correct size
-            layer.mark_needs_clear_and_render
+            # A viewport_cache buffer is over-allocated to viewport + 2×cache_extent. A grow that still
+            # fits the buffer keeps its backend: the margin cells are already rendered, and the per-frame
+            # recenter (handle_viewport_cache_scroll, which re-positions buffer_origin so the viewport fits)
+            # + per-slot skip fill any newly-visible cells selectively. Nil-ing on EVERY size change (the
+            # old behaviour) re-allocated the buffer and re-blit every visible cell each grow-frame — the
+            # ScrollView resize storm. Only a viewport too BIG for the buffer needs a new one; mere
+            # repositioning is the recenter's job.
+            unless layer.backend_fits_bounds?
+              layer.backend = nil # viewport outgrew the buffer → a bigger backend is genuinely needed
+              layer.mark_needs_clear_and_render
+            end
           elsif !layer.backend_fits_bounds?
             # Backend too small for new bounds — need clear after backend recreation
             layer.mark_needs_clear_and_render
+          elsif layer.clear_on_grow && layer.grew?
+            # A CachePolicy::Never partial-painter (declared via clear_on_grow, e.g. a cursor
+            # highlight band) leaves stale pixels in the newly-exposed area on a grow even when the
+            # backend still fits. Clear so it repaints clean. Generic replacement for the former
+            # per-widget guard in VirtualMatrix#setup_cursor_overlay_layer.
+            layer.mark_needs_clear_and_render
+          elsif layer.grew? && layer.state != WidgetState::NeedsLayout
+            # a within-buffer grow uncovers cache-MISS content — a control the grow exposed is
+            # stationary (not dirty) and the ELSE used to do nothing, so it stayed blank until mouse-up.
+            # Service the miss SELECTIVELY (clip the cache-HIT region as before). Skipped on NeedsLayout
+            # (a full relayout/render already repaints everything — the strip included).
+            repaint_exposed_on_grow(layer)
           end
-          # Non-viewport-cache within buffer: no action needed.
-          # Already-dirty widgets handle the visual update via selective rendering.
-          # The 20% over-allocated backend margin already has background_color.
+          # Non-viewport-cache within buffer, no growth: no action needed. Already-dirty widgets
+          # handle the visual update via selective rendering.
         end
       end
 
@@ -319,6 +346,7 @@ module CrymbleUI
                       end
 
       if layer.backend_needs_resize?(layer.bounds.width, layer.bounds.height)
+        LayerRenderer.frame_realloc_count += 1 # buffer realloc (kept-buffer resize should keep this ~0)
         # Save old backend before resizing to preserve cached content
         old_backend = layer.backend
         ensure_layer_backend(layer, width, height)
@@ -430,7 +458,7 @@ module CrymbleUI
         layer.buffer_just_cleared = true
         # For viewport_cache layers, initialize buffer_origin on first render
         if layer.viewport_cache
-          layer.buffer_origin = quantized_buffer_origin(layer)
+          layer.recenter_origin!(backend.width, backend.height)
         end
         {% if flag?(:DEBUG_RENDER) %}
           puts "  [CLEARED BUFFER to bg=#{layer.background_color}]"
@@ -447,7 +475,7 @@ module CrymbleUI
         # Without this, an explicit buffer_origin reset (e.g., grid reconfiguration or zoom)
         # leaves buffer_origin at zero while scroll_offset is large → wrong viewport composite.
         if layer.viewport_cache
-          layer.buffer_origin = quantized_buffer_origin(layer)
+          layer.recenter_origin!(backend.width, backend.height)
         end
         {% if flag?(:DEBUG_RENDER) %}
           puts "  [NEEDS_CLEAR → CLEARED BUFFER to bg=#{layer.background_color}]"
@@ -478,8 +506,8 @@ module CrymbleUI
         if viewport_w > 0 && viewport_h > 0
           fresh = render_layer_immediate(layer, layer_offset_x, layer_offset_y, viewport_w, viewport_h)
           if layer.viewport_cache
-            viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
-            viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
+            # Route through the one reader so the immediate blit position matches the composite.
+            viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_w, viewport_h)
             backend.blit(fresh, viewport_x, viewport_y)
           else
             backend.clear(layer.background_color)
@@ -630,17 +658,11 @@ module CrymbleUI
       # content-positioning bugs in a single pass.
       private def validate_immediate_mode(layer : Layer, backend : RenderBackend,
                                            layer_offset_x : Float64, layer_offset_y : Float64)
-        # 1. Capture cached viewport region from the buffer
-        viewport_x = (layer.scroll_offset.x - layer.buffer_origin.x).to_i
-        viewport_y = (layer.scroll_offset.y - layer.buffer_origin.y).to_i
+        # 1. Capture cached viewport region from the buffer — via the one reader (aligns the cv sampler
+        #    with what SFML actually composites; no hand-mirrored copy in the gating instrument).
         viewport_w = layer.bounds.width.ceil.to_i
         viewport_h = layer.bounds.height.ceil.to_i
-
-        # Clamp to buffer bounds
-        buf_w = backend.width
-        buf_h = backend.height
-        viewport_x = viewport_x.clamp(0, [buf_w - viewport_w, 0].max)
-        viewport_y = viewport_y.clamp(0, [buf_h - viewport_h, 0].max)
+        viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_w, viewport_h)
 
         return if viewport_w <= 0 || viewport_h <= 0
 
@@ -808,8 +830,15 @@ module CrymbleUI
           next unless valid_widget_dimensions?(widget)
 
           widget_abs = widget.absolute_bounds
-          widget_width = widget_abs.width.ceil.to_i
-          widget_height = widget_abs.height.ceil.to_i
+          # Size the widget backend EXACTLY as production does (render_single_widget's device_pixel_span),
+          # NOT ceil(width): device_pixel_span floors both edges from the widget's layer-local position so
+          # adjacent siblings tile without overlap (ceil would 1px-overlap them → the stale-background
+          # white-line the production path deliberately avoids). ceil here made this cv ground-truth paint
+          # one extra fractional-edge column that the (correctly device_pixel_span-sized) cache never has →
+          # a FALSE ~1px "stale cache" seam at every fractional-width widget edge. The instrument, not the
+          # cache, was the bug.
+          widget_width = device_pixel_span(widget_abs.x - layer_offset_x, widget_abs.width)
+          widget_height = device_pixel_span(widget_abs.y - layer_offset_y, widget_abs.height)
           next if widget_width <= 0 || widget_height <= 0
 
           # Viewport-relative position
@@ -899,6 +928,17 @@ module CrymbleUI
       end
     end
 
+    # SINGLE SOURCE OF TRUTH for a widget's DEVICE-PIXEL extent along one axis: the integer pixel
+    # span the float range [start, start+length) occupies, snapped (floor of each edge) so adjacent
+    # siblings tile with NO gap or overlap (one widget's right pixel == the next's left pixel). This
+    # snap is INTENTIONALLY position-dependent and can be 1px wider than ceil(length) at a fractional
+    # start. INVARIANT: a widget's full-area background fill MUST cover this span — use
+    # fill_background (it ceils; ceil(length) >= device_pixel_span(_, length) always), NEVER a
+    # logical-width fill_rect, or a 1px transparent edge strip appears at fractional positions.
+    def device_pixel_span(start : Float64, length : Float64) : Int32
+      (start + length).to_i - start.to_i
+    end
+
     # Render a single dirty widget (selective rendering optimization)
     # Uses per-widget texture: widget renders to own backend, then blits to layer
     # Directly renders the widget without tree traversal - O(1) instead of O(n)
@@ -933,8 +973,8 @@ module CrymbleUI
       end
       clamped_w = widget_abs.width.clamp(0.0, 16384.0)
       clamped_h = widget_abs.height.clamp(0.0, 16384.0)
-      widget_width = (adjusted_x + clamped_w - offset_x).to_i - (adjusted_x - offset_x).to_i
-      widget_height = (adjusted_y + clamped_h - offset_y).to_i - (adjusted_y - offset_y).to_i
+      widget_width = device_pixel_span(adjusted_x - offset_x, clamped_w)
+      widget_height = device_pixel_span(adjusted_y - offset_y, clamped_h)
 
       # Skip zero-size widgets (no visible content)
       return nil if widget_width <= 0 || widget_height <= 0
@@ -997,6 +1037,7 @@ module CrymbleUI
             # reflowed cell has a stale buffer_pos (or a disposed backend) → falls through to re-render.
             slot_buffer_pos = {layer_local_x, layer_local_y}
             if !layer.buffer_just_cleared && widget.slot_fresh?(slot_buffer_pos)
+              record_widget_disposition(widget, :skipped)
               return nil
             end
             if widget.has_valid_primitive_cache? && widget.slot_rev_matches?
@@ -1034,6 +1075,7 @@ module CrymbleUI
               backend.blit(existing_backend, layer_local_x, layer_local_y)
               widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
               widget.stamp_slot(slot_buffer_pos)
+              record_widget_disposition(widget, :blitted)
               {% if flag?(:cache_validation) %}
                 # CV trace: verify buffer content AFTER fast-path blit
                 if layer.id.starts_with?("matrix_content") && layer_local_y >= 815 && layer_local_y <= 830
@@ -1088,6 +1130,26 @@ module CrymbleUI
       # Their children will be rendered separately.
       # This prevents creating uninitialized textures that could cause artifacts.
       primitives = widget.get_primitives(widget.bounds)
+
+      {% if flag?(:debug_fill_coverage) %}
+        # INVARIANT (render boundary): a widget's full-area background fill must COVER its
+        # device-pixel backend (widget_width × widget_height). A reactive pull-cache faithfully
+        # re-serves a geometrically-WRONG primitive forever, so this class of bug (a logical-width
+        # bg fill 1px short of the snapped backend → a transparent edge "strip") is invisible to the
+        # cache and only a render-boundary assertion catches it. covered = the pixels a center-filled
+        # fill spans from 0. Flag-gated: zero cost in normal builds.
+        primitives.each do |prim|
+          next unless prim.is_a?(FillRect) && prim.bounds.x == 0.0 && prim.bounds.y == 0.0
+          cov_w = (prim.bounds.width - 0.5).ceil.to_i
+          cov_h = (prim.bounds.height - 0.5).ceil.to_i
+          # Only the 1-2px ROUNDING-gap signature (a near-full bg fill that falls 1px short of the
+          # snapped backend), never a deliberately-partial fill (progress bar, etc. — far shorter).
+          if (cov_w < widget_width && cov_w >= widget_width - 2) ||
+             (cov_h < widget_height && cov_h >= widget_height - 2)
+            STDERR.puts "[FILL-COVERAGE] #{widget.class.name.split("::").last}##{widget.path_id}: bg fill covers #{cov_w}x#{cov_h}px but device backend is #{widget_width}x#{widget_height}px → transparent edge strip. Use fill_background, not fill_rect(bounds.width, bounds.height)."
+          end
+        end
+      {% end %}
 
       is_pure_container = !widget.children.empty? && primitives.empty?
       if is_pure_container
@@ -1289,8 +1351,9 @@ module CrymbleUI
         # Without this, child widgets inside colored containers get flat grey backgrounds
         # instead of inheriting the parent's fill color.
         current_layer_pos = {layer_local_x, layer_local_y}
-        # needs_fresh_background was a vestigial channel (no producer ever set it true), so the
-        # stale-background protection is carried entirely by the position-change check below.
+        # Stale-background guard: a widget whose layer-local position changed (and whose buffer was
+        # not just cleared) must NOT recapture from the layer here — it would memorize its own
+        # previously-blitted pixels. Fill flat with the layer background instead.
         use_stale_background =
           widget.last_rendered_layer_position != current_layer_pos && !layer.buffer_just_cleared
         if use_stale_background
@@ -1374,6 +1437,15 @@ module CrymbleUI
       widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
       # Pull/SlotBuffer: stamp the slot so the next frame's per-slot check can SKIP this cell.
       widget.stamp_slot({layer_local_x, layer_local_y}) if layer.viewport_cache
+      record_widget_disposition(widget, :rendered)
+    end
+
+    # Test instrumentation hook: record HOW a widget was painted this frame — :rendered (fresh
+    # primitives), :blitted (cached texture re-blitted), or :skipped (buffer already holds it). The
+    # base is a no-op (zero cost in the SFML renderer); TestRenderer records it so specs can assert
+    # "this cell was painted, and how" WITHOUT sampling pixels. A culled/dropped widget never reaches
+    # a paint point → no entry → absent, which is exactly the grow-ghost signature.
+    protected def record_widget_disposition(widget : Widget, disposition : Symbol) : Nil
     end
 
     # Execute primitive on widget's own backend (no coordinate offset needed)
@@ -1524,6 +1596,32 @@ module CrymbleUI
       end
     end
 
+    # On a GROW of a materialized (non-viewport_cache) layer within its over-allocated
+    # backend, scissored-clear the newly-exposed strip(s) to the CURRENT background_color so stale margin
+    # pixels (e.g. after a reactive theme recolor, or a shrink-then-grow) don't show through. The
+    # cache-HIT region is clipped from cache unchanged — O(1) in content size.
+    #
+    # We deliberately do NOT walk the widget tree to re-mark "exposed" content: under the floor
+    # model the panel floors at its content's min-intrinsic size, so a grow only ever uncovers MARGIN —
+    # there is no clipped content to re-expose (content that should shrink+scroll lives in a ScrollView,
+    # which self-handles via viewport_cache). The original marking walk (collect_all_widgets_recursive
+    # + the UNCACHED, O(depth) absolute_bounds over EVERY widget, every grow-frame) was therefore pure
+    # waste under the floor and the cause of an ~80%-CPU live-resize regression that was invisible to the
+    # measure/mark counters. Pinned O(1) by grow_resize_perf_spec.
+    private def repaint_exposed_on_grow(layer : Layer)
+      last = layer.last_rendered_bounds
+      return unless last
+      return unless backend = layer.backend
+      new_bounds = layer.bounds
+      bg = layer.background_color
+      if new_bounds.width > last.width
+        backend.fill_rect(Rect.new(last.width, 0.0, new_bounds.width - last.width, new_bounds.height), bg)
+      end
+      if new_bounds.height > last.height
+        backend.fill_rect(Rect.new(0.0, last.height, new_bounds.width, new_bounds.height - last.height), bg)
+      end
+    end
+
     # Collect VISIBLE widgets recursively for viewport_cache layers
     # OPTIMIZATION: Early-exit when widget is completely outside viewport
     # This reduces iteration from O(total) to O(visible) for large scroll content
@@ -1664,22 +1762,37 @@ module CrymbleUI
       widget = layer.owner_widget
       # Ownerless layers (drag ghost, highlight) must render above all panels
       return Int32::MAX if widget.nil?
+      # The nearest ancestor that declares a compositing z-boundary wins. Asked
+      # polymorphically (responds_to?), NOT by type-checking concrete widgets: a
+      # WindowPanel/LayerBox returns its z_index, a Popup returns Int32::MAX (overlays
+      # composite above all panels). Defaults: Int32::MIN for root content (below all
+      # panels), Int32::MAX for ownerless layers (handled above).
       while widget
-        if widget.is_a?(WindowPanel)
-          return widget.z_index
-        end
-        # LayerBox (from aligned_layer/layer DSL) owns its own z-ordering
-        if widget.is_a?(LayerBox)
-          return widget.z_index
-        end
-        # Overlays are children of Window but not inside any WindowPanel
-        # They must composite ABOVE all panels
-        if widget.is_a?(Popup)
-          return Int32::MAX
+        if widget.responds_to?(:compositing_z_index)
+          return widget.compositing_z_index
         end
         widget = widget.parent
       end
       Int32::MIN
+    end
+
+    # The bounds a layer's content must be clipped to, imposed by the nearest ancestor
+    # that declares one (e.g. a WindowPanel keeping descendants off its border) — or nil
+    # if no ancestor imposes a clip. Asked polymorphically (responds_to?), NOT by
+    # type-checking concrete widgets: any widget can opt in via `descendant_layer_clip_bounds`.
+    # Shared by both renderers; the clip the SFML/headless compositors apply.
+    private def find_descendant_clip_bounds(layer : Layer) : Rect?
+      # Start at the layer owner's PARENT: a widget's clip applies to its DESCENDANTS,
+      # never to its own layer (a panel must not clip its own chrome/background off its
+      # border row — invisible while the border is opaque, but wrong in principle).
+      widget = layer.owner_widget.try(&.parent)
+      while widget
+        if widget.responds_to?(:descendant_layer_clip_bounds)
+          return widget.descendant_layer_clip_bounds
+        end
+        widget = widget.parent
+      end
+      nil
     end
 
     # Recursively collect layers from layer tree
@@ -1846,20 +1959,8 @@ module CrymbleUI
         "(parent: #{parent ? parent.class.name.split("::").last + "#" + parent.path_id : "nil"})")
     end
 
-    # Compute quantized buffer_origin for viewport_cache layers.
-    # Quantizes to multiples of cache_extent so that recenters at intermediate scroll
-    # positions (e.g. scroll=19 during scroll-back) snap to the same grid as the initial
-    # position. Without this, buffer_origin drifts (e.g. -81 instead of -100) after
-    # scroll round-trips, causing a 19px viewport shift and black pixel artifacts.
-    private def quantized_buffer_origin(layer : Layer) : Vec2
-      ce = layer.cache_extent
-      if ce <= 0.0
-        return layer.scroll_offset - Vec2.new(ce, ce)
-      end
-      buf_x = ((layer.scroll_offset.x - ce) / ce).round * ce
-      buf_y = ((layer.scroll_offset.y - ce) / ce).round * ce
-      Vec2.new(buf_x, buf_y)
-    end
+    # Origin computation moved to `Layer#compute_buffer_origin` — the sole writer, always-whole +
+    # always-fitting, with the quantization grid preserved. See src/core/layer.cr.
 
     # Handle viewport_cache buffer scroll: check if viewport moved beyond cached region
     # Returns true if buffer was recentered and needs full render of visible widgets
@@ -1874,31 +1975,14 @@ module CrymbleUI
     # The viewport position within buffer = scroll_offset - buffer_origin
     # Valid range: [0, 0] to [buffer_width - viewport_width, buffer_height - viewport_height]
     private def handle_viewport_cache_scroll(layer : Layer, backend : RenderBackend) : Bool
-      # Calculate where viewport should be positioned within the buffer
-      viewport_in_buffer_x = layer.scroll_offset.x - layer.buffer_origin.x
-      viewport_in_buffer_y = layer.scroll_offset.y - layer.buffer_origin.y
+      # Fast path: the viewport still fits the buffer at the live origin. The predicate is DERIVED from
+      # the one composite reader (viewport_sample_origin), so "gate says fits" ⟺ "composite won't clamp" —
+      # they cannot diverge. Replaces the former float+0.5-eps test, which mismatched the composite's
+      # ceil-based clamp and left a 1px band unrecentered.
+      return false if layer.viewport_fits_buffer?(backend.width, backend.height)
 
-      # Buffer and viewport dimensions
-      buffer_width = backend.width.to_f64
-      buffer_height = backend.height.to_f64
-      viewport_width = layer.bounds.width
-      viewport_height = layer.bounds.height
-
-      # Valid range for viewport position in buffer (must fit entirely within buffer)
-      max_valid_x = buffer_width - viewport_width
-      max_valid_y = buffer_height - viewport_height
-
-      # Check if viewport is still within the cached buffer region
-      # Small tolerance for floating point errors
-      epsilon = 0.5
-      if viewport_in_buffer_x >= -epsilon && viewport_in_buffer_x <= max_valid_x + epsilon &&
-         viewport_in_buffer_y >= -epsilon && viewport_in_buffer_y <= max_valid_y + epsilon
-        # Fast path: viewport still within buffer, no action needed
-        return false
-      end
-
-      # Viewport moved outside buffer bounds - need to recenter buffer
-      new_origin = quantized_buffer_origin(layer)
+      # Viewport moved outside buffer bounds - need to recenter buffer to a whole, fitting origin.
+      new_origin = layer.compute_buffer_origin(backend.width, backend.height)
       old_origin = layer.buffer_origin
 
       buf_w = backend.width
@@ -1920,8 +2004,9 @@ module CrymbleUI
           puts "    old_origin=#{old_origin} new_origin=#{new_origin}"
         {% end %}
 
+        LayerRenderer.frame_full_recenter_count += 1 # no-overlap recenter (expensive path)
         backend.clear(layer.background_color)
-        layer.buffer_origin = new_origin
+        layer.recenter_origin!(backend.width, backend.height) # whole+fitting origin, asserted at source
         layer.buffer_just_cleared = true
 
         if owner = layer.owner_widget
@@ -1972,7 +2057,8 @@ module CrymbleUI
       temp.dispose
 
       # Update buffer_origin to new position
-      layer.buffer_origin = new_origin
+      LayerRenderer.frame_blit_shift_count += 1 # overlap-preserving recenter (cheaper than full recenter)
+      layer.recenter_origin!(backend.width, backend.height, new_origin) # reuse the origin computed for the overlap math
 
       # Update texture snapshot so edge cells can capture correct background
       # (SFML texture is stale until display() - without this, blit_region reads old content)
