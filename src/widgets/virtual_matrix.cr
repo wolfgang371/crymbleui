@@ -200,6 +200,10 @@ module CrymbleUI
     # event (~125Hz). Running update_visible_cells on each backs the event loop up into a
     # multi-second freeze, so we only flag here and flush once per frame in pre_render_flush.
     @pending_scroll_update : Bool = false
+    # Resize drag defers its expensive reflow/geometry/ruler work to pre_render_flush,
+    # so a fast (~125 Hz) drag coalesces to ONE update per (~60 Hz) frame — mirrors
+    # @pending_scroll_update. Set in on_mouse_move, drained in pre_render_flush.
+    @pending_resize_update : Bool = false
     reactive_property cursor_rc : Tuple(Int32, Int32) = {0, 0}, reconcile: true
 
     # Public API: move cursor to a specific cell (e.g., after an external edit moved a row)
@@ -213,6 +217,10 @@ module CrymbleUI
     reactive_property resize_index : Int32 = 0, reconcile: true
     reactive_property resize_start_mouse : Float64 = 0.0, reconcile: true
     reactive_property resize_start_size : Float64 = 0.0, reconcile: true
+    # Whole pixels the resized line's leading edge has moved since the content buffer was last
+    # composited. The drag setters accumulate it (telescoping per-move integer deltas → exact),
+    # and update_visible_cells consumes it once per frame to drive the content-layer blit-shift.
+    @resize_pending_shift_px : Int32 = 0
 
     # Cursor highlight intensity. Positive = additive/brighten (dark themes),
     # negative = subtractive/darken (light themes). Magnitude = per-channel delta.
@@ -431,17 +439,21 @@ module CrymbleUI
     # Used during interactive resize drag for O(1) per-move instead of O(n) rebuild.
     # Caller must follow with update_visible_cells + mark_needs_render.
     protected def set_col_width_for_drag(col : Int32, width : Float64)
+      old_px = col_width_pixels(col).to_i32
       @col_widths[col] = width
       @cached_total_width = nil
       invalidate_dimension_caches
       @force_cell_update = true
+      @resize_pending_shift_px += col_width_pixels(col).to_i32 - old_px
     end
 
     protected def set_row_height_for_drag(row : Int32, height : Float64)
+      old_px = row_height_pixels(row).to_i32
       @row_heights[row] = height
       @cached_total_height = nil
       invalidate_dimension_caches
       @force_cell_update = true
+      @resize_pending_shift_px += row_height_pixels(row).to_i32 - old_px
     end
 
     # Get row height (in frame_height multiples)
@@ -1079,21 +1091,31 @@ module CrymbleUI
     # the sticky layers directly (belt-and-suspenders with the rulers' render_layer routing).
     private def mark_ruler_widgets_dirty
       return unless show_rulers
-      sv = @content_scroll_view
-      return unless sv
-      if (crw = @col_ruler_widget) && (rl = sv.sticky_row_layer)
-        rl.mark_needs_render(crw)
-      end
-      if (rrw = @row_ruler_widget) && (cl = sv.sticky_col_layer)
-        cl.mark_needs_render(rrw)
-      end
-      if corner_layer = sv.sticky_corner_layer
-        if crw = @corner_ruler_widget
-          corner_layer.mark_needs_render(crw)
-        end
-        if strip = @corner_row_strip_widget
-          corner_layer.mark_needs_render(strip)
-        end
+      # Column/row SIZES aren't Sources, so the Dynamic ruler nodes don't auto-
+      # invalidate on a resize the way they do on a scroll (scroll_offset IS a
+      # Source, auto-captured in to_primitives). invalidate_primitive_cache
+      # touches each node — regenerating its primitives AND enqueuing it to its
+      # (sticky) layer via on_dirty. Merely marking the layer (mark_needs_render)
+      # would re-blit the STALE cached texture — the ruler-static resize bug.
+      #
+      # Only the RESIZED axis's rulers change — a column resize leaves every row size (the row ruler on
+      # sticky_col_layer + the sticky-row corner strip) untouched, so re-generating them each drag frame
+      # is wasted font work AND (with reposition_sticky_cells' per-layer clear) would needlessly wake
+      # their layer. The corner column/row labels only reposition when a STICKY line is resized. Both
+      # callers are the resize path, so resize_axis is set; scroll auto-invalidates via the scroll_offset
+      # Source, never through here — the else is a defensive full invalidate.
+      case resize_axis
+      when ResizeAxis::Col
+        @col_ruler_widget.try &.invalidate_primitive_cache
+        @corner_ruler_widget.try &.invalidate_primitive_cache if resize_index < sticky_col_count
+      when ResizeAxis::Row
+        @row_ruler_widget.try &.invalidate_primitive_cache
+        @corner_row_strip_widget.try &.invalidate_primitive_cache if resize_index < sticky_row_count
+      else
+        @col_ruler_widget.try &.invalidate_primitive_cache
+        @row_ruler_widget.try &.invalidate_primitive_cache
+        @corner_ruler_widget.try &.invalidate_primitive_cache
+        @corner_row_strip_widget.try &.invalidate_primitive_cache
       end
     end
 
@@ -1126,6 +1148,30 @@ module CrymbleUI
     # cell management for pre_render_flush, so a fast multi-event drag coalesces to ONE update
     # per frame (for the only scroll position the user sees) instead of backing the event loop
     # up into a multi-second freeze. The offset came FROM the ScrollView, so don't sync back.
+    # Once-per-frame resize work, deferred from on_mouse_move via @pending_resize_update.
+    # Geometry first (sticky/corner depend on the new sizes), then reflow the visible
+    # cells, then invalidate the ruler nodes (sizes aren't Sources — see
+    # mark_ruler_widgets_dirty). Coalesced so a fast drag does this ONCE per frame.
+    private def flush_resize_update
+      ruler_w = ruler_col_width_pixels
+      ruler_h = ruler_row_height_pixels
+      if crw = @corner_ruler_widget
+        crw.layout(BoxConstraints.tight(Size.new(ruler_w + sticky_col_width_pixels, ruler_h)), Vec2.zero)
+      end
+      if strip = @corner_row_strip_widget
+        strip.layout(BoxConstraints.tight(Size.new(ruler_w, sticky_row_height_pixels)), Vec2.new(0.0, ruler_h))
+      end
+      if sv = @content_scroll_view
+        sv.sticky_row_height = sticky_row_height_pixels + ruler_row_height_pixels
+        sv.sticky_col_width = sticky_col_width_pixels + ruler_col_width_pixels
+        sv.update_sticky_layer_bounds
+      end
+      vp_w = @content_layer.try(&.bounds.width) || bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || bounds.height
+      update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+      mark_ruler_widgets_dirty
+    end
+
     private def sync_from_scroll_view(new_offset : Vec2)
       return if scroll_offset == new_offset
       @scroll_offset.set(new_offset)
@@ -1153,6 +1199,15 @@ module CrymbleUI
         vp_w = @content_layer.try(&.bounds.width) || bounds.width
         vp_h = @content_layer.try(&.bounds.height) || bounds.height
         update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+      end
+
+      # Deferred resize flush: a resize drag only flagged @pending_resize_update per
+      # move; do the expensive geometry + reflow + ruler invalidation here, once per
+      # frame. Must run before the change-animation scan below (which reads the
+      # up-to-date @visible_rows/@visible_cols this refreshes).
+      if @pending_resize_update
+        @pending_resize_update = false
+        flush_resize_update
       end
 
       # Change animation: call start_frame + scan visible cells for value changes
@@ -1627,6 +1682,22 @@ module CrymbleUI
         if resize_axis != ResizeAxis::None
           sticky_rows_val = sticky_row_count
           sticky_cols_val = sticky_col_count
+
+          # Whole pixels the resized line's leading edge moved since the buffer was last composited
+          # (accumulated by the drag setters; telescopes to an exact integer). Consumed once per frame.
+          shift_delta = @resize_pending_shift_px
+          @resize_pending_shift_px = 0
+
+          # A content-layer blit-shift replaces the whole-layer clear for any COLUMN or ROW resize
+          # (widen or shrink, data OR sticky line) with no compound cell straddling the boundary. A sticky
+          # resize shifts the whole data area, which on the content layer is the same single-axis
+          # translation (its sticky region holds no content cells — just background). The sticky-header
+          # layers reflow via their own path. Any disqualifier flips this off and the layer clears as
+          # before. (doc/plans/resize-blit-shift.md.)
+          can_shift = shift_delta != 0 && !resize_axis.none?
+
+          size_changed_cells = [] of Widget
+
           @active_cells.each do |key, widget|
             next if new_cells.includes?(widget) # Already laid out above
             row, col = key
@@ -1643,16 +1714,7 @@ module CrymbleUI
               next if bounding[1][0] < resize_index # max_row < resized row
             end
 
-            x = ruler_col_width_pixels.to_i + col_physical_cum[col]
-            y = ruler_row_height_pixels.to_i + row_physical_cum[row]
-            cell_width = calculate_merged_width(bounding, col_sizes)
-            cell_height = calculate_merged_height(bounding, row_sizes)
-            cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
-            widget.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
-
-            # Cells that changed size need primitive regeneration.
-            # ALL affected cells (moved or resized) need fresh background to prevent
-            # black holes from stale pixels at old positions in the content layer buffer.
+            # Cells whose span INCLUDES the resized line changed size → re-render.
             size_changed = case resize_axis
                            when ResizeAxis::Col
                              bounding[0][1] <= resize_index && resize_index <= bounding[1][1]
@@ -1660,12 +1722,59 @@ module CrymbleUI
                              bounding[0][0] <= resize_index && resize_index <= bounding[1][0]
                            else false
                            end
-            widget.invalidate_primitive_cache if size_changed
+
+            if can_shift && !size_changed
+              # A line entirely PAST the resized one: it only MOVES (by shift_delta along the resize
+              # axis). Translate its bounds WITHOUT invalidation — handle_content_resize_shift moves its
+              # buffer pixels + slot stamp in lockstep, so re-rendering it would be wasted work (the point
+              # of the shift). (layout()'s position-only path would dispose its background + needs_render.)
+              if resize_axis.col?
+                widget.shift_bounds(shift_delta.to_f64, 0.0)
+              else
+                widget.shift_bounds(0.0, shift_delta.to_f64)
+              end
+            else
+              # The resized line (re-renders at its new size) or the clear-path fallback: re-lay-out to
+              # the exact new geometry so a full clear+render is correct.
+              x = ruler_col_width_pixels.to_i + col_physical_cum[col]
+              y = ruler_row_height_pixels.to_i + row_physical_cum[row]
+              cell_width = calculate_merged_width(bounding, col_sizes)
+              cell_height = calculate_merged_height(bounding, row_sizes)
+              cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
+              widget.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
+            end
+
+            if size_changed
+              widget.invalidate_primitive_cache
+              size_changed_cells << widget
+            end
           end
-          # Clear buffer (erases ghost pixels at old positions) and trigger full render.
-          # Most cells hit the fast path (blit cached widget_backend) — only size-changed
-          # cells do full re-render.
-          @content_layer.try(&.mark_needs_clear_and_render)
+
+          content = @content_layer
+          if content && can_shift
+            # Dispose the resized line's cached backends so the selective render repaints them fresh
+            # (nil widget_backend → full render path); the surrounding columns are translated by the
+            # buffer blit-shift in handle_content_resize_shift. Nulling background_backend forces a
+            # fresh background capture (else a moved/re-rendered cell re-imprints a stale clipped edge).
+            size_changed_cells.each do |cell|
+              cell.widget_backend.try(&.dispose)
+              cell.widget_backend = nil
+              cell.background_backend.try(&.dispose)
+              cell.background_backend = nil
+            end
+            if resize_axis.col?
+              boundary_local = ruler_col_width_pixels.to_i + col_physical_cum[resize_index + 1]
+              content.mark_needs_resize_shift(ResizeShift.new(ShiftAxis::Horizontal, boundary_local, shift_delta, grid_spacing))
+            else
+              boundary_local = ruler_row_height_pixels.to_i + row_physical_cum[resize_index + 1]
+              content.mark_needs_resize_shift(ResizeShift.new(ShiftAxis::Vertical, boundary_local, shift_delta, grid_spacing))
+            end
+          else
+            # Clear buffer (erases ghost pixels at old positions) and trigger full render.
+            # Most cells hit the fast path (blit cached widget_backend) — only size-changed
+            # cells do full re-render.
+            content.try(&.mark_needs_clear_and_render)
+          end
         end
 
         # Re-layout existing COMPOUND cells with updated visible sizes
@@ -1699,9 +1808,12 @@ module CrymbleUI
         # Update visual states for all cells
 
         # Reposition sticky cells to account for scroll offset
-        # Sticky layers are non-viewport_cache, so cells need screen-space positions
-        # During resize: force reposition path (blit plan uses cached textures with stale sizes)
-        if sticky_cells_can_use_blit_plan? && resize_axis == ResizeAxis::None
+        # Sticky layers are non-viewport_cache, so cells need screen-space positions.
+        # The blit-plan now runs during a resize too: the resized line's header (stale-size cached
+        # texture) is routed to render_list by compute_sticky_blit_plans; every other sticky cell merely
+        # moved → its cached texture is blitted at the new position, instead of a full sticky-layer clear
+        # + re-render of every header. (reposition_sticky_cells stays the fallback when nothing blits.)
+        if sticky_cells_can_use_blit_plan?
           compute_sticky_blit_plans
         else
           reposition_sticky_cells

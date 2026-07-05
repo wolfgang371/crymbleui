@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.0.0**
+**Version 1.0.1**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~31958 LOC
-- spec/: ~57395 LOC
+- src/: ~32336 LOC
+- spec/: ~57869 LOC
 
 ## Features
 
@@ -99,6 +99,19 @@ crystal run src/hello.cr
 and many more in examples/
 
 ## New Features
+
+### v1.0.0
+
+The first stable release. What defines CrymbleUI:
+
+1. **Declarative & reactive** — a clean, SwiftUI-inspired DSL over pull-based, auto-capturing state: widgets re-render when a value they read changes.
+2. **VirtualMatrix** — a flagship virtual grid of arbitrary size, with automatic sticky headers (rows *and* columns, arbitrarily nested), automatic cell merging, in-cell editing, keyboard cut/paste/insert/delete, and cell drag-and-drop.
+3. **RecursiveGrid** — a 2D layout grid with automatic cell spanning; any cell can nest another grid, and its neighbours span to match.
+4. **Fast by construction** — per-widget texture caching, layer compositing, and a viewport-cache blit-shift make scrolling *and* column/row resizing translate cached pixels instead of re-rendering the grid.
+5. **Batteries included** — buttons, text inputs, checkboxes, single- and multi-select combo boxes, scroll views, menus, panels, trees and images; type-safe drag & drop, keyboard navigation, and right-click context menus.
+6. **Themeable & portable** — runtime light/dark theming (JSON-configurable) on an SFML 3.0 backend for Linux and Windows, with a headless test renderer for pixel-level testing.
+
+---
 
 ### v0.7.0
 

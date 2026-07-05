@@ -17,6 +17,34 @@ module CrymbleUI
     end
   end
 
+  # Axis of a content-layer resize blit-shift (see ResizeShift / handle_content_resize_shift).
+  enum ShiftAxis
+    Horizontal # a column resize: the region RIGHT of the boundary translates in x
+    Vertical   # a row resize: the region BELOW the boundary translates in y
+  end
+
+  # One-shot request to translate the part of a viewport_cache buffer beyond a resize boundary,
+  # instead of clearing + re-compositing the whole layer. A column/row resize is a *partitioned*
+  # translation: everything before `boundary_local_px` (along `axis`) is fixed, the resized line
+  # re-renders, and everything after it slides by `delta_px` — with buffer_origin UNCHANGED (so the
+  # single-writer buffer_origin invariant holds for free). Set by VirtualMatrix's resize branch,
+  # consumed and nulled in one frame by handle_content_resize_shift. Mirrors blit_plan's lifecycle.
+  #
+  # `boundary_local_px` is the NEW layer-local coordinate of the first shifted line's leading edge
+  # (ruler + cumulative size). The renderer subtracts buffer_origin at render time (the one reader).
+  # `gap_px` is the inter-cell grid gap (grid_spacing): the strip the shift vacates at the boundary is
+  # cleared to background over max(|delta|, gap) so the resized line's trailing grid gap AND the row
+  # gaps within the vacated band end up background (the resized cell only paints up to right - gap).
+  struct ResizeShift
+    getter axis : ShiftAxis
+    getter boundary_local_px : Int32
+    getter delta_px : Int32 # signed; > 0 widen (shift away from origin), < 0 shrink
+    getter gap_px : Int32
+
+    def initialize(@axis : ShiftAxis, @boundary_local_px : Int32, @delta_px : Int32, @gap_px : Int32)
+    end
+  end
+
   # Layer represents a render target with its own backend
   # Layers form a tree hierarchy and are composited by z-index
   #
@@ -98,6 +126,10 @@ module CrymbleUI
     # Blit-plan: when set, render_layer uses fast path (clear + blit cached textures)
     # instead of full widget render pipeline. Used for sticky layers on scroll.
     property blit_plan : Array(BlitEntry)? = nil
+    # One-shot content-layer resize blit-shift (set by VirtualMatrix's resize branch, consumed +
+    # nulled by handle_content_resize_shift). When set, the per-layer render translates the buffer
+    # region past the boundary instead of clearing — keeping viewport culling + the per-slot skip on.
+    property resize_shift : ResizeShift? = nil
     # Widgets to render normally AFTER blit-plan blits (e.g., CachePolicy::Never rulers).
     # These are rendered through the full render_single_widget path after the blit-plan
     # handles data cells. This enables hybrid mode: blit cached cells + render fresh rulers.
@@ -459,6 +491,7 @@ module CrymbleUI
       {% end %}
       @state = WidgetState::NeedsLayout
       @dirty_widgets.clear # Layout change = all widgets dirty (full re-render)
+      @resize_shift = nil  # a full re-layout supersedes any pending resize blit-shift
       # NOTE: Do NOT propagate to parent layer - layout is isolated per layer
     end
 
@@ -469,7 +502,19 @@ module CrymbleUI
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
       @dirty_widgets.clear # Empty set = render all widgets
       @needs_clear = true
+      @resize_shift = nil  # a full clear+render supersedes any pending resize blit-shift
       @clear_rev &+= 1 # make the clear visible to frame_aggregate_rev
+    end
+
+    # Request a content-layer resize blit-shift on the next render (see ResizeShift). Like
+    # mark_needs_clear_and_render it makes the layer needs_render and moves the pull aggregate, but it
+    # does NOT set needs_clear: the render TRANSLATES the buffer region past the boundary instead of
+    # clearing it, keeping viewport culling + the per-slot skip on so only the resized line re-renders.
+    def mark_needs_resize_shift(shift : ResizeShift)
+      @resize_shift = shift
+      @state = WidgetState::NeedsRender if @state == WidgetState::Clean
+      @dirty_widgets.clear
+      @clear_rev &+= 1 # a buffer-structural change the frame aggregate must see (mirror the clear rev)
     end
 
     # Check if layer needs rendering

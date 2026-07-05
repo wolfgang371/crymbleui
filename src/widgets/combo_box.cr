@@ -205,17 +205,15 @@ module CrymbleUI
       font_size = FontSizing.calculate_size(FONT_SCALE)
       text_size = Widget.measure_text(display_text, font_size)
 
-      # Height: natural height, clamped to constraints
-      # For tight constraints from VirtualMatrix cells, fill exactly (small heights).
-      # But never expand beyond double the natural height — avoids filling entire
-      # window content area when combo is the sole child of a Window.
-      natural_height = text_size.height + (PADDING + BORDER_WIDTH) * 2
-      height = natural_height
-      max_reasonable = natural_height * 2
+      # Height: tight constraints → fill exactly; loose → natural, clamped to max.
+      # (Same idiom as TextInput#measure — the two share matrix cells: a tight
+      # height fills a merged VirtualMatrix row-header spanning several record
+      # rows, e.g. a factored-out reference header.)
+      height = text_size.height + (PADDING + BORDER_WIDTH) * 2
       if constraints.min_height == constraints.max_height && constraints.max_height.finite?
-        height = Math.min(constraints.max_height, max_reasonable)  # Tight: fill cell, but cap
+        height = constraints.max_height  # Tight: fill cell (e.g., merged VirtualMatrix cells)
       elsif constraints.max_height.finite?
-        height = Math.min(height, constraints.max_height)
+        height = Math.min(height, constraints.max_height)  # Loose: clamp down only
       end
 
       # Width: prefer explicit, then constraint max, then natural

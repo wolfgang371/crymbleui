@@ -228,6 +228,8 @@ module CrymbleUI
       # Clear and re-render sticky layers to reflect new cell positions.
       # Use mark_needs_clear_and_render (NOT mark_needs_layout) — lighter:
       # no sibling validation, NeedsRender semantics, but still clears old pixels.
+      # This is the FALLBACK path (a sticky cell has no cached texture yet); the common scroll/resize
+      # case goes through compute_sticky_blit_plans, which is per-layer (only touches changed layers).
       if any_changed
         sv = @content_scroll_view
         sv.try(&.sticky_row_layer).try(&.mark_needs_clear_and_render)

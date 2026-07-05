@@ -126,6 +126,12 @@ module CrymbleUI
 
             # Layout popup if it exists (update its position in case menu moved)
             if popup = @current_popup
+                # Re-derive the shortcut-alignment width at the CURRENT zoom BEFORE
+                # re-laying-out the popup. label_width is measured at the live font_size,
+                # so a zoom-while-open must recompute it here — otherwise items keep their
+                # open-time (old-zoom) width and long labels clip. (No-op when unchanged.)
+                recompute_menu_item_alignment
+
                 # Calculate absolute position for popup
                 abs_bounds = absolute_bounds
                 popup_position = Vec2.new(abs_bounds.x, abs_bounds.y + abs_bounds.height)
@@ -135,6 +141,23 @@ module CrymbleUI
                     window_constraints = BoxConstraints.tight(Size.new(window.bounds.width, window.bounds.height))
                     popup.layout(window_constraints, popup_position)
                 end
+            end
+        end
+
+        # Compute the shared label-alignment width across this menu's items — the widest
+        # label, so every item's shortcut column lines up — and stamp it on each item.
+        # Runs on every (re-)layout: label_width is zoom-dependent, so re-deriving it is
+        # what keeps an open dropdown correctly sized when the user zooms. The reactive
+        # setter no-ops when the value is unchanged, so non-zoom re-layouts stay cheap.
+        private def recompute_menu_item_alignment
+            max_label_width = 0.0
+            @menu_items.each do |item|
+                next unless item.is_a?(MenuItem)
+                max_label_width = {max_label_width, item.label_width}.max
+            end
+            @menu_items.each do |item|
+                next unless item.is_a?(MenuItem)
+                item.max_label_width = max_label_width
             end
         end
 
@@ -186,21 +209,8 @@ module CrymbleUI
         private def open_dropdown
             return if @menu_items.empty?
 
-            # Calculate max label width for shortcut alignment
-            max_label_width = 0.0
-            @menu_items.each do |item|
-                if item.is_a?(MenuItem)
-                    label_width = item.as(MenuItem).label_width
-                    max_label_width = [max_label_width, label_width].max
-                end
-            end
-
-            # Set max label width on all MenuItems for alignment
-            @menu_items.each do |item|
-                if item.is_a?(MenuItem)
-                    item.as(MenuItem).max_label_width = max_label_width
-                end
-            end
+            # Compute + stamp the shared shortcut-alignment width (widest label).
+            recompute_menu_item_alignment
 
             # Create popup below menu label
             popup = Popup.new(

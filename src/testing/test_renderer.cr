@@ -86,6 +86,11 @@ module CrymbleUI
         # shared fm — a gui spec that needs clean INITIAL focus should reset it.
         Widget.focus_manager = FocusManager.new unless Widget.focus_manager?
         # Note: Widget.shortcut_manager not set - headless tests don't test keyboard shortcuts
+
+        # Baseline for the per-frame zoom-epoch check (see render_frame). Seed to the
+        # current epoch so a fresh renderer only reacts to zoom changes during its life
+        # (an initial layout already measures at the current zoom).
+        @last_zoom_epoch = FontSizing.zoom_epoch
       end
 
       # Resize the window buffer — simulates an OS window resize. The next render_frame lays out
@@ -197,6 +202,17 @@ module CrymbleUI
       def render_frame(app : App)
         @render_frame_count += 1
         @app = app  # Store for event simulation methods
+
+        # Mirror the SFML zoom response. In SFML a registered FontSizing.on_zoom_change
+        # callback drops caches + forces re-layout the instant zoom changes; headless
+        # has no persistent callback, so detect the epoch change per-frame and run the
+        # SAME shared response. Without this, headless zoom bumped the epoch but never
+        # re-laid-out — so zoom-dependent width bugs (e.g. an open dropdown) were
+        # invisible to specs. Runs before layout so widths re-measure this frame.
+        if @last_zoom_epoch != FontSizing.zoom_epoch
+          @last_zoom_epoch = FontSizing.zoom_epoch
+          apply_zoom_change(app.root)
+        end
 
         # Sync background color from app (app may override; nil = white default).
         @background_color = app.app_background_color || Color.new(255, 255, 255, 255)

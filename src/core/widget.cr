@@ -961,6 +961,17 @@ module CrymbleUI
             @last_zoom_epoch = FontSizing.zoom_epoch
         end
 
+        # Coherent reposition for a blit-shift: translate this widget's bounds by (dx, dy) WITHOUT
+        # invalidating its cached primitives or background. The caller (a content-layer resize blit-
+        # shift) has already translated the widget's composited pixels in the layer buffer and moved its
+        # slot stamp in lockstep (shift_slot), so a re-render/re-blit would be redundant. Contrast
+        # layout()'s position-only fast path, which disposes the background + marks needs_render — correct
+        # only when NOTHING has moved the pixels for you. Because @bounds is parent-local, this shifts
+        # absolute_bounds (and every descendant's) by the same delta.
+        def shift_bounds(dx : Float64, dy : Float64) : Nil
+            @bounds = Rect.new(Vec2.new(@bounds.x + dx, @bounds.y + dy), @bounds.size)
+        end
+
         # Perform actual layout (implemented by subclasses)
         # Called by layout() after skip check passes
         # Subclasses must set @bounds and layout children

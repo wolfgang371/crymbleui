@@ -2,6 +2,7 @@ require "../spec_helper"
 require "../../src/testing/test_renderer"
 require "../../src/widgets/combo_box"
 require "../../src/widgets/window"
+require "../../src/layout/vstack"
 
 # ComboBox tests - GUI-like tests only (no direct method calls)
 #
@@ -17,7 +18,13 @@ module ComboBoxTestHelper
     app = TestApp.new
     window = CrymbleUI::Window.new("Test", 400, 300)
     combo = CrymbleUI::ComboBox.new(items: items, selected: selected, width: 200.0, id: "combo")
-    window.add_child(combo)
+    # Wrap in a VStack (as the DSL app and every real caller do) so the combo
+    # keeps its natural height. A combo placed as a window's sole child would
+    # receive a window-sized TIGHT constraint and — honouring it — fill the
+    # whole window.
+    vstack = CrymbleUI::VStack.new
+    vstack.add_child(combo)
+    window.add_child(vstack)
     app.root_widget = window
     app
   end
@@ -132,6 +139,15 @@ describe CrymbleUI::ComboBox do
       size = combo.measure(constraints)
       size.height.should eq(20.0)
       size.width.should eq(100.0)
+    end
+
+    it "measure fills a TALL tight height (a merged VirtualMatrix row-header)" do
+      # Regression (embrace tut-14): a factored-out reference row-header is a
+      # ComboBox; when it spans several record rows the matrix hands it a tall
+      # tight height. It must fill it — capping left the extra rows uncovered
+      # (a gap in the header column, "nur bei ein bis zwei Unterspalten").
+      combo = CrymbleUI::ComboBox.new(items: ["Beta"], selected: 0)
+      combo.measure(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 60.0))).height.should eq(60.0)
     end
 
     it "has no children when collapsed" do

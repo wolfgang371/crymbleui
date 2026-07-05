@@ -261,6 +261,7 @@ module CrymbleUI
       if edge = detect_resize_edge(content_point)
         self.resize_axis = edge[0]
         self.resize_index = edge[1]
+        @resize_pending_shift_px = 0 # fresh gesture: the buffer matches the current sizes
         sx = content_point.x - absolute_bounds.x
         sy = content_point.y - absolute_bounds.y
         if edge[0] == ResizeAxis::Col
@@ -330,33 +331,11 @@ module CrymbleUI
         set_row_height_for_drag(resize_index, new_height)
       end
 
-      # Update corner widget bounds for sticky col/row resizes (no full layout needed)
-      ruler_w = ruler_col_width_pixels
-      ruler_h = ruler_row_height_pixels
-      if crw = @corner_ruler_widget
-        corner_w = ruler_w + sticky_col_width_pixels
-        crw.layout(BoxConstraints.tight(Size.new(corner_w, ruler_h)), Vec2.zero)
-      end
-      if strip = @corner_row_strip_widget
-        strip.layout(BoxConstraints.tight(Size.new(ruler_w, sticky_row_height_pixels)), Vec2.new(0.0, ruler_h))
-      end
-
-      # Mark ruler widgets dirty on their correct sticky layers
-      # (ruler widgets live on sticky layers, not the content layer —
-      # plain mark_needs_render would propagate to the wrong layer in nested hierarchies)
-      mark_ruler_widgets_dirty
-
-      # Sync sticky layer bounds to match new dimensions (avoids full layout)
-      if sv = @content_scroll_view
-        sv.sticky_row_height = sticky_row_height_pixels + ruler_row_height_pixels
-        sv.sticky_col_width = sticky_col_width_pixels + ruler_col_width_pixels
-        sv.update_sticky_layer_bounds
-      end
-
-      # Refresh cells and render without layout (O(1) per move)
-      vp_w = @content_layer.try(&.bounds.width) || bounds.width
-      vp_h = @content_layer.try(&.bounds.height) || bounds.height
-      update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+      # The new size is applied above (cheap). Defer the expensive per-move work —
+      # sticky/corner geometry, cell reflow, ruler invalidation — to pre_render_flush
+      # so a fast (~125 Hz) drag coalesces to ONE update per frame instead of
+      # re-laying-out the whole grid on every event (the 99%-CPU resize bug).
+      @pending_resize_update = true
       mark_needs_render
       mark_cursor_overlay_dirty
     end
@@ -380,6 +359,11 @@ module CrymbleUI
         # — cell widget instances (and any in-progress edit) survive. can_skip_layout? would short-
         # circuit the public layout() here (constraints are unchanged), so we call perform_layout.
         perform_layout(BoxConstraints.tight(@bounds.size), @bounds.position)
+        # perform_layout above already did the reflow/geometry for the final sizes,
+        # so drop any pending per-frame flag; but the Dynamic ruler nodes read
+        # @cached_col_sizes (not a Source), so still invalidate them explicitly.
+        @pending_resize_update = false
+        mark_ruler_widgets_dirty
         mark_needs_render
       end
       self.resize_axis = ResizeAxis::None

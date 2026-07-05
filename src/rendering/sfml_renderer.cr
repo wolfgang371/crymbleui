@@ -460,16 +460,7 @@ module CrymbleUI
       # Register zoom change callback for cache invalidation
       # This ensures font reload and texture invalidation happen regardless of
       # whether zoom is changed via keyboard (Ctrl+/-/0) or direct API call
-      FontSizing.on_zoom_change = -> {
-        reload_font
-        invalidate_all_widget_backends(app.root)
-        invalidate_all_layer_backends(app.root)
-        # Force layout state on all layers to trigger full re-render
-        # This ensures viewport_cache buffer_origin is recalculated
-        if root = app.root
-          Layer.active_layers(root).each(&.mark_needs_layout)
-        end
-      }
+      FontSizing.on_zoom_change = -> { apply_zoom_change(app.root) }
 
       needs_redraw = true
 
@@ -623,10 +614,10 @@ module CrymbleUI
         if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
           case char
           when '+', '='
-            handle_zoom_in(app)
+            handle_zoom_in
             return true
           when '-'
-            handle_zoom_out(app)
+            handle_zoom_out
             return true
           end
           # Filter ALL text when Ctrl is pressed (Ctrl+key combos shouldn't insert text)
@@ -644,9 +635,9 @@ module CrymbleUI
         # Ctrl+MouseWheel = zoom in/out
         if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
           if event.mouse_wheel_scroll.delta > 0
-            handle_zoom_in(app)
+            handle_zoom_in
           elsif event.mouse_wheel_scroll.delta < 0
-            handle_zoom_out(app)
+            handle_zoom_out
           end
           return true
         end
@@ -678,13 +669,13 @@ module CrymbleUI
         if key.control
           case key.code
           when SF::Keyboard::Add # numpad +
-            handle_zoom_in(app)
+            handle_zoom_in
             return true
           when SF::Keyboard::Subtract # numpad -
-            handle_zoom_out(app)
+            handle_zoom_out
             return true
           when SF::Keyboard::Num0, SF::Keyboard::Numpad0 # 0 = reset zoom
-            handle_zoom_reset(app)
+            handle_zoom_reset
             return true
           when SF::Keyboard::M # Ctrl+M = toggle maximize on topmost panel
             if !key.alt && !key.shift
@@ -1159,7 +1150,10 @@ module CrymbleUI
     # uploads in upstream SFML, which we fix out-of-tree (see
     # docs/WINDOWS_SFML_GL_SYNC_BUG.md and the patch alongside the lib at
     # locallib/sfml3/lib/win32/sfml-graphics-windows-glsync.patch).
-    private def reload_font
+    # Backend-specific font reload on zoom — overrides the LayerRenderer hook,
+    # invoked from the shared apply_zoom_change. The renderer-agnostic backend/layer
+    # invalidation + re-layout now lives in LayerRenderer (shared with TestRenderer).
+    protected def reload_font_for_zoom
       # Refresh the SFMLFont wrapper (cheap, just a Crystal-side adapter).
       # Downstream code may hold onto the wrapper and expect a new instance
       # after zoom change to invalidate its caches.
@@ -1172,50 +1166,23 @@ module CrymbleUI
       end
     end
 
-    # Invalidate all widget backends to clear corrupted textures
-    # Font reload clears glyph cache, but widget textures may still have corrupted pixels
-    private def invalidate_all_widget_backends(widget : Widget?)
-      return unless widget
-      widget.widget_backend = nil
-      widget.background_backend = nil
-      widget.children.each { |c| invalidate_all_widget_backends(c) }
-
-      # Also invalidate overlays (popups, tooltips, modals) - they're not in children
-      if widget.is_a?(Window)
-        widget.overlays.each { |o| invalidate_all_widget_backends(o) }
-      end
-    end
-
-    # Invalidate all layer backends (called on zoom to clear cached rendered text)
-    private def invalidate_all_layer_backends(root : Widget?)
-      return unless root
-      Layer.active_layers(root).each do |layer|
-        layer.backend = nil
-        layer.reset_first_render # Force full re-render
-      end
-    end
-
     # Handle zoom in (Ctrl++ or Ctrl+MouseWheel up)
     # Cache invalidation is handled by FontSizing.on_zoom_change callback
-    private def handle_zoom_in(app : App)
-      if FontSizing.zoom_in
-        app.root.try &.mark_needs_layout
-      end
+    # The full zoom response — font reload, cache invalidation, AND widget-tree
+    # re-layout — is handled by apply_zoom_change, invoked via FontSizing.on_zoom_change
+    # on every zoom change. So these just move the zoom level; no per-handler root mark.
+    private def handle_zoom_in
+      FontSizing.zoom_in
     end
 
     # Handle zoom out (Ctrl+- or Ctrl+MouseWheel down)
-    # Cache invalidation is handled by FontSizing.on_zoom_change callback
-    private def handle_zoom_out(app : App)
-      if FontSizing.zoom_out
-        app.root.try &.mark_needs_layout
-      end
+    private def handle_zoom_out
+      FontSizing.zoom_out
     end
 
     # Handle zoom reset (Ctrl+0)
-    # Cache invalidation is handled by FontSizing.on_zoom_change callback
-    private def handle_zoom_reset(app : App)
+    private def handle_zoom_reset
       FontSizing.reset_zoom
-      app.root.try &.mark_needs_layout
     end
   end
 end

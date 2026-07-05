@@ -26,14 +26,16 @@ class ComboBoxDSLApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(
-        items: ["Apple", "Banana", "Cherry"],
-        selected: self.selected_index,
-        width: 150.0,
-        id: "test_combo"
-      ) do |idx, val|
-        self.selected_index = idx
-        self.selected_value = val
+      vstack do
+        combo_box(
+          items: ["Apple", "Banana", "Cherry"],
+          selected: self.selected_index,
+          width: 150.0,
+          id: "test_combo"
+        ) do |idx, val|
+          self.selected_index = idx
+          self.selected_value = val
+        end
       end
     end
   end
@@ -48,14 +50,16 @@ class ComboBoxManyItemsApp < CrymbleUI::App
 
   def build : CrymbleUI::Widget
     window("Test", 400, 300) do
-      combo_box(
-        items: (1..20).map { |i| "Item #{i}" },
-        selected: self.selected_index,
-        width: 150.0,
-        id: "test_combo"
-      ) do |idx, val|
-        self.selected_index = idx
-        self.selected_value = val
+      vstack do
+        combo_box(
+          items: (1..20).map { |i| "Item #{i}" },
+          selected: self.selected_index,
+          width: 150.0,
+          id: "test_combo"
+        ) do |idx, val|
+          self.selected_index = idx
+          self.selected_value = val
+        end
       end
     end
   end

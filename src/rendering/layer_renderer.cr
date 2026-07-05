@@ -176,6 +176,57 @@ module CrymbleUI
       @layers_need_recollect = true
     end
 
+    # Renderer-agnostic response to a zoom change. measure/layout is NOT a reactive
+    # node, so bounds don't auto-update when the zoom Source changes — every cached
+    # texture must be dropped and every in-tree layer forced to re-LAYOUT so widths
+    # and heights re-measure at the new zoom. BOTH the SFML loop (via
+    # FontSizing.on_zoom_change) and the headless TestRenderer (via a per-frame
+    # zoom-epoch check) funnel here, so headless zoom faithfully mirrors SFML zoom
+    # instead of silently doing nothing. Font reload is the only backend-specific
+    # step (reload_font_for_zoom); headless measures from FontSizing directly.
+    def apply_zoom_change(root : Widget?)
+      return unless root
+      reload_font_for_zoom
+      # Drop stale widget textures (incl. overlays) — they still hold old-size glyphs.
+      invalidate_all_widget_backends(root)
+      # For every in-tree layer, in ONE registry pass: drop its cached texture and
+      # force it to re-render ALL its widgets at the new size (mark_needs_layout clears
+      # the dirty-widget cull, so even unchanged-bounds widgets repaint scaled glyphs).
+      Layer.active_layers(root).each do |layer|
+        layer.backend = nil
+        layer.reset_first_render
+        layer.mark_needs_layout
+      end
+      # Force the WIDGET tree to re-LAYOUT so bounds re-measure at the new zoom.
+      # App#prepare_layout only re-lays-out when root.needs_layout?, and a layer's
+      # mark_needs_layout marks LAYERS, not the root widget — so without this the tree
+      # keeps its old bounds and an open dropdown paints bigger glyphs inside a
+      # frozen-width box (labels clip). This is the single, complete, renderer-agnostic
+      # zoom response (the SFML keyboard handlers used to patch this per-path, missing
+      # API/wheel/headless zoom).
+      root.mark_needs_layout
+    end
+
+    # Backend-specific font reload on zoom. Default no-op (headless has no font to
+    # reload); SFMLRenderer overrides it to rebuild its SF::Font wrapper.
+    protected def reload_font_for_zoom
+    end
+
+    # Invalidate all widget backends to clear stale textures after a zoom change.
+    # Font reload clears the glyph cache, but widget textures still hold old-size pixels.
+    private def invalidate_all_widget_backends(widget : Widget?)
+      return unless widget
+      widget.widget_backend = nil
+      widget.background_backend = nil
+      widget.children.each { |c| invalidate_all_widget_backends(c) }
+
+      # Overlays (popups, tooltips, modals) are not in children — invalidate them too,
+      # so an OPEN dropdown re-renders (and re-measures) at the new zoom.
+      if widget.is_a?(Window)
+        widget.overlays.each { |o| invalidate_all_widget_backends(o) }
+      end
+    end
+
     # Render all layers for a widget tree (called by render_frame)
     # ghost_layer: optional drag ghost layer to include in rendering
     # highlight_layer: optional drop zone highlight layer
@@ -496,6 +547,24 @@ module CrymbleUI
       # update_visible_cells during scrollbar drag to avoid running on every mouse event)
       if owner = layer.owner_widget
         owner.pre_render_flush
+      end
+
+      # A resize flush (VirtualMatrix#pre_render_flush → update_visible_cells) may have requested a
+      # content-layer blit-shift: translate the buffer region past the resize boundary instead of
+      # clearing. It MUST run here — after the flush computes the new geometry (so resize_shift is set)
+      # and before widget collection — and it keeps buffer_just_cleared FALSE so viewport culling + the
+      # per-slot skip stay on, so only the resized line re-renders.
+      #
+      # A resize shift is a PURE translation (buffer_origin fixed). It must NOT stack on a buffer recenter
+      # or a full render: if `full_render` is set (NeedsLayout, or the dispatch above already recentered a
+      # scrolled-past-buffer viewport) the full render repaints the new geometry anyway, and if the
+      # viewport no longer fits the buffer a recenter is pending — either way DROP the shift and let the
+      # clear/recenter path own the frame (scroll-clamp interaction, doc/plans/resize-blit-shift.md).
+      if rs = layer.resize_shift
+        layer.resize_shift = nil
+        if !full_render && layer.viewport_fits_buffer?(backend.width, backend.height)
+          handle_content_resize_shift(layer, backend, rs)
+        end
       end
 
       {% if flag?(:immediate_mode_only) %}
@@ -1962,6 +2031,127 @@ module CrymbleUI
     # Origin computation moved to `Layer#compute_buffer_origin` — the sole writer, always-whole +
     # always-fitting, with the quantization grid preserved. See src/core/layer.cr.
 
+    # Extract a (w×h) region of `backend` anchored at (x, y) into a fresh temp backend.
+    #
+    # The caller owns the returned backend and MUST dispose it. Both the scroll blit-shift and the
+    # column/row resize blit-shift use this to translate a block of cached pixels without re-rendering.
+    #
+    # IMPORTANT: this uses blit() (full-texture draw with a negative offset) NOT blit_region() (partial
+    # texture with texture_rect): SFML's FBO→FBO blit_region applies Y-flip handling (flipped_src_y +
+    # scale(-1) + position offset) that mis-positions large-region copies (7e79842). blit() sidesteps
+    # this because SFML orients full-texture sprites automatically; the negative offset (-x, -y) clips
+    # the source so only the requested region lands in temp.
+    private def extract_backend_region(backend : RenderBackend, x : Int32, y : Int32, w : Int32, h : Int32) : RenderBackend
+      temp = create_widget_backend(w, h)
+      temp.blit(backend, -x, -y)
+      temp.display # Required for SFML: update texture snapshot before reading back
+      temp
+    end
+
+    # Translate a viewport_cache buffer for a column/row resize instead of clearing + re-compositing.
+    # A resize is a PARTITIONED translation: content before the boundary is fixed, the resized line
+    # re-renders, and content after the boundary slides by `delta_px` — with buffer_origin UNCHANGED.
+    # Because scroll and buffer_origin don't move, the single-writer invariant + composite-fit hold for
+    # free; the one hard rule is that this path writes NOTHING to buffer_origin.
+    #
+    # Reuses the same temp-backend region shift as the scroll path (extract_backend_region). Keeps
+    # buffer_just_cleared = false so viewport culling + the per-slot skip stay on: only the resized
+    # line's cells (disposed by the VM) and any newly-appearing edge cells re-render.
+    private def handle_content_resize_shift(layer : Layer, backend : RenderBackend, rs : ResizeShift) : Nil
+      # (resize_shift already nulled by the caller — this consumes it this frame.)
+      buf_w = backend.width
+      buf_h = backend.height
+      delta = rs.delta_px
+      origin = layer.buffer_origin
+      horizontal = rs.axis.horizontal?
+      axis_extent = horizontal ? buf_w : buf_h
+
+      # Convert the NEW boundary (layer-local) to buffer coords via the one reader (buffer_origin). The
+      # buffer still holds the PRE-resize pixels, so the shifted block sits at boundary - delta there
+      # (buffer_origin is unchanged during a resize).
+      new_boundary_buf = rs.boundary_local_px - (horizontal ? origin.x.to_i : origin.y.to_i)
+      old_boundary_buf = new_boundary_buf - delta
+
+      # Extract the buffer block PAST the (old) boundary and paint it back shifted by delta. For a widen
+      # (delta > 0) the block slides toward the far edge. The temp backend is mandatory: SFML/TestBackend
+      # cannot self-blit with overlap.
+      src = old_boundary_buf.clamp(0, axis_extent)
+      span = axis_extent - src
+      if span > 0 && delta != 0
+        if horizontal
+          temp = extract_backend_region(backend, src, 0, span, buf_h)
+          backend.blit(temp, src + delta, 0)
+        else
+          temp = extract_backend_region(backend, 0, src, buf_w, span)
+          backend.blit(temp, 0, src + delta)
+        end
+        temp.dispose
+
+        # Clear the strips the shift leaves stale (to the layer bg; the resized line + newly-exposed
+        # cells re-render over their parts). Two sources of stale pixels:
+        #  - the boundary grid gap [new_boundary - gap, new_boundary): the resized line paints only to
+        #    (right - gap) and the shifted block starts at new_boundary, so its trailing gap must be bg;
+        #  - the band the block VACATED: a WIDEN (delta>0) vacates [old_boundary, new_boundary) just
+        #    behind the block (union with the gap → width max(delta, gap)); a SHRINK (delta<0) vacates the
+        #    far edge [axis_extent + delta, axis_extent) it slid away from (newly-exposed cells re-render).
+        if delta > 0
+          clear_axis_strip(backend, horizontal, new_boundary_buf - Math.max(delta, rs.gap_px), new_boundary_buf, buf_w, buf_h, layer.background_color)
+        else
+          clear_axis_strip(backend, horizontal, new_boundary_buf - rs.gap_px, new_boundary_buf, buf_w, buf_h, layer.background_color)
+          clear_axis_strip(backend, horizontal, axis_extent + delta, axis_extent, buf_w, buf_h, layer.background_color)
+        end
+        backend.display # refresh snapshot so re-rendering edge cells capture correct background
+      end
+
+      LayerRenderer.frame_blit_shift_count += 1 # overlap-preserving translate (cheaper than a clear)
+
+      # Slot partition (mirror handle_viewport_cache_scroll's three-way): a cell PAST the boundary whose
+      # OLD pixels were fully inside the copied block [src, axis_extent) was faithfully moved by delta →
+      # shift its slot stamp so it stays skippable. A cell only PARTIALLY in the block (clipped at the far
+      # buffer edge — e.g. a shrink pulls a right-margin cell in from off-buffer) had its pixels NOT fully
+      # copied → dispose so it re-renders fresh. The resized line's cells were already disposed by the VM
+      # (nil backend). Cells before the boundary did not move → untouched. buffer_origin is unchanged, so
+      # a shifted slot needs only the axis translation (contrast scroll, which also moves buffer_origin).
+      lo = horizontal ? layer.bounds.x.round.to_i : layer.bounds.y.round.to_i
+      axis_origin = horizontal ? origin.x.to_i : origin.y.to_i
+      layer.widgets.each do |widget|
+        next unless widget.widget_backend
+        wabs = widget.absolute_bounds
+        new_pos = (horizontal ? wabs.x.round.to_i : wabs.y.round.to_i) - lo - axis_origin
+        next if new_pos < new_boundary_buf # before the boundary → not shifted
+        extent = (horizontal ? wabs.width : wabs.height).ceil.to_i
+        old_pos = new_pos - delta # the cell was repositioned by shift_bounds; its pixels were at old_pos
+        # Faithful iff the cell's NOW-VISIBLE destination pixels were all sourced from the copied block
+        # [src, axis_extent). A WIDEN slides toward the far edge, so a right-clipped cell's visible part
+        # still comes from copied pixels (old_pos >= src suffices); a SHRINK pulls cells toward the origin,
+        # so a cell whose old footprint ran past the far edge has un-copied pixels and must re-render.
+        if old_pos >= src && (delta > 0 || old_pos + extent <= axis_extent)
+          widget.shift_slot(horizontal ? delta : 0, horizontal ? 0 : delta) # faithfully moved → move the slot
+        else
+          # partially clipped at the far buffer edge → pixels not faithfully copied → re-render fresh.
+          widget.widget_backend.try(&.dispose)
+          widget.widget_backend = nil
+          widget.background_backend.try(&.dispose)
+          widget.background_backend = nil
+          LayerRenderer.frame_boundary_cells_invalidated += 1
+        end
+      end
+    end
+
+    # Clear a background strip along one axis of a viewport_cache buffer: [from, to) on the axis, full
+    # span on the other. Clamps to the buffer. Used to bg-fill the bands a resize blit-shift leaves stale.
+    private def clear_axis_strip(backend : RenderBackend, horizontal : Bool, from : Int32, to : Int32, buf_w : Int32, buf_h : Int32, color : Color) : Nil
+      limit = horizontal ? buf_w : buf_h
+      a = from.clamp(0, limit)
+      b = to.clamp(0, limit)
+      return if b <= a
+      if horizontal
+        backend.fill_rect(Rect.new(a.to_f64, 0.0, (b - a).to_f64, buf_h.to_f64), color)
+      else
+        backend.fill_rect(Rect.new(0.0, a.to_f64, buf_w.to_f64, (b - a).to_f64), color)
+      end
+    end
+
     # Handle viewport_cache buffer scroll: check if viewport moved beyond cached region
     # Returns true if buffer was recentered and needs full render of visible widgets
     #
@@ -2040,16 +2230,8 @@ module CrymbleUI
                            end
       {% end %}
 
-      # Copy overlap region to temp backend using blit() with negative offsets.
-      # IMPORTANT: We use blit() (full-texture draw) instead of blit_region() (partial texture
-      # with texture_rect) because SFML's FBO→FBO blit_region applies Y-flip handling
-      # (flipped_src_y + scale(-1) + position offset) that produces incorrect pixel positions
-      # for large-region copies. blit() avoids this because SFML handles FBO texture orientation
-      # automatically for full-texture sprites. The negative offset (-src_x, -src_y) causes
-      # SFML to clip the source, effectively extracting only the overlap region into temp.
-      temp = create_widget_backend(overlap_w, overlap_h)
-      temp.blit(backend, -src_x, -src_y)
-      temp.display # Required for SFML: update texture snapshot before reading back
+      # Extract the overlap region into a temp backend, then restore it at the new position.
+      temp = extract_backend_region(backend, src_x, src_y, overlap_w, overlap_h)
 
       # Clear buffer and restore overlap at new position
       backend.clear(layer.background_color)

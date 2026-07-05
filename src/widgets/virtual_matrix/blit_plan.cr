@@ -30,14 +30,12 @@ module CrymbleUI
           end
         end
 
-        # Non-compound cells without widget_backend are freshly created (e.g.
-        # bounds grew and a new sticky cell became visible). The fast path can
-        # still run — those cells will be added to blit_plan_render_widgets and
-        # rendered normally after the blits. So no "return false" here.
-        # But if the cell already has a backend and needs a re-render, the cache
-        # is stale — full render is required.
-        return false if widget.widget_backend && widget.needs_render?
-        cells_with_backend += 1 if widget.widget_backend
+        # Non-compound cells without widget_backend are freshly created (e.g. bounds grew and a new
+        # sticky cell became visible), OR with a backend but needing a fresh render (size changed / stale
+        # content). The fast path still runs — compute_sticky_blit_plans routes BOTH to blit_plan_render_
+        # widgets (rendered normally after the blits), so we don't bail here. This is what enables the
+        # blit-plan during a resize (the resized line's header needs_render; the rest just moved → blit).
+        cells_with_backend += 1 if widget.widget_backend && !widget.needs_render?
       end
       cells_with_backend > 0  # Need at least one cell with cached texture
     end
@@ -81,11 +79,14 @@ module CrymbleUI
       col_render = [] of Widget
       corner_render = [] of Widget
 
-      # Add ruler widgets to render-after lists
-      row_render << @col_ruler_widget.not_nil! if @col_ruler_widget && show_rulers
-      col_render << @row_ruler_widget.not_nil! if @row_ruler_widget && show_rulers
-      corner_render << @corner_ruler_widget.not_nil! if @corner_ruler_widget && show_rulers
-      corner_render << @corner_row_strip_widget.not_nil! if @corner_row_strip_widget && show_rulers
+      # A sticky layer is "active" (needs a clear + re-blit) only if a cell on it actually
+      # moved/resized/(re)rendered, or (for a resize) its axis's ruler changed. On a column resize only
+      # the col-header layer is active — the row-header layer + corner keep their pixels
+      # (correct-by-construction). Same for a single-axis scroll. Rulers are added to render_list
+      # per-active-layer at the end (an active layer's clear wipes its ruler, so it must re-render).
+      row_active = false
+      col_active = false
+      corner_active = false
 
       @active_cells.each do |key, widget|
         row, col = key
@@ -121,6 +122,14 @@ module CrymbleUI
             is_sticky_row, is_sticky_col,
             col_sizes, row_sizes, col_cum, row_cum,
             ruler_x_offset, ruler_y_offset)
+          # Compound cells resize/reposition on scroll+resize — conservatively activate their layer.
+          if is_sticky_row && is_sticky_col
+            corner_active = true
+          elsif is_sticky_row
+            row_active = true
+          else
+            col_active = true
+          end
           if wb && !widget.needs_render? && widget.has_valid_primitive_cache?
             # Compound cell only moved — blit cached texture
             dest_x = (vm_abs.x + widget.bounds.x - layer.bounds.x).to_i
@@ -157,14 +166,43 @@ module CrymbleUI
           new_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
         end
 
-        if widget.bounds.x != new_x || widget.bounds.y != new_y
-          widget.bounds = Rect.new(new_x, new_y, widget.bounds.width, widget.bounds.height)
+        # Non-compound cells keep their column/row size (during a RESIZE the resized line's headers
+        # genuinely change size — scroll never does, so this is a no-op there). A size change means the
+        # cached texture is the wrong size → invalidate so it re-renders fresh below.
+        new_w = (col_sizes[col] - grid_spacing).to_f64
+        new_h = (row_sizes[row] - grid_spacing).to_f64
+        size_changed = widget.bounds.width != new_w || widget.bounds.height != new_h
+        moved = widget.bounds.x != new_x || widget.bounds.y != new_y
+        if moved || size_changed
+          widget.bounds = Rect.new(new_x, new_y, new_w, new_h)
+        end
+        widget.invalidate_primitive_cache if size_changed
+
+        # A cell that will re-render (no cached texture, size changed → wrong-size texture, or stale
+        # content) OR that MOVED means its layer must clear + repaint this frame. A cell that did NEITHER
+        # contributes nothing — its pixels are already correct, so it must not activate (wake) its layer.
+        render_fresh = size_changed || widget.needs_render? || !widget.has_valid_primitive_cache?
+        if wb.nil? || render_fresh || moved
+          if is_sticky_row && is_sticky_col
+            corner_active = true
+          elsif is_sticky_row
+            row_active = true
+          else
+            col_active = true
+          end
         end
 
-        # No cached texture yet (newly created after bounds grow / viewport
-        # shift). Route to render_list for normal rendering at the freshly
-        # set bounds — cull only if truly off-screen horizontally.
+        # No cached texture yet (newly created after bounds grow / viewport shift) → render at the freshly
+        # set bounds; cull only if truly off-screen horizontally.
         unless wb
+          render_list << widget unless widget.bounds.x < -100.0
+          next
+        end
+
+        # Size changed (cached texture is the WRONG size) or stale content → render normally. This is what
+        # lets the blit-plan run during a RESIZE: only the resized line's header re-renders; every other
+        # sticky cell merely MOVED → blit its cached texture at the new position below.
+        if render_fresh
           render_list << widget unless widget.bounds.x < -100.0
           next
         end
@@ -174,20 +212,33 @@ module CrymbleUI
         target << BlitEntry.new(wb, dest_x, dest_y)
       end
 
-      # Set blit plans on layers (triggers fast path in render_layer).
-      # The blit-plan path clears the buffer and blits data cells, then renders
-      # remaining widgets (rulers + compound cells) normally.
-      if sticky_row_layer && (row_entries.any? || row_render.any?)
+      # A resize always changes the resized axis's ruler (labels reposition to the new sizes) even if no
+      # header cell happens to move → activate that axis's layer so its ruler re-renders. The corner
+      # labels only change when a STICKY line is resized. (Scroll needs no such rule: its cells move, and
+      # a moved cell already activated the layer above.)
+      row_active ||= resize_axis.col?
+      col_active ||= resize_axis.row?
+      corner_active ||= (resize_axis.col? && resize_index < sticky_cols) || (resize_axis.row? && resize_index < sticky_rows)
+
+      # Set blit plans ONLY on ACTIVE layers (triggers the fast path in render_layer: clear the buffer,
+      # blit the moved data cells, then render the rulers + size-changed cells). An INACTIVE layer keeps
+      # its pixels untouched — the point of the per-layer gate. An active layer's clear wipes its ruler,
+      # so the ruler is added to render_list here (it must re-render even if its own content is unchanged).
+      if sticky_row_layer && row_active
+        row_render << @col_ruler_widget.not_nil! if @col_ruler_widget && show_rulers
         sticky_row_layer.blit_plan = row_entries
         sticky_row_layer.blit_plan_render_widgets = row_render if row_render.any?
         sticky_row_layer.mark_needs_full_render
       end
-      if sticky_col_layer && (col_entries.any? || col_render.any?)
+      if sticky_col_layer && col_active
+        col_render << @row_ruler_widget.not_nil! if @row_ruler_widget && show_rulers
         sticky_col_layer.blit_plan = col_entries
         sticky_col_layer.blit_plan_render_widgets = col_render if col_render.any?
         sticky_col_layer.mark_needs_full_render
       end
-      if sticky_corner_layer && (corner_entries.any? || corner_render.any?)
+      if sticky_corner_layer && corner_active
+        corner_render << @corner_ruler_widget.not_nil! if @corner_ruler_widget && show_rulers
+        corner_render << @corner_row_strip_widget.not_nil! if @corner_row_strip_widget && show_rulers
         sticky_corner_layer.blit_plan = corner_entries
         sticky_corner_layer.blit_plan_render_widgets = corner_render if corner_render.any?
         sticky_corner_layer.mark_needs_full_render
