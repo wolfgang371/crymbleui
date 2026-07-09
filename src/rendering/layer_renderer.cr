@@ -41,6 +41,7 @@ module CrymbleUI
     class_property frame_full_recenter_count : Int32 = 0          # viewport_cache recenters with NO overlap (clear + full re-render)
     class_property frame_blit_shift_count : Int32 = 0             # viewport_cache recenters via blit-shift (overlap kept, edges re-rendered)
     class_property frame_realloc_count : Int32 = 0               # layer backends reallocated (buffer grow — the storm we killed)
+    class_property collect_widgets_visits : Int32 = 0            # perf-audit: nodes visited by collect_all_widgets_recursive (O(total widgets) per rendered layer)
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
     class_property rendered_layer_ids : Array(String) = [] of String # Layer IDs rendered this frame
 
@@ -346,11 +347,16 @@ module CrymbleUI
       rendered_count = 0
       profile("render_layers") do
         layers.each do |layer|
-          # Pull: viewport_cache layers always RE-EVALUATE (no dirty-flag gate) — the per-slot
-          # skip in render_single_widget decides what actually re-renders, and render_layer must run
-          # each frame anyway to drive the buffer recenter check. Non-viewport_cache layers keep the
-          # push gate for now (their pull migration is a later stage).
-          if layer.viewport_cache || layer.needs_render?
+          # A viewport_cache layer is version-keyed: it re-renders its O(visible) body only when its
+          # CONTENT changed (scroll / cell content / reflow / resize) — NOT when only its composite
+          # POSITION moved. A WindowPanel drag bumps position_rev alone, and the unconditional composite
+          # below re-blits the cached buffer at the pulled bounds, so re-running the body on a move is
+          # pure waste (it was the maximized-drag CPU spike). viewport_body_stale? KEEPS the push gate
+          # (needs_render?/needs_clear/size/resize_shift) so the resize blit-shift + recenter paths —
+          # which signal before render_layer runs them — are never skipped. Non-viewport_cache layers
+          # keep the plain push gate (their pull migration is a later stage).
+          should_render = layer.viewport_cache ? layer.viewport_body_stale? : layer.needs_render?
+          if should_render
             LayerRenderer.frame_layers_needing_render += 1 # Instrumentation
             LayerRenderer.rendered_layer_ids << layer.id
             render_layer(layer)
@@ -588,6 +594,18 @@ module CrymbleUI
       {% else %}
         # Collect widgets to render (full or selective)
         widgets_to_render = collect_widgets_to_render(layer, full_render)
+
+        # Cheap-rebuild staleness: capture what a CHROME layer full-renders, so the next rebuild can
+        # compare + skip when unchanged (assess_rebuild_staleness). Only on full_render (a selective
+        # reactive render must not pay the O(all-prims) capture) and only for non-viewport_cache layers
+        # (viewport layers self-gate via viewport_body_stale?). widgets_to_render here IS the full
+        # collect_all_widgets_recursive set — the SAME basis the assessment rebuilds → no instrument drift.
+        if full_render && !layer.viewport_cache
+          sig, has_image = build_widget_signature(widgets_to_render)
+          layer.rendered_content_signature = sig
+          layer.signature_has_image = has_image
+          layer.signature_background_color = layer.background_color
+        end
 
         {% if flag?(:cache_validation) %}
           # CV render trace: log collected widgets for content layers
@@ -1097,18 +1115,20 @@ module CrymbleUI
       # OPTIMIZATION: For viewport_cache layers, check cache FIRST before get_primitives
       # This skips the get_primitives call for cached widgets (~90% of visible widgets during scroll)
       if layer.viewport_cache
+        # Pull/SlotBuffer SKIP (decoupled from widget_backend): the LAYER BUFFER already holds this
+        # cell's current pixels at this buffer position — slot_rev + buffer_pos unchanged since the last
+        # paint. This holds whether the cell was DIRECT-rendered (no per-cell texture) or texture-blitted:
+        # the buffer is the single source of truth, and the blit-shift keeps slot_buffer_pos in lockstep
+        # with the pixels (shift_slot). A stable scroll within the buffer skips; a shift that moved this
+        # cell skips; a re-entering or reflowed cell has a stale buffer_pos → falls through to re-render.
+        # Checked BEFORE the widget_backend fast path so backendless direct cells skip too.
+        slot_buffer_pos = {layer_local_x, layer_local_y}
+        if !layer.buffer_just_cleared && widget.slot_fresh?(slot_buffer_pos)
+          record_widget_disposition(widget, :skipped)
+          return nil
+        end
         if existing_backend = widget.widget_backend
           if existing_backend.width == widget_width && existing_backend.height == widget_height
-            # Pull/SlotBuffer SKIP: the buffer already holds this cell's current pixels at this
-            # buffer position (rev + buffer_pos unchanged since last blit) — nothing to do. The
-            # blit-shift keeps buffer_pos in lockstep with the pixels (shift_slot), so a stable scroll
-            # within the buffer skips; a recenter that actually moved this cell skips; a re-entering or
-            # reflowed cell has a stale buffer_pos (or a disposed backend) → falls through to re-render.
-            slot_buffer_pos = {layer_local_x, layer_local_y}
-            if !layer.buffer_just_cleared && widget.slot_fresh?(slot_buffer_pos)
-              record_widget_disposition(widget, :skipped)
-              return nil
-            end
             if widget.has_valid_primitive_cache? && widget.slot_rev_matches?
               # Fast path: blit cached content, skip ALL other work including get_primitives
               {% if flag?(:DEBUG_RENDER) %}
@@ -1242,6 +1262,48 @@ module CrymbleUI
       # Instrumentation: count only actually-rendered widgets (not cached blits)
       LayerRenderer.frame_widget_count += 1
       LayerRenderer.rendered_widgets << "#{widget.class.name.split("::").last}##{widget.path_id}"
+
+      # ── Direct-to-layer render (viewport_cache content layer, full rebuild) ─────────────────────
+      # On a full rebuild the buffer was just cleared to the uniform layer background (line 512) and
+      # top-level cells tile without overlap, so a cell's primitives can be drawn DIRECTLY into the
+      # layer buffer — skipping the per-cell RenderTexture entirely (its allocation, the background
+      # capture/restore dance, and the per-cell blit — the alloc+blit cost measured at ~10ms / 130
+      # cells). Correct for opaque AND transparent cells: any edge strip a fill leaves uncovered is the
+      # freshly-cleared uniform bg — exactly what the texture path would have captured — and a compound
+      # cell's descendant composites over its parent's just-direct-rendered pixels (parent-first), again
+      # matching the texture path (which captures those same pixels).
+      #
+      # The buffer is the single source of truth (the pull-cache north star): we STAMP the slot at this
+      # buffer position and DISPOSE any per-cell texture, leaving the cell in the clean state {no
+      # widget_backend, no background_backend, last_rendered=nil (via the setter), rendered-flag=false
+      # (via bg=nil), slot valid at this position}. Consequences: (a) the scroll skip reads the slot, not
+      # the texture, so this cell is skippable next frame with zero re-render (see the decoupled skip
+      # above the widget_backend fast-path); (b) if it ever IS re-rendered via the texture path (a
+      # shift-clipped scroll cell), it presents as never-rendered → fill-flat + primitives, no
+      # invariant-(h) trip, no self-capture; (c) the disposed texture frees GPU memory (the M4 goal:
+      # ~130 live textures → 0). A stale texture left in place would be blitted by the fast path once
+      # slot_rev matches — hence the mandatory dispose.
+      if layer.viewport_cache && layer.tiled_cells && layer.buffer_just_cleared
+        if wb = widget.widget_backend
+          wb.dispose
+          widget.widget_backend = nil # setter also nils last_rendered_layer_position
+        end
+        if bg = widget.background_backend
+          bg.dispose
+          widget.background_backend = nil # setter also resets rendered_to_layer_at_current_bounds
+        end
+        # Clip to the cell's device-pixel span so text can't overflow into a sibling (mirrors the
+        # texture path's widget_backend clip); the whole-buffer layer clip is restored on pop.
+        cell_clip = Rect.new(layer_local_x.to_f64, layer_local_y.to_f64, widget_width.to_f64, widget_height.to_f64)
+        backend.push_clip(cell_clip)
+        primitives.each do |primitive|
+          execute_primitive_with_offset(primitive, backend, layer_local_x.to_f64, layer_local_y.to_f64)
+        end
+        backend.pop_clip
+        widget.stamp_slot({layer_local_x, layer_local_y})
+        record_widget_disposition(widget, :rendered)
+        return
+      end
 
       # Track if size changed (for detailed debug output)
       size_changed = false
@@ -1624,11 +1686,106 @@ module CrymbleUI
       end
     end
 
+    # Cheap-rebuild staleness: after a rebuild + layout (layer.widgets freshly repopulated), decide per
+    # CHROME layer whether its rendered content actually changed. Unchanged ⇒ leave it Clean so the
+    # carried buffer survives (the whole point); changed / never-captured / image-bearing ⇒
+    # mark_needs_clear_and_render (full clear → no ghost). O(chrome widgets) once per rebuild, never on a
+    # plain frame (renderer gates the call on the one-shot rebuild flag + did_layout). Skips overlay
+    # (self-refreshing, skip_rebuild_clear) and viewport_cache (self-gating via viewport_body_stale?) layers.
+    def assess_rebuild_staleness(root : Widget) : Nil
+      Layer.active_layers(root).each do |layer|
+        next if layer.skip_rebuild_clear || layer.viewport_cache
+        widgets = collect_layer_content(layer)
+        sig, has_image = build_widget_signature(widgets)
+        stored = layer.rendered_content_signature
+        # Full-clear (milestone-1, always safe) when the buffer can't be trusted or the change is
+        # STRUCTURAL: never captured (nil); image (ImageSource#== is reference-ish); the layer bg changed
+        # since capture (guard C — every leaf's memorized background is now stale); or the widget set /
+        # bounds moved (guard B — collect list length / path_id / absolute_bounds differ).
+        if stored.nil? || has_image || layer.signature_has_image ||
+           layer.background_color != layer.signature_background_color ||
+           structural_change?(sig, stored)
+          layer.mark_needs_clear_and_render
+          next
+        end
+        # Same widget set + same bounds + same bg: only some widgets' PRIMITIVES differ. Re-render ONLY
+        # those — the reactive-hover path: the reconciled widget carries its background_backend, restores
+        # it, and its whole (copy-replace) tile overwrites its rect, so a same-bounds content change never
+        # ghosts. This is the intra-layer selective win (O(changed leaves), not O(layer widgets)).
+        changed = [] of Widget
+        widgets.each_with_index { |w, i| changed << w if sig[i][2] != stored[i][2] }
+        next if changed.empty? # nothing changed → keep the carried buffer (skip)
+        # Guard A: a changed widget with same-layer descendants can't go selective — its opaque full-rect
+        # blit would erase the descendants, and their memorized backgrounds hold the OLD parent content.
+        if changed.any? { |w| has_collected_descendant?(w, widgets) }
+          layer.mark_needs_clear_and_render
+          next
+        end
+        changed.each(&.mark_needs_render)
+        # A selective render is not full_render → render_layer won't re-capture the signature. Record what
+        # the buffer will hold this frame (unchanged siblings + the re-rendered changed widgets = sig).
+        layer.rendered_content_signature = sig
+        layer.signature_has_image = has_image
+        layer.signature_background_color = layer.background_color
+      end
+    end
+
+    # Structural change between two layer signatures: a different widget SET (add/remove/reorder → different
+    # length or path_ids) or any widget whose BOUNDS (position+size) moved (guard B). Content-only diffs
+    # (same set + same bounds, different primitives) are NOT structural → candidates for selective render.
+    private def structural_change?(sig : Array(Tuple(String, Rect, Array(DrawPrimitive))), stored : Array(Tuple(String, Rect, Array(DrawPrimitive)))) : Bool
+      return true if sig.size != stored.size
+      sig.each_with_index do |entry, i|
+        s = stored[i]
+        return true if entry[0] != s[0] || entry[1] != s[1]
+      end
+      false
+    end
+
+    # Guard A: does `w` have a proper descendant among the layer's collected widgets? Such a widget can't
+    # be re-rendered selectively. O(collected · depth), once per rebuild (not a per-frame path).
+    private def has_collected_descendant?(w : Widget, widgets : Array(Widget)) : Bool
+      widgets.any? { |o| !o.same?(w) && descendant_of?(o, w) }
+    end
+
+    private def descendant_of?(w : Widget, ancestor : Widget) : Bool
+      p = w.parent
+      while p
+        return true if p.same?(ancestor)
+        p = p.parent
+      end
+      false
+    end
+
+    # The value-signature of a set of collected widgets: {path_id, absolute_bounds, primitives} each, in
+    # order. path_id + list length catch add/remove/reorder; absolute_bounds catches a move; primitives
+    # catch a content change. ALIASES get_primitives (the cached array, never a fresh to_primitives — no
+    # per-rebuild allocation churn). Returns the signature + whether any primitive is a DrawImage.
+    private def build_widget_signature(widgets : Array(Widget)) : Tuple(Array(Tuple(String, Rect, Array(DrawPrimitive))), Bool)
+      has_image = false
+      sig = widgets.map do |w|
+        prims = w.get_primitives(w.bounds)
+        has_image ||= prims.any?(DrawImage)
+        {w.path_id, w.absolute_bounds, prims}
+      end
+      {sig, has_image}
+    end
+
+    # Collect the widgets a chrome (non-viewport_cache) layer renders — the SAME basis as
+    # collect_widgets_to_render(layer, full_render: true) uses, so the capture-side (render_layer) and
+    # assess-side signatures are built over identical sets and can't drift into a false-equal ghost.
+    private def collect_layer_content(layer : Layer) : Array(Widget)
+      result = [] of Widget
+      layer.widgets.each { |w| collect_all_widgets_recursive(w, result, layer) }
+      result
+    end
+
     # Collect all widgets recursively from a widget tree (for full render)
     # IMPORTANT: Stop recursion at layer boundaries - children of widgets with their own layer
     # should be rendered by that layer, not the parent layer
     # target_layer: the layer we're collecting widgets for (to detect layer boundaries)
     private def collect_all_widgets_recursive(widget : Widget, result : Array(Widget), target_layer : Layer)
+      LayerRenderer.collect_widgets_visits += 1 # perf-audit: bump once per node visited
       # Skip zero-size widgets and all their descendants.
       # When a parent collapses (e.g., TreeNode), it zeros children bounds,
       # but grandchildren retain old bounds from previous layout.
@@ -2114,8 +2271,9 @@ module CrymbleUI
       # a shifted slot needs only the axis translation (contrast scroll, which also moves buffer_origin).
       lo = horizontal ? layer.bounds.x.round.to_i : layer.bounds.y.round.to_i
       axis_origin = horizontal ? origin.x.to_i : origin.y.to_i
+      # Process ALL cells (texture-backed AND backendless direct cells): the slot is the validity key. A
+      # cell with no stamped slot no-ops (shift_slot/invalidate_slot are nil-safe).
       layer.widgets.each do |widget|
-        next unless widget.widget_backend
         wabs = widget.absolute_bounds
         new_pos = (horizontal ? wabs.x.round.to_i : wabs.y.round.to_i) - lo - axis_origin
         next if new_pos < new_boundary_buf # before the boundary → not shifted
@@ -2126,14 +2284,18 @@ module CrymbleUI
         # still comes from copied pixels (old_pos >= src suffices); a SHRINK pulls cells toward the origin,
         # so a cell whose old footprint ran past the far edge has un-copied pixels and must re-render.
         if old_pos >= src && (delta > 0 || old_pos + extent <= axis_extent)
-          widget.shift_slot(horizontal ? delta : 0, horizontal ? 0 : delta) # faithfully moved → move the slot
+          widget.shift_slot(horizontal ? delta : 0, horizontal ? 0 : delta) # faithfully moved (texture OR direct) → move the slot
         else
-          # partially clipped at the far buffer edge → pixels not faithfully copied → re-render fresh.
-          widget.widget_backend.try(&.dispose)
-          widget.widget_backend = nil
-          widget.background_backend.try(&.dispose)
-          widget.background_backend = nil
-          LayerRenderer.frame_boundary_cells_invalidated += 1
+          # partially clipped at the far buffer edge → pixels not faithfully copied → dispose any texture
+          # and drop the slot so it re-renders fresh.
+          if wb = widget.widget_backend
+            wb.dispose
+            widget.widget_backend = nil
+            widget.background_backend.try(&.dispose)
+            widget.background_backend = nil
+            LayerRenderer.frame_boundary_cells_invalidated += 1
+          end
+          widget.invalidate_slot
         end
       end
     end
@@ -2277,8 +2439,11 @@ module CrymbleUI
       shift_dy = dest_y - src_y
       lo_x = layer.bounds.x.round.to_i
       lo_y = layer.bounds.y.round.to_i
+      # Process ALL cells (texture-backed AND backendless direct cells): the slot, not the texture, is
+      # the validity key. A backendless cell whose slot has never been stamped (never rendered / off-
+      # buffer) no-ops in every branch (shift_slot/invalidate_slot are nil-safe), so this is safe over the
+      # whole widget list.
       layer.widgets.each do |widget|
-        next unless widget.widget_backend
         wabs = widget.absolute_bounds
         ob_x = (wabs.x.round.to_i - lo_x) - old_origin.x.to_i
         ob_y = (wabs.y.round.to_i - lo_y) - old_origin.y.to_i
@@ -2288,20 +2453,24 @@ module CrymbleUI
                            ob_x + w_w <= src_x + overlap_w && ob_y + w_h <= src_y + overlap_h
         fully_in_old_buffer = ob_x >= 0 && ob_y >= 0 && ob_x + w_w <= buf_w && ob_y + w_h <= buf_h
         if fully_in_overlap
-          # pixels faithfully moved by the shift → keep the slot, move it in lockstep.
+          # pixels faithfully moved by the shift → keep the slot (texture OR direct), move it in lockstep.
           widget.shift_slot(shift_dx, shift_dy)
         elsif fully_in_old_buffer
-          # backend is VALID (cell was fully rendered) but its pixels weren't copied to the new
-          # position → re-blit the cached backend (cheap, no re-render). Keep the backend.
+          # pixels present in the old buffer but not copied to the new position → drop the slot: a texture
+          # cell then re-blits its cached backend at the new position (cheap), a backendless direct cell
+          # re-renders there. Keep any backend.
           widget.invalidate_slot
         else
-          # partially clipped at the old boundary → backend holds truncated pixels → dispose so it
-          # re-renders fresh (also fixes the boundary background seam — see comment above).
-          widget.widget_backend.try(&.dispose)
-          widget.widget_backend = nil
-          widget.background_backend.try(&.dispose)
-          widget.background_backend = nil
-          LayerRenderer.frame_boundary_cells_invalidated += 1
+          # partially clipped at the old boundary → any cached pixels are truncated → dispose the texture
+          # (if any) and drop the slot so it re-renders fresh (also fixes the boundary background seam).
+          if wb = widget.widget_backend
+            wb.dispose
+            widget.widget_backend = nil
+            widget.background_backend.try(&.dispose)
+            widget.background_backend = nil
+            LayerRenderer.frame_boundary_cells_invalidated += 1
+          end
+          widget.invalidate_slot
         end
       end
 

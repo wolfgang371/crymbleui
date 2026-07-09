@@ -35,6 +35,12 @@ module CrymbleUI
     # Separate from mark_needs_layout which only affects geometry.
     @needs_rebuild : Bool = false
 
+    # Cheap-rebuild staleness: set at the end of rebuild(), consumed by the renderer AFTER prepare_layout
+    # (once layer.widgets is repopulated) to run the per-layer content-staleness assessment
+    # (LayerRenderer#assess_rebuild_staleness). One-shot; replaces the old unconditional post-rebuild
+    # blanket clear so an unchanged layer keeps its carried buffer instead of full-re-rendering.
+    property rebuild_needs_assessment : Bool = false
+
     # Request a DSL rebuild on the next frame.
     # Call this when app state changes require build() to produce a new widget tree.
     def request_rebuild
@@ -354,6 +360,12 @@ module CrymbleUI
       # This prevents @@all_layers from growing unboundedly with each rebuild
       Layer.cleanup_orphaned_layers(new_root)
 
+      # Same cleanup for the WindowPanel/Popup topmost-lookup registries (mirrors Layer's).
+      # Old panel/popup instances from the discarded old_root are no longer reachable — drop
+      # them so @@all_panels/@@all_popups don't grow unboundedly across rebuilds.
+      WindowPanel.cleanup_orphaned(new_root)
+      Popup.cleanup_orphaned(new_root)
+
       # Clean up orphaned widgets from active layers.
       # Reconciled layers may retain widgets from the old tree that weren't
       # @[Reconcile]d — new widgets get appended, old ones accumulate.
@@ -365,17 +377,18 @@ module CrymbleUI
         validate_reconciliation(new_root)
       {% end %}
 
-      # Force all layers to full re-render with buffer clear after rebuild.
-      # Widget tree structure changed — layers may have stale pixels from old widgets
-      # at positions no longer covered by new widgets (ghost artifacts).
-      # Skip layers that opt out (e.g., cursor overlay — CachePolicy::Never regenerates fresh).
+      # After a rebuild a layer MAY have stale pixels from old widgets at positions no longer covered
+      # (ghost artifacts) — but a layer whose content is UNCHANGED does not, and clearing it wastes a
+      # full re-render (the v2 rebuild cost). So the decision is per-layer + deferred: overlay layers
+      # (cursor — CachePolicy::Never) refresh here (their widgets are already final); every other layer
+      # is assessed for content-staleness AFTER prepare_layout repopulates layer.widgets, in the
+      # renderer (LayerRenderer#assess_rebuild_staleness, gated on @rebuild_needs_assessment + did_layout).
       Layer.active_layers(new_root).each do |layer|
         if layer.skip_rebuild_clear
           layer.mark_needs_render(layer.widgets.first) if layer.widgets.first?
-        else
-          layer.mark_needs_clear_and_render
         end
       end
+      @rebuild_needs_assessment = true
 
       # Clean up orphaned overlays (e.g., ComboBoxPopup from closed panels)
       # Must happen AFTER reconciliation so ComboBoxes have their popup references

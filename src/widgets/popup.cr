@@ -31,6 +31,51 @@ module CrymbleUI
         include LayerOwner
         include OverlaySurface  # a click inside a popup is not a dismiss gesture
 
+        # Global registry of all Popup instances — mirrors Layer.@@all_layers (layer.cr) and
+        # WindowPanel.@@all_panels (window_panel.cr). Turns find_all_popups from an O(total-widget)
+        # tree walk into an O(#popups × depth) registry scan (widget_in_tree? walks owner→root).
+        #
+        # Register/unregister/iterate ONLY via the explicit `Popup.`-qualified class methods below
+        # (never a bare `@@all_popups << self` from an instance method) — Crystal class variables
+        # are per-CLASS, not shared with subtypes: ComboBoxPopup < Popup would otherwise scatter
+        # its own separate copy of @@all_popups, and Popup.@@all_popups would miss every dropdown.
+        @@all_popups = Set(Popup).new
+
+        def self.register(popup : Popup) : Nil
+            @@all_popups << popup
+        end
+
+        def self.unregister(popup : Popup) : Nil
+            @@all_popups.delete(popup)
+        end
+
+        # All registered popups reachable from root. Bumps popup_walk_visits once per registry
+        # entry checked (perf-audit parity with the O(total-widget) walk this replaces — now
+        # O(#popups), not O(content)).
+        def self.all_in_tree(root : Widget) : Array(Popup)
+            @@all_popups.select do |popup|
+                Widget.increment_popup_walk_visits
+                popup.widget_in_tree?(root)
+            end
+        end
+
+        # Drop popups no longer reachable from root. Set#delete only — a Popup owns no GPU
+        # backend to dispose (unlike Layer.cleanup_orphaned_layers); its @internal_layer is
+        # cleaned up separately by the Layer registry.
+        def self.cleanup_orphaned(root : Widget) : Nil
+            @@all_popups.reject! { |popup| !popup.widget_in_tree?(root) }
+        end
+
+        # Clear the registry (test isolation between specs).
+        def self.clear_registry : Nil
+            @@all_popups.clear
+        end
+
+        # Current registry size (debugging/metrics/lifecycle specs).
+        def self.registry_size : Int32
+            @@all_popups.size
+        end
+
         # Layout constants
         MIN_AUTO_WIDTH = 120.0       # Minimum width when auto-sizing with no children
         BORDER_MARGIN = 1.0          # Margin for border stroke rendering
@@ -88,6 +133,9 @@ module CrymbleUI
             # Create internal layer (bounds will be set in layout)
             # Layer background should match popup background for correct selective rendering
             @internal_layer = Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: self.background_color, owner_widget: self)
+
+            # Register in the global popup registry (qualified — see the class-var caveat above).
+            Popup.register(self)
         end
 
         # layer getter provided by LayerOwner mixin

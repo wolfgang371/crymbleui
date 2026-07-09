@@ -62,20 +62,43 @@ private def invalidate_widget_backends_recursive(widget : CrymbleUI::Widget)
   # VirtualMatrix active_cells are in children, so they're covered
 end
 
-# Sample pixel at center of a widget's backend
-private def sample_widget_center(widget : CrymbleUI::Widget) : CrymbleUI::Color?
-  wb = widget.widget_backend
-  return nil unless wb.is_a?(CrymbleUI::Testing::TestRenderBackend)
-  cx = wb.width // 2
-  cy = wb.height // 2
-  wb.get_pixel(cx, cy)
-end
+# A matrix content cell renders direct-to-layer (no per-cell widget_backend), so the button's
+# fidelity is read from the CONTENT-LAYER buffer. The button fill (0,120,215) is the only blue widget
+# in the grid, so it's unambiguous. The old "watery button" bug was greyish edges from the texture
+# path's background capture/restore — the direct path does NO capture, so it cannot occur by
+# construction; these tests now assert the positive: the button paints a solid opaque-blue region with
+# no layer-bg (200,200,205) leak inside it.
+BTN_BLUE = CrymbleUI::Color.new(0, 120, 215, 255)
+LAYER_BG = CrymbleUI::Color.new(200, 200, 205, 255)
 
-# Sample pixel at (dx, dy) offset into widget's backend
-private def sample_widget_pixel(widget : CrymbleUI::Widget, dx : Int32, dy : Int32) : CrymbleUI::Color?
-  wb = widget.widget_backend
-  return nil unless wb.is_a?(CrymbleUI::Testing::TestRenderBackend)
-  wb.get_pixel(dx, dy)
+private def button_blue_stats(matrix : CrymbleUI::VirtualMatrix) : {blue: Int32, grey_in_region: Int32, opaque: Bool}
+  layer = matrix.content_layer
+  return {blue: 0, grey_in_region: 0, opaque: false} unless layer
+  lb = layer.backend
+  return {blue: 0, grey_in_region: 0, opaque: false} unless lb.is_a?(CrymbleUI::Testing::TestRenderBackend)
+  blue = 0
+  opaque = true
+  minx = lb.width; miny = lb.height; maxx = -1; maxy = -1
+  lb.height.times do |y|
+    lb.width.times do |x|
+      p = lb.get_pixel(x, y)
+      next unless p && p.r == 0_u8 && p.g == 120_u8 && p.b == 215_u8
+      blue += 1
+      opaque = false if p.a != 255_u8
+      minx = x if x < minx; maxx = x if x > maxx
+      miny = y if y < miny; maxy = y if y > maxy
+    end
+  end
+  grey = 0
+  if maxx >= 0
+    (miny..maxy).each do |y|
+      (minx..maxx).each do |x|
+        p = lb.get_pixel(x, y)
+        grey += 1 if p && p.r == 200_u8 && p.g == 200_u8 && p.b == 205_u8
+      end
+    end
+  end
+  {blue: blue, grey_in_region: grey, opaque: opaque}
 end
 
 # Find a Button widget by searching active_cells
@@ -107,24 +130,12 @@ describe "Button pixel colors in VirtualMatrix after zoom", tags: "slow" do
     renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
     renderer.settle_rendering(app)
 
-    btn = find_button_in_matrix(matrix)
-    btn.should_not be_nil
-    btn = btn.not_nil!
+    find_button_in_matrix(matrix).should_not be_nil
 
-    # Sample center — should be on text (white) or blue bg
-    center = sample_widget_center(btn)
-    center.should_not be_nil
-    center = center.not_nil!
-    center.a.should eq(255_u8) # Must be fully opaque
-
-    # Sample corner (2,2) — should be blue background
-    corner = sample_widget_pixel(btn, 2, 2)
-    corner.should_not be_nil
-    corner = corner.not_nil!
-    corner.r.should eq(0_u8)
-    corner.g.should eq(120_u8)
-    corner.b.should eq(215_u8)
-    corner.a.should eq(255_u8)
+    # The button paints a solid opaque-blue region in the content-layer buffer.
+    stats = button_blue_stats(matrix)
+    stats[:blue].should be > 0, "button background not painted (no opaque blue in content buffer)"
+    stats[:opaque].should be_true, "button blue is not fully opaque (watery)"
   end
 
   it "button has same opaque blue pixels after zoom in" do
@@ -140,34 +151,17 @@ describe "Button pixel colors in VirtualMatrix after zoom", tags: "slow" do
     renderer.settle_rendering(app)
 
     # Verify pre-zoom state
-    btn_pre = find_button_in_matrix(matrix)
-    btn_pre.should_not be_nil
-    pre_corner = sample_widget_pixel(btn_pre.not_nil!, 2, 2)
-    pre_corner.should_not be_nil
-    pre_corner = pre_corner.not_nil!
-    pre_corner.r.should eq(0_u8)
-    pre_corner.g.should eq(120_u8)
-    pre_corner.b.should eq(215_u8)
-    pre_corner.a.should eq(255_u8)
+    button_blue_stats(matrix)[:blue].should be > 0, "button not painted opaque blue before zoom"
 
     # Zoom in (simulate full SFML zoom flow)
     CrymbleUI::FontSizing.zoom_in
     simulate_zoom_invalidation(app.root.not_nil!)
     renderer.settle_rendering(app)
 
-    # Find button again (may be new instance after rebuild/reconciliation)
-    btn_post = find_button_in_matrix(matrix)
-    btn_post.should_not be_nil
-    btn_post = btn_post.not_nil!
-
-    # Corner pixel should still be opaque blue
-    post_corner = sample_widget_pixel(btn_post, 2, 2)
-    post_corner.should_not be_nil
-    post_corner = post_corner.not_nil!
-    post_corner.r.should eq(0_u8)
-    post_corner.g.should eq(120_u8)
-    post_corner.b.should eq(215_u8)
-    post_corner.a.should eq(255_u8)
+    # Button should still paint solid opaque blue after the zoom rebuild/reconciliation.
+    post = button_blue_stats(matrix)
+    post[:blue].should be > 0, "button not painted opaque blue after zoom"
+    post[:opaque].should be_true, "button blue not fully opaque after zoom (watery)"
   end
 
   it "button has same opaque blue pixels after two zoom steps", tags: "slow" do
@@ -189,18 +183,12 @@ describe "Button pixel colors in VirtualMatrix after zoom", tags: "slow" do
       renderer.settle_rendering(app)
     end
 
-    btn = find_button_in_matrix(matrix)
-    btn.should_not be_nil
-    btn = btn.not_nil!
+    find_button_in_matrix(matrix).should_not be_nil
 
-    # Corner pixel should be opaque blue (not grey/watery)
-    corner = sample_widget_pixel(btn, 2, 2)
-    corner.should_not be_nil
-    corner = corner.not_nil!
-    corner.a.should eq(255_u8) # Must be fully opaque
-    corner.r.should eq(0_u8)
-    corner.g.should eq(120_u8)
-    corner.b.should eq(215_u8)
+    # Still solid opaque blue (not grey/watery) after two zoom steps.
+    stats = button_blue_stats(matrix)
+    stats[:blue].should be > 0, "button not painted opaque blue after two zoom steps"
+    stats[:opaque].should be_true, "button blue not fully opaque after two zoom steps (watery)"
   end
 
   it "button background does NOT leak layer background color" do
@@ -220,26 +208,12 @@ describe "Button pixel colors in VirtualMatrix after zoom", tags: "slow" do
     simulate_zoom_invalidation(app.root.not_nil!)
     renderer.settle_rendering(app)
 
-    btn = find_button_in_matrix(matrix)
-    btn.should_not be_nil
-    btn = btn.not_nil!
+    find_button_in_matrix(matrix).should_not be_nil
 
-    wb = btn.widget_backend
-    wb.should_not be_nil
-    wb = wb.as(CrymbleUI::Testing::TestRenderBackend)
-
-    # Scan all pixels along a horizontal line at y=2 (top area, should be solid blue)
-    grey_count = 0
-    wb.width.times do |x|
-      px = wb.get_pixel(x, 2)
-      next unless px
-      # Layer bg is (200, 200, 205) — if any pixel has this color, bg leaked
-      if px.r == 200_u8 && px.g == 200_u8 && px.b == 205_u8
-        grey_count += 1
-      end
-    end
-
-    # At most 1 pixel grey (edge rounding) — not a full grey strip
-    grey_count.should be <= 1
+    # The layer background (200,200,205) must NOT show through inside the button's painted blue region.
+    # Direct render does no background capture, so no grey can leak; assert the region is solidly blue.
+    stats = button_blue_stats(matrix)
+    stats[:blue].should be > 0, "button not painted (no blue region to check for leak)"
+    stats[:grey_in_region].should eq(0), "layer background leaked inside the button's blue region"
   end
 end

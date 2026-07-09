@@ -3,6 +3,7 @@ require "../core/types"
 require "../core/widget"
 require "../core/app"
 require "./render_trigger"
+require "./frame_work_log"
 require "../core/scheduler"
 require "../core/font_sizing"
 require "../input/shortcut_manager"
@@ -167,6 +168,9 @@ module CrymbleUI
 
       # Set global clipboard to the platform (SFML) clipboard
       Widget.clipboard = SFMLClipboard.new
+
+      # Per-frame work ledger (writes only when ENV["CRYMBLE_WORKLOG"] is set; otherwise a no-op).
+      @work_log = FrameWorkLog.new
 
       # Initialize cursors
       @cursor_arrow = SF::Cursor.new
@@ -591,6 +595,8 @@ module CrymbleUI
           # Events processed but no redraw triggered - this is where we save CPU!
         end
       end
+
+      @work_log.close # flush + close the frame ledger on exit
     end
 
     # Handle a single event
@@ -927,6 +933,7 @@ module CrymbleUI
       # See docs/TEXTURE_POOLING_INVESTIGATION.md
 
       frame_start = LayerRenderer.profile_enabled ? Time.instant : nil
+      did_layout = false # hoisted so the work-log record below (outside begin/rescue) can read it
 
       begin
         # Perform layout if needed (timed)
@@ -940,6 +947,16 @@ module CrymbleUI
 
         # Invalidate layer cache after layout (layer set may have changed)
         invalidate_layer_cache if did_layout
+
+        # Cheap-rebuild staleness: after a rebuild + layout (layer.widgets now repopulated), mark only
+        # the layers whose content actually changed (replaces the old unconditional post-rebuild clear).
+        # Guarded on did_layout: a rebuild always forces a full root re-layout (fresh ⇒ NeedsLayout).
+        if app.rebuild_needs_assessment
+          if did_layout && (r = app.root)
+            assess_rebuild_staleness(r)
+          end
+          app.rebuild_needs_assessment = false
+        end
 
         # Re-detect hover after layout (restores hover state after rebuild)
         app.redetect_hover if did_layout
@@ -991,6 +1008,12 @@ module CrymbleUI
           end
         end
       {% end %}
+
+      # Per-frame work ledger (no-op unless CRYMBLE_WORKLOG is set) — record BEFORE the counters reset.
+      @work_log.record(
+        LayerRenderer.phase_layout_ms, LayerRenderer.phase_render_ms,
+        LayerRenderer.phase_composite_ms, LayerRenderer.phase_display_ms,
+        did_layout, app.mouse_down?)
 
       # Reset frame counters for next frame (always, even after exception)
       LayerRenderer.reset_frame_counters

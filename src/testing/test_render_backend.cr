@@ -206,11 +206,20 @@ module CrymbleUI
         x2 = (bounds.x + bounds.width - 1).to_i
         y2 = (bounds.y + bounds.height - 1).to_i
 
-        # SFML outline_thickness draws centered on edges (±0.5px from edge)
-        # When rect starts at x=0, left edge at -0.5 gets clipped by widget bounds
-        # Simulate this by skipping leftmost column and topmost row when bounds start at 0
-        skip_left = (bounds.x == 0.0)
-        skip_top = (bounds.y == 0.0)
+        # SFML outline_thickness draws centered on edges (±0.5px). The OUTER half of an outline that sits
+        # on the current clip/scissor boundary is clipped away by GL scissor (or, for a widget-backend
+        # render, the backend edge at 0). Simulate that by skipping the border's leftmost column / topmost
+        # row when it coincides with the clip's left/top edge — CLIP-RELATIVE, not `bounds.x == 0`. This
+        # holds whether the primitive is drawn widget-local (per-cell texture path: clip origin at 0) OR
+        # at a buffer offset (direct-to-layer path: clip origin at the cell's buffer position). Keying on
+        # 0 alone made the SAME widget's border render 1px differently between the two paths — a false
+        # cache-validation divergence (the instrument, not the cache, was wrong; matches SFML, which
+        # scissors identically wherever the clip sits).
+        clip = (@scissor_suspended || @clip_stack.empty?) ? nil : @clip_stack.last
+        clip_left = clip ? clip.x : 0.0
+        clip_top = clip ? clip.y : 0.0
+        skip_left = bounds.x <= clip_left
+        skip_top = bounds.y <= clip_top
 
         # Top and bottom edges (skip left/right corners if those edges are clipped)
         start_x = skip_left ? x1 + 1 : x1

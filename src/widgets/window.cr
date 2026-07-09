@@ -81,12 +81,25 @@ module CrymbleUI
             old_window.overlays.clear
         end
 
-        # Remove orphaned ComboBoxPopup overlays (called after full reconciliation)
+        # Remove orphaned ComboBoxPopup overlays (called after full reconciliation). An overlay is
+        # parented directly to this Window (add_overlay sets overlay.parent = window), so once no
+        # ComboBox references it any more it must be dropped from the Popup registry — otherwise
+        # find_all_popups (registry.select(&.widget_in_tree?)) keeps returning it and it wrongly
+        # blocks the cursor. UNREGISTER is sufficient for that (an unregistered popup can't be
+        # selected regardless of widget_in_tree?), and it's the exact analogue of the old
+        # @overlays-walk excluding it. We deliberately do NOT null overlay.parent: the popup may
+        # still hold focus (its migrated TextInput), and find_window must keep reaching the live
+        # window up the parent chain (combo_box_reconcile_focus_spec).
         def cleanup_orphaned_overlays
             @overlays.reject! do |overlay|
                 if overlay.is_a?(ComboBoxPopup)
                     # Check if any ComboBox in the tree owns this popup
-                    !combo_owns_popup?(self, overlay)
+                    if combo_owns_popup?(self, overlay)
+                        false
+                    else
+                        Popup.unregister(overlay.as(Popup))
+                        true
+                    end
                 else
                     false
                 end
@@ -101,23 +114,6 @@ module CrymbleUI
                 return true if widget.current_popup.same?(popup)
             end
             widget.children.any? { |child| combo_owns_popup?(child, popup) }
-        end
-
-        # Override to also check overlays for popups
-        protected def collect_popups_recursive(popups : Array(Popup))
-            super  # Check children
-            # Also check overlays (popups, tooltips, etc. managed separately from DSL)
-            @overlays.each do |overlay|
-                # Add this overlay if it's a Popup, then check its children
-                # Note: find_all_popups would add overlay itself, causing duplicate
-                if overlay.is_a?(Popup)
-                    popups << overlay.as(Popup)
-                end
-                # Only recurse into children, not the overlay itself
-                overlay.children.each do |child|
-                    child.collect_popups_recursive(popups)
-                end
-            end
         end
 
         def measure(constraints : BoxConstraints) : Size

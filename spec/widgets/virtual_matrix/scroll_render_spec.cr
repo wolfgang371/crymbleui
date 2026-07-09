@@ -476,17 +476,20 @@ describe CrymbleUI::VirtualMatrix do
       matrix.responds_to?(:clear_all_widget_backends).should be_true
     end
 
-    it "clear_all_widget_backends clears all active cell backends" do
+    it "content cells render direct-to-layer (no per-cell backend); clear is a safe no-op" do
       matrix, app, renderer = setup_scroll_render_matrix
 
-      # Cells should have backends after settle_rendering
-      cells_with_backend = matrix.active_cells.count { |_, w| !w.widget_backend.nil? }
-      cells_with_backend.should be > 0
+      # Matrix content cells render DIRECT into the layer buffer, so they hold NO per-cell
+      # widget_backend/background_backend — the pixels live in the layer buffer (the pull-cache), and
+      # the slot (version + buffer position) is the validity key, not a texture. So after settle there
+      # is nothing to clear.
+      matrix.active_cells.each do |_key, widget|
+        widget.widget_backend.should be_nil
+        widget.background_backend.should be_nil
+      end
 
-      # Clear all backends
+      # clear_all_widget_backends is therefore a safe no-op for direct-rendered content.
       matrix.clear_all_widget_backends
-
-      # All backends should now be nil
       matrix.active_cells.each do |_key, widget|
         widget.widget_backend.should be_nil
         widget.background_backend.should be_nil

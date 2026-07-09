@@ -452,10 +452,13 @@ describe "VirtualMatrix interactive resize", tags: "slow" do
       # Performance: no layout during drag
       renderer.layout_count.should eq 0
 
-      # Correctness: content cells rendered with correct bounds
+      # Correctness: content cell painted this frame with correct bounds. A matrix content cell renders
+      # direct-to-layer (no widget_backend), so "was it painted?" is the renderer's per-frame disposition
+      # (:rendered / :blitted / :skipped = painted), not widget_backend presence.
       cell = matrix.active_cells[{1, 1}]?
       cell.should_not be_nil
-      assert_rendered(cell.not_nil!)
+      cell.not_nil!.absolute_bounds.width.should be > 0
+      renderer.widget_disposition(cell.not_nil!).should_not be_nil, "content cell was not painted during resize"
 
       app.handle_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
     end

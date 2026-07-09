@@ -73,6 +73,10 @@ module CrymbleUI
   # Coordinates drag-and-drop operations
   # Managed by App, similar to FocusManager
   class DragManager
+    # perf-audit: nodes visited by find_drop_target's recursive tree walk. Runs on every drag-move
+    # (update_drop_target) — an O(total widgets) hit-test walk on a hot path. Bumped once per node.
+    class_property drop_target_visits : Int32 = 0
+
     # Ghost layer configuration
     GHOST_Z_INDEX = 9999
     GHOST_OPACITY = 0.7_f32
@@ -428,6 +432,7 @@ module CrymbleUI
     end
 
     private def find_drop_target(position : Vec2, widget : Widget, data : DragData) : Widget?
+      DragManager.drop_target_visits += 1 # perf-audit: bump once per node visited
       # Skip the source widget — unless it's also a DropTarget (supports self-drop,
       # e.g., VirtualMatrix cell drag within same grid)
       if widget == @state.source_widget && !widget.is_a?(DropTarget)

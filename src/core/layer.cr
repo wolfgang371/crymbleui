@@ -177,6 +177,30 @@ module CrymbleUI
     @clear_rev : UInt64 = 0
     getter clear_rev : UInt64
 
+    # Version of this layer's CONTENT at its last body-render — frame_aggregate_rev's per-layer
+    # contribution MINUS position_rev (see content_rev / viewport_body_stale?). A viewport_cache layer
+    # re-renders its O(visible) body only when this moves; a WindowPanel DRAG bumps position_rev alone
+    # (window_panel.cr: "No mark_needs_render needed during drag"), and the unconditional composite
+    # already re-blits the cached buffer at the pulled bounds — so a move must NOT re-run the body. This
+    # stamp records what was last rendered; it excludes position on purpose (a move is a composite).
+    @rendered_content_rev : UInt64 = 0
+
+    # Cheap-rebuild staleness (non-viewport_cache / chrome layers). The {path_id, absolute_bounds,
+    # primitives} of the widgets this layer last FULL-rendered — captured in render_layer, and, because
+    # the Layer rides the @[Reconcile] carry, surviving a rebuild. After a rebuild, assess_rebuild_staleness
+    # rebuilds a fresh signature over the layer's (now new-instance) widgets and compares: equal ⇒ the
+    # carried buffer is still correct ⇒ SKIP (the whole point); differ / nil / image-bearing ⇒ full clear
+    # (structure or content moved — no ghost). Version keys can't do this: a rebuild resets every widget's
+    # primitives_version to 0 (fresh instances), so the key must be by VALUE.
+    property rendered_content_signature : Array(Tuple(String, Rect, Array(DrawPrimitive)))? = nil
+    # The last-rendered signature contained a DrawImage. ImageSource#== is reference-ish, so an in-place
+    # mutated image (same object, new pixels) would falsely compare equal → such a layer is always-stale.
+    property signature_has_image : Bool = false
+    # The layer background_color at the time the signature was captured. A leaf re-rendered selectively
+    # restores its MEMORIZED background (which was this bg, or a parent fill over it); if the layer bg
+    # changed since (theme switch), that memory is stale → the selective path must full-clear instead.
+    property signature_background_color : Color? = nil
+
     def scroll_offset=(value : Vec2)
       return if value == @scroll_offset
       @scroll_offset = value
@@ -197,6 +221,13 @@ module CrymbleUI
     property skip_rebuild_clear : Bool = false
 
     property viewport_cache : Bool = false
+    # Opt-in: this layer's top-level widgets are a grid of TILING cells (adjacent, gaps filled by grid
+    # lines, over a uniform background). Only such a layer is eligible for the direct-to-layer cell render
+    # (skip the per-cell texture): a cell's device-pixel edge is always covered by a neighbour/grid line or
+    # the uniform bg, so drawing primitives straight into the just-cleared buffer is pixel-equivalent to
+    # the texture path. NON-tiling viewport_cache content (a ScrollView's spaced list, a ComboBox popup)
+    # leaves that edge exposed, so it stays on the texture path. Set by VirtualMatrix on its content layer.
+    property tiled_cells : Bool = false
     property cache_extent : Float64 = 0.0     # Extra pixels to pre-render beyond viewport
     getter buffer_origin : Vec2 = Vec2.zero   # Content coord at buffer position (0,0)
 
@@ -360,15 +391,17 @@ module CrymbleUI
       agg = 0_u64
       @@all_layers.each do |layer|
         next unless layer.in_tree?(root)
-        agg &+= layer.scroll_rev
-        agg &+= layer.position_rev
-        agg &+= layer.clear_rev
-        layer.widgets.each { |w| agg = sum_widget_revs(w, agg) }
+        # content_rev = scroll_rev + clear_rev + Σ widget revs; add position_rev for the composite-move
+        # axis. ONE summation lives in content_rev — the render loop reuses it to gate viewport_cache
+        # layers, so the trigger and the gate can never drift apart.
+        agg &+= layer.content_rev &+ layer.position_rev
       end
       agg
     end
 
-    private def self.sum_widget_revs(w : Widget, agg : UInt64) : UInt64
+    # Not private: content_rev (an instance method) reuses it, and a private class method is not
+    # callable from an instance. Pure helper, no state.
+    def self.sum_widget_revs(w : Widget, agg : UInt64) : UInt64
       agg &+= w.primitives_version # the pull node's version for Dynamic widgets (residual rev otherwise)
       agg &+= 1_u64 # structure: count each widget so an add/remove moves the aggregate
       w.children.each { |c| agg = sum_widget_revs(c, agg) }
@@ -523,6 +556,27 @@ module CrymbleUI
       first_render? || @state == WidgetState::NeedsRender || @state == WidgetState::NeedsLayout
     end
 
+    # Per-layer CONTENT version: scroll + clear + the recursive widget-rev sum — every input to this
+    # layer's rendered pixels EXCEPT its composite position. The per-layer analogue of
+    # frame_aggregate_rev's contribution minus position_rev (which is why frame_aggregate_rev reuses it).
+    # O(visible): @widgets holds only the collected/visible roots. Recurses children (Layer.sum_widget_revs)
+    # so a change inside a composite cell — a Checkbox/Button nested in a cell — still moves it.
+    def content_rev : UInt64
+      agg = @scroll_rev &+ @clear_rev
+      @widgets.each { |w| agg = Layer.sum_widget_revs(w, agg) }
+      agg
+    end
+
+    # Should a viewport_cache layer re-render its BODY this frame, or is a composite-only reposition
+    # enough? Stale iff a push signal is set (needs_render?/needs_clear — the resize-reflow-zoom paths
+    # signal HERE before render_layer runs their blit-shift/recenter, so these terms are load-bearing),
+    # the viewport SIZE changed (a within-buffer grow needs render_layer's recenter or the composite-fit
+    # invariant trips), a resize blit-shift is pending, or the pull content_rev moved (scroll / cell
+    # content). A pure panel drag trips NONE of these → skip → the unconditional composite repositions it.
+    def viewport_body_stale? : Bool
+      needs_render? || needs_clear || size_changed? || !resize_shift.nil? || content_rev != @rendered_content_rev
+    end
+
     # Check if widget is dirty (needs re-rendering)
     # If dirty_widgets is empty, all widgets are dirty
     def widget_dirty?(widget : Widget) : Bool
@@ -535,6 +589,10 @@ module CrymbleUI
       @dirty_widgets.clear
       @needs_clear = false
       @last_rendered_bounds = bounds # Track bounds for change detection
+      # Stamp the content version we just rendered so a later position-only frame (a drag) can skip the
+      # body via viewport_body_stale?. Called from BOTH render_layer exits (blit-plan + normal), never
+      # the early bails, never the app-level (widget) clear sweep — so it fires iff the body rendered.
+      @rendered_content_rev = content_rev if @viewport_cache
     end
 
     # Check if bounds changed since last render

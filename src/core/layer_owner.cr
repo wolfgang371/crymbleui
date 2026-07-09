@@ -46,6 +46,13 @@ module CrymbleUI
     # Internal layer storage (can be nil for conditional layer ownership)
     # Widgets that always have a layer should create it in initialize()
     # Widgets with conditional layers (MenuBar) create in perform_layout()
+    #
+    # @[Reconcile]: carry the layer (with its backend + rendered state) across a rebuild instead of
+    # discarding the fresh Layer.new the new instance built in initialize — so the reconciled layer is
+    # NOT first_render? and its pixels survive (the keystone for a cheap rebuild). Mirrors the existing
+    # VirtualMatrix content_layer reconcile. Widget#copy_state_from re-points owner_widget to the new
+    # instance afterwards (a stale owner breaks in_tree?/bounds).
+    @[Reconcile]
     @internal_layer : Layer?
 
     # Expose internal layer for renderer

@@ -237,6 +237,16 @@ module CrymbleUI
           # Invalidate layer cache after layout (layer set may have changed)
           invalidate_layer_cache if did_layout
 
+          # Cheap-rebuild staleness: after a rebuild + layout (layer.widgets now repopulated), mark only
+          # the layers whose content actually changed (replaces the old unconditional post-rebuild clear).
+          # Guarded on did_layout: a rebuild always forces a full root re-layout (fresh ⇒ NeedsLayout).
+          if app.rebuild_needs_assessment
+            if did_layout && (root = app.root)
+              assess_rebuild_staleness(root)
+            end
+            app.rebuild_needs_assessment = false
+          end
+
           # Re-detect hover after layout (restores hover state after rebuild)
           # Matches SFML renderer behavior
           app.redetect_hover if did_layout

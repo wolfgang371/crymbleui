@@ -274,6 +274,24 @@ module CrymbleUI
       @@update_visible_cells_call_count = 0
     end
 
+    # perf-audit: total ROW-GEOMETRY entries rebuilt by the @cached_row_sizes rebuild in
+    # update_visible_cells. Bumped by @rows every time that O(total rows) row-sizes array is
+    # recomputed from nil — so a COLUMN resize (which invalidates ALL dimension caches, then
+    # rebuilds row sizes) shows this scaling with TOTAL rows even though visible cells are constant.
+    @@row_cache_rebuild_rows : Int32 = 0
+
+    def self.row_cache_rebuild_rows : Int32
+      @@row_cache_rebuild_rows
+    end
+
+    def self.reset_row_cache_rebuild_rows
+      @@row_cache_rebuild_rows = 0
+    end
+
+    def self.increment_row_cache_rebuild_rows(n : Int32)
+      @@row_cache_rebuild_rows += n
+    end
+
     # Cell sizes (frame_height multiples), one entry per row/col.
     # Initialized from adapter.get_sizes, mutated by drag resize.
     # Protected for copy_state_from reconciliation.
@@ -888,6 +906,7 @@ module CrymbleUI
       @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
       @content_layer.not_nil!.background_color = content_background_color # cached fallback; pull keeps it live
       @content_layer.not_nil!.viewport_cache = true
+      @content_layer.not_nil!.tiled_cells = true # grid of tiling cells → eligible for direct-to-layer render
       @content_layer.not_nil!.cache_extent = CACHE_EXTENT
       @content_layer.not_nil!.scroll_offset = scroll_offset
     end
@@ -1328,7 +1347,12 @@ module CrymbleUI
 
       # Build/use cached sizes arrays (avoid O(n) rebuild per scroll)
       col_sizes = @cached_col_sizes ||= (0...@cols).map { |c| col_width_pixels(c).to_i32 }
-      row_sizes = @cached_row_sizes ||= (0...@rows).map { |r| row_height_pixels(r).to_i32 }
+      row_sizes = @cached_row_sizes ||= begin
+        # perf-audit: this O(total rows) rebuild fires on ANY dimension-cache invalidation, including
+        # a COLUMN resize (invalidate_dimension_caches clears row sizes too) — visible cells constant.
+        VirtualMatrix.increment_row_cache_rebuild_rows(@rows)
+        (0...@rows).map { |r| row_height_pixels(r).to_i32 }
+      end
 
       # Get scroll order from adapter (or default sequential), cache it
       unless @cached_col_scroll_order && @cached_row_scroll_order

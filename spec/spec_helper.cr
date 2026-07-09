@@ -43,6 +43,8 @@ Spec.before_each do
   CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
   CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
   CrymbleUI::Layer.clear_registry  # Prevent orphaned layers from leaking between tests
+  CrymbleUI::WindowPanel.clear_registry  # Prevent orphaned panels from leaking between tests
+  CrymbleUI::Popup.clear_registry  # Prevent orphaned popups from leaking between tests
   {% if flag?(:cache_validation) %}
     # Turn the dual renderer into a gate over the WHOLE suite. With
     # -Dcache_validation, every rendered frame compares the cached matrix buffer against

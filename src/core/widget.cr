@@ -97,6 +97,22 @@ module CrymbleUI
         # the live-resize policy against re-introducing that propagation wall.
         @@mark_render_count : Int32 = 0
 
+        # HOT-PATH instrumentation (perf audit). Bump via the explicit `Widget.` class qualifier
+        # so a bare @@ from an instance method doesn't scatter into each subclass's own copy (see
+        # increment_absolute_bounds_count).
+        #
+        # panel_walk_visits/popup_walk_visits: bumped once per REGISTRY ENTRY checked by
+        # WindowPanel.all_in_tree/Popup.all_in_tree (window_panel.cr/popup.cr) — O(#panels)/O(#popups),
+        # content-independent. Formerly bumped once per NODE VISITED by an O(total-widget) tree walk
+        # (collect_panels_recursive/collect_popups_recursive, deleted); this counter guards against
+        # that O(content) walk creeping back onto the per-frame path.
+        @@panel_walk_visits : Int32 = 0
+        @@popup_walk_visits : Int32 = 0
+        # state_sweep_visits: STILL an O(total-widget) tree walk (clear_render_state_recursive, per
+        # non-layout frame) — unscoped, unlike the two above. Guards against it regressing further,
+        # not a claim it's already O(1). Scoping it is a separate, not-yet-started effort.
+        @@state_sweep_visits : Int32 = 0
+
         # Text-measurement cache (text+size → visual Size). measure_text is a layout HOT PATH: every
         # Button/Text re-measures each layout pass, so a live panel resize fired hundreds of SFML
         # font queries per frame (~40ms, the resize-CPU cost). The result is deterministic per font,
@@ -279,6 +295,44 @@ module CrymbleUI
             @@mark_render_count = 0
         end
 
+        # --- HOT-PATH TREE-WALK counters (perf audit) --------------------------------------------
+        # Same subclass-copy caveat as increment_absolute_bounds_count: always bump via `Widget.`.
+        def self.panel_walk_visits : Int32
+            @@panel_walk_visits
+        end
+
+        def self.reset_panel_walk_visits
+            @@panel_walk_visits = 0
+        end
+
+        def self.increment_panel_walk_visits
+            @@panel_walk_visits += 1
+        end
+
+        def self.popup_walk_visits : Int32
+            @@popup_walk_visits
+        end
+
+        def self.reset_popup_walk_visits
+            @@popup_walk_visits = 0
+        end
+
+        def self.increment_popup_walk_visits
+            @@popup_walk_visits += 1
+        end
+
+        def self.state_sweep_visits : Int32
+            @@state_sweep_visits
+        end
+
+        def self.reset_state_sweep_visits
+            @@state_sweep_visits = 0
+        end
+
+        def self.increment_state_sweep_visits
+            @@state_sweep_visits += 1
+        end
+
         def self.increment_render_count
             @@render_count += 1
         end
@@ -434,9 +488,10 @@ module CrymbleUI
         @layout_rev : UInt64 = 0
 
         # Pull/SlotBuffer (sparse, per-cell — no dense structure): the slot key for a
-        # viewport_cache buffer = {content version, BUFFER position}. content_version is
-        # primitive_cache_rev (content_rev+theme_rev+zoom_rev+layout_rev). buffer_pos = content_pos −
-        # buffer_origin. The buffer SKIPS a cell whose key is unchanged (it already holds its pixels);
+        # viewport_cache buffer = {content version, BUFFER position}. content_version is the cell's
+        # primitives_version (the Cached node version for a Dynamic cell — auto-captures theme/zoom;
+        # the content_rev+layout_rev residual otherwise). buffer_pos = content_pos − buffer_origin.
+        # The buffer SKIPS a cell whose key is unchanged (it already holds its pixels);
         # the soundness invariant is that buffer_pos is moved IN LOCKSTEP with the pixels by every
         # buffer op (scroll blit-shift → shift_slot; reflow/clear → invalidate via disposed backend).
         @slot_rev : UInt64? = nil
@@ -1031,6 +1086,15 @@ module CrymbleUI
 
             # Auto-copy all @[Reconcile] annotated properties
             auto_copy_reconcile_properties(old_widget)
+
+            # A @[Reconcile]-carried layer keeps the OLD (discarded) widget as its owner_widget; re-point
+            # it to this new instance, else Layer.active_layers' in_tree? walk (owner→root) can't find it
+            # → stale/disposed backend. Mirrors VirtualMatrix's content_layer re-point. Guarded by
+            # responds_to?(:layer) (the codebase idiom) since only LayerOwner widgets have a layer, and
+            # Window names it @root_layer not @internal_layer.
+            if self.responds_to?(:layer) && (lyr = self.layer)
+                lyr.owner_widget = self
+            end
         end
 
         # === PRIMITIVE-BASED RENDERING (New Architecture) ===
@@ -1050,13 +1114,13 @@ module CrymbleUI
             [] of DrawPrimitive
         end
 
-        # The primitive-cache validity key — the SUM of every axis that can change
-        # what to_primitives() emits: this widget's content_rev (visual changes) + layout_rev (size)
-        # + the global Theme.theme_rev + FontSizing.zoom_epoch. Each is monotonic, so the sum is
-        # monotonic (wrapping &+ keeps it a pure key, never raising); a bump on ANY axis changes the
-        # sum and forces a regenerate. This AUGMENTS the old `needs_render? || nil` key (blind to
-        # theme/zoom swaps, which issue no mark_needs_render); the design retires needs_render?
-        # per-level once every bump-site bumps content_rev.
+        # The residual primitive-cache validity key: this widget's content_rev (visual changes) +
+        # layout_rev (size). Both monotonic, so the wrapping &+ sum is a pure monotonic key (never
+        # raising); a bump on either axis forces a regenerate. Theme/zoom are NOT summed here (see the
+        # method body): a rendered Dynamic widget captures them via its Cached node version, a zoom bump
+        # also moves layout_rev, and a theme switch reaches the residual via rebuild — so the global
+        # theme_rev counter was deleted. This AUGMENTS the old `needs_render? || nil` key (blind to
+        # theme/zoom swaps, which issue no mark_needs_render).
         def primitive_cache_rev : UInt64
             # The residual version for Static / Never / pre-first-render widgets only
             # (rendered Dynamic widgets use the node version). Theme/zoom dropped here: Dynamic widgets
@@ -1519,11 +1583,11 @@ module CrymbleUI
             results
         end
 
-        # Find all WindowPanel widgets in this subtree
+        # Find all WindowPanel widgets reachable from this subtree — an O(#panels × depth)
+        # registry scan (WindowPanel.@@all_panels), not a tree walk. `self` is the root argument
+        # (widget_in_tree? walks a candidate panel's parent chain looking for `self`).
         def find_all_panels : Array(WindowPanel)
-            panels = [] of WindowPanel
-            collect_panels_recursive(panels)
-            panels
+            WindowPanel.all_in_tree(self)
         end
 
         # Find ancestor Window
@@ -1543,31 +1607,12 @@ module CrymbleUI
             panels.max_by(&.z_index)
         end
 
-        # Recursively collect all WindowPanel widgets
-        protected def collect_panels_recursive(panels : Array(WindowPanel))
-            if self.is_a?(WindowPanel)
-                panels << self.as(WindowPanel)
-            end
-            @children.each do |child|
-                child.collect_panels_recursive(panels)
-            end
-        end
-
-        # Find all Popup widgets in this subtree
+        # Find all Popup widgets reachable from this subtree — an O(#popups × depth) registry
+        # scan (Popup.@@all_popups), not a tree walk. Also finds Window overlay popups (added via
+        # Window#add_overlay, which sets popup.parent = window directly rather than adding it to
+        # @children) since widget_in_tree? follows the parent chain regardless of how it got set.
         def find_all_popups : Array(Popup)
-            popups = [] of Popup
-            collect_popups_recursive(popups)
-            popups
-        end
-
-        # Recursively collect all Popup widgets
-        protected def collect_popups_recursive(popups : Array(Popup))
-            if self.is_a?(Popup)
-                popups << self.as(Popup)
-            end
-            @children.each do |child|
-                child.collect_popups_recursive(popups)
-            end
+            Popup.all_in_tree(self)
         end
 
         # === LAYER OWNER NOTIFICATION BROADCASTING ===
@@ -1588,6 +1633,7 @@ module CrymbleUI
 
         # Clear render state recursively
         def clear_render_state_recursive
+            Widget.increment_state_sweep_visits # perf-audit: bump once per node visited
             @state = WidgetState::Clean
             @children.each(&.clear_render_state_recursive)
         end

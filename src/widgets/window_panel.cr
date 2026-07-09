@@ -88,6 +88,52 @@ module CrymbleUI
         # The width dual: smallest content width, cached like @content_min_height.
         @content_min_width : Float64 = 0.0
 
+        # Global registry of all WindowPanel instances — mirrors Layer.@@all_layers (layer.cr).
+        # Turns find_topmost_panel/find_all_panels from an O(total-widget) tree walk into an
+        # O(#panels × depth) registry scan (widget_in_tree? walks owner→root).
+        #
+        # Register/unregister/iterate ONLY via the explicit `WindowPanel.`-qualified class
+        # methods below (never a bare `@@all_panels << self` from an instance method) — Crystal
+        # class variables are per-CLASS, not shared with subtypes: a bare access from a method
+        # inherited into a subclass instance writes/reads that SUBCLASS's own separate copy, not
+        # WindowPanel's (same caveat as increment_absolute_bounds_count above).
+        @@all_panels = Set(WindowPanel).new
+
+        def self.register(panel : WindowPanel) : Nil
+            @@all_panels << panel
+        end
+
+        def self.unregister(panel : WindowPanel) : Nil
+            @@all_panels.delete(panel)
+        end
+
+        # All registered panels reachable from root. Bumps panel_walk_visits once per registry
+        # entry checked (perf-audit parity with the O(total-widget) walk this replaces — now
+        # O(#panels), not O(content)).
+        def self.all_in_tree(root : Widget) : Array(WindowPanel)
+            @@all_panels.select do |panel|
+                Widget.increment_panel_walk_visits
+                panel.widget_in_tree?(root)
+            end
+        end
+
+        # Drop panels no longer reachable from root. Set#delete only — a WindowPanel owns no GPU
+        # backend to dispose (unlike Layer.cleanup_orphaned_layers); its @internal_layer is
+        # cleaned up separately by the Layer registry.
+        def self.cleanup_orphaned(root : Widget) : Nil
+            @@all_panels.reject! { |panel| !panel.widget_in_tree?(root) }
+        end
+
+        # Clear the registry (test isolation between specs).
+        def self.clear_registry : Nil
+            @@all_panels.clear
+        end
+
+        # Current registry size (debugging/metrics/lifecycle specs).
+        def self.registry_size : Int32
+            @@all_panels.size
+        end
+
         # Debug counter: how many times content_min was RECOMPUTED (a structural-change cost). The
         # resize hot-path must NOT bump it (it reads the cache). Asserted by the perf-budget spec.
         @@min_floor_recompute_count = 0
@@ -633,6 +679,9 @@ module CrymbleUI
             # Background color used for buffer clearing instead of rendering as primitive
             # Must be created after all ivars initialized (Crystal requirement)
             @internal_layer = Layer.new("panel_#{id}", Rect.zero, z_index: z_index, background_color: background_color, owner_widget: self)
+
+            # Register in the global panel registry (qualified — see the class-var caveat above).
+            WindowPanel.register(self)
         end
 
         # layer getter provided by LayerOwner mixin

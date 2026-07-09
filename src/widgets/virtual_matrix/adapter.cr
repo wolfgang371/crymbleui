@@ -36,11 +36,18 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Called by VirtualMatrix when a cell enters the visible region.
     abstract def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
 
-    # Called at the start of each render frame (for change animation buffer swap)
+    # Called at the start of each render frame the content layer RENDERS (for change-animation buffer
+    # swap). A position-only frame — a pure panel drag — skips the viewport_cache body and thus this
+    # call (see LAYER_RENDERING_ARCHITECTURE.md "Layer-level gate"). A change that moves a cell version
+    # (reactive/push) still wakes the layer, so it is caught; a change detected ONLY by the cell_read
+    # poll below (a derived/background-recomputed value with no version bump) is deferred until the next
+    # content-rendering frame (e.g. drag release). Bump a version if a change must animate mid-drag.
     def start_frame : Nil
     end
 
     # Read cell value (for change detection). Default: no-op, returns empty string.
+    # NB: polled in start_frame, so a value change surfaced ONLY here (not via a version bump) is not
+    # observed on a position-only drag frame — see the start_frame note.
     def cell_read(row : Int32, col : Int32) : String
       ""
     end

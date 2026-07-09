@@ -606,6 +606,30 @@ coherence* (re-blit the buffer at a new offset; slots keep their versions), dist
 is *dependency freshness* — see the "two orthogonal axes" section of `REACTIVITY.md`. This keeps a scrolling
 or idle matrix at near-zero render work while still catching a single edited cell.
 
+**Layer-level gate (above the per-slot pull).** The visit-all-visible pass is itself O(visible) — cheap per
+cell, but not free when a maximized matrix is dragged and a frame fires per mouse-move. So a `viewport_cache`
+layer runs the pass **only when its content could have changed**: `Layer#viewport_body_stale?` gates it on a
+per-layer version, `content_rev` (= `scroll_rev + clear_rev + Σ visible-widget `primitives_version``) plus the
+push flags (`needs_render?`/`needs_clear`), a pending resize `resize_shift`, and `size_changed?`. Crucially it
+**excludes `position_rev`**: a WindowPanel *drag* bumps only the layer's composite position, and the
+unconditional composite already re-blits the cached buffer at the pulled `bounds` (`compute_bounds_for_layer` →
+`absolute_bounds`, live parent chain). So a position-only frame skips the whole pass — the matrix drags as a
+pure composite, exactly like a button panel (this was the fix for a ~90%-CPU maximized-drag). `content_rev` is
+the same per-layer sum `frame_aggregate_rev` folds for the render trigger (minus `position_rev`), so trigger
+and gate cannot drift; the stamp of "what was last rendered" lives in `clear_render_state`.
+
+> **PRECONDITION — change must move a version, not just a per-frame poll.** The gate assumes appearance
+> changes move a *version* (as the RULE below already requires). Two concrete traps:
+> - A `CachePolicy::Never` widget that repaints on an external clock (its `primitives_version` does **not**
+>   move per frame) placed **directly on a `viewport_cache` layer** would freeze between content changes.
+>   Today none exist there (the cursor-overlay and rulers live on their own non-`viewport_cache` layers); a
+>   future one must force `needs_render?` on its layer each tick, or live on a non-`viewport_cache` layer.
+> - A `MatrixAdapter` whose `start_frame`/`cell_read` change-poll is the **only** notice of a value change
+>   (a derived / background-recomputed cell with no version bump) is polled only on a content-rendering
+>   frame, so its change-flash is deferred across a pure drag until release. Embrace's flashes are
+>   reactive-driven (they move a rev → `content_rev` → the layer wakes), so this is latent, not live; bump a
+>   version if a poll-detected change must animate mid-drag.
+
 ## Cache-Coherency Contract (what invalidates what)
 
 Cache garbling is almost always a **missing invalidation**: a value changed, but the signal that should
@@ -617,19 +641,51 @@ section is the single "what invalidates what" reference, so a widget author pick
 | Cache | Holds | Owned by |
 |-------|-------|----------|
 | **A1 primitives** (`@cached_primitives` / primitives node) | the widget's DrawPrimitives at (0,0) origin | every widget |
-| **A2 widget texture** (`widget_backend`) | the rasterized widget | every rendered widget |
-| **A3 background** (`background_backend`) | the layer pixels behind the widget, memorized | every rendered widget |
+| **A2 widget texture** (`widget_backend`) | the rasterized widget | every rendered widget **except** a `tiled_cells` layer's cells (see Direct-to-layer below) |
+| **A3 background** (`background_backend`) | the layer pixels behind the widget, memorized | every rendered widget (same exception) |
 | **A4 slot buffer** | rasterized visible cells, one per buffer slot | `viewport_cache` layers (VirtualMatrix, ScrollView content) |
 | **A5 layer texture** | the composited layer | layer-owning widgets |
+
+### Direct-to-layer render (`tiled_cells` layers)
+
+A `viewport_cache` layer whose top-level widgets form a **grid of tiling cells** — adjacent, gaps filled by
+grid lines, over a uniform background — sets `layer.tiled_cells = true` (VirtualMatrix does this on its
+content layer). On a full render of such a layer (`buffer_just_cleared`), each cell's primitives are drawn
+**directly into the layer buffer** via `execute_primitive_with_offset` — skipping the per-cell `widget_backend`
+entirely: no texture allocation, no background capture/restore (invariants f/h), no per-cell blit. The buffer
+is the single source of truth, so the pixels are identical to the texture path (any device-pixel edge a cell
+leaves uncovered is a tiling neighbour, a grid line, or the just-cleared uniform bg). This is the measured
+DnD-reconfigure win (~130 texture allocs+blits → 0). The cell is left in the clean state {no `widget_backend`,
+no `background_backend`, `slot` stamped at its buffer position}, so it costs zero GPU texture memory.
+
+**Validity is the slot, not the texture.** Because a direct-rendered cell has no `widget_backend`, the
+scroll-skip and blit-shift paths key off the **slot** (`slot_rev` = `primitives_version`, `slot_buffer_pos` =
+buffer position) rather than texture existence: a cell is skipped when `slot_fresh?` (content + position
+unchanged), and the blit-shift moves each cell's slot in lockstep with the pixels it translates
+(`shift_slot`), so a scroll skips the still-valid cells with no re-render. Only a genuinely reflowed or
+newly-exposed cell (stale/absent slot) re-renders. Non-tiling `viewport_cache` content (a ScrollView's spaced
+list, a ComboBox popup) leaves cell edges exposed over the layer bg, so it stays on the per-cell texture path.
+
+> **Testing note:** a direct-rendered cell has no `widget_backend`, so "did this cell paint?" is the
+> renderer's per-frame **disposition** (`widget_disposition(cell)` → `:rendered`/`:blitted`/`:skipped` =
+> painted; `nil` = culled), or a `get_pixel` on the **layer buffer** — never `widget_backend` presence.
+>
+> **Border pixel-parity:** the direct path draws a cell's primitives at a *buffer offset*, whereas the texture
+> path drew them widget-local at (0,0). `draw_rect` (borders) simulates SFML clipping the outline's outer half
+> at the scissor edge; that skip is **clip-relative** (`bounds.x <= clip.x`), NOT origin-0, so a border renders
+> identically whichever path drew it — matching real SFML, which scissors wherever the clip sits. (Keying the
+> skip on `bounds.x == 0` alone made the two paths differ by 1px — the cv oracle caught it.)
 
 ### Two kinds of signal — and the trap
 
 There are exactly two ways to mark a cache stale, and they are **not** interchangeable:
 
-- **PERSISTENT — a version bump.** `primitive_cache_rev = content_rev + theme_rev + zoom_rev + layout_rev`;
-  a widget's `primitives_version` folds these. It is a *value*, so it survives until the widget is actually
-  re-rendered. You raise it by **reading a `reactive_property` getter in `to_primitives`** (content/theme/zoom
-  auto-capture → content_rev) or by **`mark_needs_layout`** (size/structure → layout_rev).
+- **PERSISTENT — a version bump.** A widget's `primitives_version` is its Cached-node version for a rendered
+  Dynamic widget (auto-capturing content/theme/zoom), falling back to the residual
+  `primitive_cache_rev = content_rev + layout_rev` otherwise (theme/zoom reach the residual via the node or a
+  rebuild; the global `theme_rev` counter was deleted). It is a *value*, so it survives until the widget is
+  actually re-rendered. You raise it by **reading a `reactive_property` getter in `to_primitives`**
+  (content/theme/zoom auto-capture → content_rev) or by **`mark_needs_layout`** (size/structure → layout_rev).
 - **TRANSIENT — a dirty flag.** `mark_needs_render(widget)` adds the widget to its layer's `dirty_widgets`
   set, which is **swept Clean every frame by `clear_render_state`**.
 
@@ -657,7 +713,7 @@ cell keeps its stale slot pixels.
 | size / structure | `mark_needs_layout` (or a `reactive_property … layout: true`) | layout_rev — **persistent** | O(n) layout |
 | position only (drag) | set `layer.bounds` | composite | O(layers) |
 | widget hidden / collapsed | `zero_bounds!` | releases the cache | O(subtree) |
-| DSL rebuild (`app.rebuild`) | — | `mark_needs_clear_and_render` on every active layer (unless `layer.skip_rebuild_clear`, which marks only the first widget `needs_render` instead); `app.cr:372-378` | O(n) full re-render per layer |
+| DSL rebuild (`app.rebuild`) | — | per-layer **content-staleness**: after layout repopulates `layer.widgets`, the renderer's `assess_rebuild_staleness` marks `mark_needs_clear_and_render` ONLY on a non-overlay / non-`viewport_cache` layer whose `{path_id, absolute_bounds, primitives}` signature changed vs. what it last full-rendered (carried on the reconciled `Layer`); an **unchanged** layer is left Clean → its carried buffer re-blits (0 re-render). Overlays (`skip_rebuild_clear`) refresh in `app.rebuild`; `viewport_cache` layers self-gate via `viewport_body_stale?`. | O(chrome widgets) assess per rebuild; **0** re-render for unchanged layers, O(n) full clear for changed |
 
 ### Footprint vacate: release the whole subtree
 

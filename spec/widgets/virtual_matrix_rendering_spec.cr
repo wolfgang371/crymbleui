@@ -10,8 +10,11 @@ describe "VirtualMatrix rendering verification" do
   # === WIDGET BACKEND CHECKS ===
   # These verify cells actually render (catches "nothing renders" bugs)
 
-  describe "widget_backend presence (basic rendering)" do
-    it "visible cells have widget_backend after render" do
+  # A matrix content cell renders direct-to-layer (no per-cell widget_backend), so "did this cell
+  # paint?" is answered by the renderer's per-frame disposition (:rendered / :blitted / :skipped =
+  # painted; nil = culled/absent = the black-screen signature), NOT by widget_backend presence.
+  describe "cell paint verification (basic rendering)" do
+    it "visible cells are painted after render" do
       renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
       app = TestApp.new
 
@@ -27,10 +30,10 @@ describe "VirtualMatrix rendering verification" do
       # Get a visible cell widget from active_cells
       cell_widget = matrix.active_cells[{0, 0}]?
       cell_widget.should_not be_nil, "Cell (0,0) not in active_cells"
-      cell_widget.not_nil!.widget_backend.should_not be_nil, "Cell (0,0) has no widget_backend (not rendered!)"
+      renderer.widget_disposition(cell_widget.not_nil!).should_not be_nil, "Cell (0,0) was not painted (nothing rendered!)"
     end
 
-    it "multiple visible cells have widget_backend" do
+    it "multiple visible cells are painted" do
       renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
       app = TestApp.new
 
@@ -44,17 +47,17 @@ describe "VirtualMatrix rendering verification" do
       renderer.render_frame(app)
 
       # Check multiple cells
-      cells_with_backend = 0
+      cells_painted = 0
       matrix.active_cells.each do |key, widget|
-        cells_with_backend += 1 if widget.widget_backend != nil
+        cells_painted += 1 unless renderer.widget_disposition(widget).nil?
       end
 
-      cells_with_backend.should be > 0, "No cells have widget_backend (nothing rendered!)"
-      # Most active cells should be rendered (buffer zone cells outside viewport may not have backends)
-      cells_with_backend.should be >= (matrix.active_cell_count * 0.5), "Too few active cells have widget_backend"
+      cells_painted.should be > 0, "No cells were painted (nothing rendered!)"
+      # Most active cells should be painted (buffer zone cells outside viewport may be culled)
+      cells_painted.should be >= (matrix.active_cell_count * 0.5), "Too few active cells were painted"
     end
 
-    it "newly visible cells after scroll have widget_backend" do
+    it "newly visible cells after scroll are painted" do
       renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
       app = TestApp.new
 
@@ -80,7 +83,7 @@ describe "VirtualMatrix rendering verification" do
       test_row = visible_rows.first
       cell_widget = matrix.active_cells[{test_row, 0}]?
       cell_widget.should_not be_nil, "Cell (#{test_row}, 0) not in active_cells after scroll"
-      cell_widget.not_nil!.widget_backend.should_not be_nil, "Cell (#{test_row}, 0) has no widget_backend after scroll"
+      renderer.widget_disposition(cell_widget.not_nil!).should_not be_nil, "Cell (#{test_row}, 0) was not painted after scroll"
     end
   end
 

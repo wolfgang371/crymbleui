@@ -65,19 +65,32 @@ describe "Dup panel - buttons must remain visible after adding second panel" do
     btn_record = app.find("addr_0").not_nil!
     assert_rendered(btn_record, "Add record button before dup")
 
+    # Capture the actual on-screen pixels of both buttons before the dup.
+    ab = btn_add.absolute_bounds
+    acx = (ab.x + ab.width / 2).to_i
+    acy = (ab.y + ab.height / 2).to_i
+    add_px_before = renderer.backend.get_pixel(acx, acy)
+    rb = btn_record.absolute_bounds
+    rcx = (rb.x + rb.width / 2).to_i
+    rcy = (rb.y + rb.height / 2).to_i
+    rec_px_before = renderer.backend.get_pixel(rcx, rcy)
+
     # Simulate "dup shape" — add second panel, trigger rebuild
     app.panel_count = 2
     app.rebuild
     renderer.settle_rendering(app)
 
-    # Verify left panel buttons are STILL rendered
+    # The left panel is UNCHANGED, so cheap-rebuild re-renders it selectively / skips it — an unchanged
+    # button keeps its buffer pixels WITHOUT a fresh widget_backend, so `widget_backend != nil` is no
+    # longer a "visible" proxy here. Assert the REAL invariant this test guards ("buttons must remain
+    # visible"): the buttons' on-screen pixels are unchanged (still drawn) and the widgets still exist.
     btn_add_after = app.find("addf_0")
     btn_add_after.should_not be_nil, "Add field button not found after dup"
-    assert_rendered(btn_add_after.not_nil!, "Add field button after dup")
+    renderer.backend.get_pixel(acx, acy).should eq(add_px_before), "Add-field button not visible after dup"
 
     btn_record_after = app.find("addr_0")
     btn_record_after.should_not be_nil, "Add record button not found after dup"
-    assert_rendered(btn_record_after.not_nil!, "Add record button after dup")
+    renderer.backend.get_pixel(rcx, rcy).should eq(rec_px_before), "Add-record button not visible after dup"
 
     # Also verify right panel exists (button may not be findable if panel was just created)
     panel_right = app.find("panel_1")
