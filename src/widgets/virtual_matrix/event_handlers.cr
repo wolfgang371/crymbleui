@@ -442,14 +442,18 @@ module CrymbleUI
             return true
           end
           if proxy.is_a?(TextInput)
-            # A focused text editor: Enter commits + exits edit; Space is
-            # TEXT (it arrives as a separate TextEntered and is forwarded
-            # by on_text_input). Neither activates — trigger_click here
-            # would re-focus the input (on_click -> request_focus -> re-arm
-            # QuickEntry's replace-on-first-key), wiping what was typed
-            # before the space ("A B" -> " B"). Consume the keypress either
-            # way so it never falls through to grid activation.
-            clear_proxy_focus if key == SF::Keyboard::Key::Enter
+            # A focused text editor. Enter LEAVES full-edit mode: commit the edit
+            # and re-arm QuickEntry on the SAME cell. Enter toggles in/out of
+            # full-edit (F2-style) — it does NOT move the cursor (arrow keys do
+            # accept-and-move in QuickEntry). This also kills the old
+            # cursored-but-un-proxied dead cell (typing silently ignored). Space
+            # is TEXT (a separate TextEntered forwarded by on_text_input); consume
+            # so it never falls through to grid activation.
+            if key == SF::Keyboard::Key::Enter
+              clear_proxy_focus   # commit the edit + drop the now-stale proxy
+              update_proxy_focus  # re-arm the same cursor cell in QuickEntry
+              mark_needs_render
+            end
             return true
           end
           proxy.trigger_click

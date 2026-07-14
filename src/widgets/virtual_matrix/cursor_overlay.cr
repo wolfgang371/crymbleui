@@ -111,7 +111,9 @@ module CrymbleUI
           if col_visible
             fill_rect(Rect.new(effective_band_x, col_band_y, effective_col_w, col_band_h), band_color)
           end
-          if row_visible && col_visible && @flash_on
+          # Skip the whole-cell flash when the cursor cell draws its own caret
+          # (a focused TextInput) — the two would compete and read as jitter.
+          if row_visible && col_visible && @flash_on && !@matrix.cursor_cell_draws_edit_caret?
             fill_rect(Rect.new(effective_band_x, effective_band_y, effective_col_w, effective_row_h), cell_flash_color)
           end
 

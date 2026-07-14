@@ -150,6 +150,14 @@ module CrymbleUI
       target.try(&.activate_proxy_focus)
     end
 
+    # True when the cursor cell is in character-edit mode (draws its own caret) —
+    # the whole-cell cursor flash is then suppressed (the caret is the indicator).
+    # In cell-nav mode this is false, so the flash marks the cell (consistent across
+    # cell types). Order-independent guard consulted by the overlay paint.
+    def cursor_cell_draws_edit_caret? : Bool
+      !!@proxy_focused_widget.try(&.draws_edit_caret?)
+    end
+
     # Deactivate proxy focus entirely (on blur or cell destruction)
     private def clear_proxy_focus
       commit_proxy_edit

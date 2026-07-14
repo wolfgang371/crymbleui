@@ -4,10 +4,12 @@ require "../../../src/widgets/text_input"
 require "../../../src/widgets/button"
 require "../../../src/testing/test_renderer"
 
-# Tab/Shift+Tab wrapping around a VirtualMatrix in a SCROLLING (partial)
-# viewport must not leave a ghost QuickEntry select-all highlight + caret on the
-# cells the cursor swept through but no longer occupies. Only the cursor cell may
-# show that edit decoration.
+# Tab/Shift+Tab wrapping around a VirtualMatrix in a SCROLLING (partial) viewport
+# must not leave a ghost QuickEntry edit decoration on the cells the cursor swept
+# through. The select-all highlight has since been removed from cell-nav mode (a
+# fresh cell shows no highlight; typing overwrites via pending_replace), so NO cell
+# shows it — the highlight-ghost class is eliminated by design. These tests guard
+# that (no cell shows the highlight) + the deactivate_proxy_focus cache fix stays.
 #
 # Root cause: a proxy-focused QuickEntry cell bakes the highlight+caret into its
 # per-widget cache; deactivate_proxy_focus only mark_needs_render's, and that
@@ -103,15 +105,18 @@ describe "VirtualMatrix Tab-wraparound ghost highlight" do
     visible_ghosts(matrix).should eq([] of Tuple(Int32, Int32))
   end
 
-  it "still shows the highlight on the cursor cell (positive control)" do
+  it "shows no select-all highlight on the fresh cursor cell (cell-nav mode)" do
     app, matrix, renderer = build_scrolling_matrix
     60.times { press_tab(app); renderer.render_frame(app) }
     20.times { press_tab(app, shift: true); renderer.render_frame(app) }
     renderer.settle_rendering(app)
 
+    # Cell-nav mode has no select-all highlight (typing overwrites via
+    # pending_replace) — the cursor cell, like every swept cell, shows none. The
+    # select-all-ghost class is thus eliminated by design.
     cursor_cell = matrix.active_cells[matrix.cursor_rc]?
     cursor_cell.should_not be_nil
-    cell_shows_highlight?(cursor_cell.not_nil!).should be_true
+    cell_shows_highlight?(cursor_cell.not_nil!).should be_false
   end
 
   it "leaves no ghost highlight after Shift+Tab backward wrap" do

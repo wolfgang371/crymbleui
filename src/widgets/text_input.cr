@@ -117,12 +117,22 @@ module CrymbleUI
       @was_quick_entry = edit_mode == TextInputMode::QuickEntry
       @edit_mode.set(TextInputMode::FullEdit)
       @pending_replace.set(false)
+      # Full-edit (character mode): the caret appears + blinks now.
+      @cursor_visible.set(true)
+      start_cursor_blink
     end
 
     # Exit FullEdit mode (Enter or Esc in FullEdit)
     def exit_edit_mode
       @edit_mode.set(@default_mode)
       @was_quick_entry = false
+      # Back to cell-nav (QuickEntry): re-arm the fresh "type-to-replace" state so
+      # there's no caret (and no blink) until you type again. A default-FullEdit
+      # widget stays in character mode.
+      if edit_mode == TextInputMode::QuickEntry
+        @pending_replace.set(true)
+        stop_cursor_blink
+      end
     end
 
     # On-change callback (simple value change)
@@ -253,8 +263,10 @@ module CrymbleUI
         @selection_anchor.set(anchor.clamp(0, value.size))
       end
 
-      # Restart blink timer if focused (timer was on old widget instance)
-      start_cursor_blink if focused?
+      # Restart blink only while a caret is actually shown (actively editing, not
+      # the fresh type-to-replace state). A matrix cell is PROXY-focused, so use
+      # effectively_focused? (a bare focused? left the caret frozen after a reconcile).
+      start_cursor_blink if effectively_focused? && !pending_replace
     end
 
     # === SELECTION HELPERS ===
@@ -377,9 +389,10 @@ module CrymbleUI
         # Draw prefix (if any) before the value/cursor/selection area.
         draw_text(prefix, prefix_position, text_color, font_scale) unless prefix.empty?
 
-        # Draw selection highlight (before text so it's behind)
-        # Show selection for: actual selection OR pending_replace (all text will be replaced)
-        show_selection = has_selection? || (pending_replace && effectively_focused?)
+        # Draw selection highlight (before text so it's behind). Only a REAL
+        # selection (full-edit / Ctrl+A) highlights — QuickEntry (cell mode) shows
+        # no select-all highlight; typing still overwrites via pending_replace.
+        show_selection = has_selection?
         if !display_empty && show_selection
           # For pending_replace: select all text; otherwise use actual selection
           sel_start, sel_end = if has_selection?
@@ -403,8 +416,11 @@ module CrymbleUI
           draw_text(display_text, text_position, display_color, font_scale)
         end
 
-        # Draw cursor (only when focused and visible)
-        if effectively_focused? && cursor_visible && !display_empty
+        # Draw cursor once you're actively entering text (NOT the fresh
+        # type-to-replace state). A fresh cursor cell shows no caret — the matrix
+        # cell-flash marks it — and the caret appears the moment you type / enter
+        # full-edit.
+        if effectively_focused? && cursor_visible && !pending_replace && !display_empty
           # Calculate cursor x position based on text before cursor
           text_before_cursor = value[0...cursor_pos]
           cursor_x_offset = measure_text(text_before_cursor, font_size).width
@@ -413,7 +429,7 @@ module CrymbleUI
           # Cursor line
           cursor_rect = Rect.new(cursor_x, text_y, CURSOR_WIDTH, font_size)
           fill_rect(cursor_rect, text_color)
-        elsif effectively_focused? && cursor_visible && display_empty
+        elsif effectively_focused? && cursor_visible && !pending_replace && display_empty
           # Cursor at start when empty
           cursor_rect = Rect.new(content_x, text_y, CURSOR_WIDTH, font_size)
           fill_rect(cursor_rect, text_color)
@@ -453,7 +469,9 @@ module CrymbleUI
       super
       @cursor_visible.set(true)
       @value_on_focus.set(value)
-      start_cursor_blink
+      # A fresh cursor cell has no caret/blink — the caret starts blinking when you
+      # type (on_text_input restarts it) or enter full-edit (enter_edit_mode).
+      start_cursor_blink if edit_mode == TextInputMode::FullEdit
       self.pending_replace = true if edit_mode == TextInputMode::QuickEntry
     end
 
@@ -480,6 +498,15 @@ module CrymbleUI
       @selection_anchor.set(nil)
       @pending_replace.set(false)
       invalidate_primitive_cache
+    end
+
+    # A TextInput draws its caret once you're actively entering text — i.e. NOT in
+    # the fresh "type-to-replace" state (pending_replace). A fresh cursor cell draws
+    # no caret, so the matrix cell-flash marks it (like ComboBox/Checkbox/Nil); the
+    # moment you type or enter full-edit the caret appears and the matrix suppresses
+    # its whole-cell flash (the caret is then the indicator).
+    def draws_edit_caret? : Bool
+      effectively_focused? && !pending_replace
     end
 
     # Start cursor blinking timer
@@ -580,19 +607,18 @@ module CrymbleUI
 
       case key
       when SF::Keyboard::Key::Enter
-        if edit_mode == TextInputMode::QuickEntry && value == value_on_focus
-          # QuickEntry with no change: Enter switches to FullEdit mode for editing
+        if edit_mode == TextInputMode::QuickEntry
+          # QuickEntry: Enter ENTERS full-edit mode (F2-style toggle). Committing
+          # and moving is the arrow keys' job (accept-and-move) — Enter never moves.
           enter_edit_mode
           true
-        elsif edit_mode == TextInputMode::QuickEntry
-          # QuickEntry with changed content: let parent handle (commit + stay in place)
-          false
         else
-          # FullEdit: Enter fires Submit and releases proxy focus
+          # FullEdit: Enter LEAVES full-edit — the parent (matrix) commits and
+          # re-arms QuickEntry on the SAME cell (no cursor move, no dead cell).
           exit_edit_mode if @was_quick_entry
           notify_submit
           deactivate_proxy_focus
-          false # let parent handle (commit)
+          false # let parent handle (commit + re-arm)
         end
       when SF::Keyboard::Key::Backspace
         if has_selection?

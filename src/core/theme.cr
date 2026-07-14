@@ -165,14 +165,23 @@ module CrymbleUI
     end
 
     # Generic color access for app-specific theme extensions.
-    # Apps add custom tokens to the theme JSON (e.g., "vhtree.selected_bg")
-    # and access them via Theme.current["vhtree.selected_bg"].
+    # An app OWNS its color tokens and registers them via
+    # Theme.register_colors(variant, {...}); it does NOT put them in the lib's
+    # theme JSON (which stays generic). Access via Theme.current["app.token"].
     def [](key : String) : Color
       @all_colors[key]
     end
 
     def []?(key : String) : Color?
       @all_colors[key]?
+    end
+
+    # Merge app-registered tokens into this theme's color table. @all_colors is a
+    # shared Hash reference (a struct copy shares it, not its contents), so this
+    # updates the live theme in place. Startup-only, via Theme.register_colors —
+    # not a runtime mutation path.
+    def merge_colors!(colors : Hash(String, Color)) : Nil
+      @all_colors.merge!(colors)
     end
 
     # Parse a ThemeData from a JSON string
@@ -315,6 +324,15 @@ module CrymbleUI
 
     def self.register(name : Symbol, theme : ThemeData)
       @@themes[name] = theme
+    end
+
+    # Register app-owned color tokens for a theme variant. Keeps the lib generic:
+    # the app names + values its own tokens (e.g. "constraint.ok") instead of them
+    # living in the lib's theme JSON. Call once at startup, before the first read.
+    def self.register_colors(variant : Symbol, colors : Hash(String, Color)) : Nil
+      theme = @@themes[variant]?
+      raise "Unknown theme: #{variant}" unless theme
+      theme.merge_colors!(colors)
     end
 
     def self.available : Array(Symbol)

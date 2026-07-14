@@ -1488,6 +1488,13 @@ module CrymbleUI
           focused? || @proxy_focused
         end
 
+        # True if this widget renders its own text caret when (effectively) focused,
+        # so a container's cursor-cell flash would just compete with it. VirtualMatrix
+        # suppresses its whole-cell flash on cursor cells that return true.
+        def draws_edit_caret? : Bool
+          false
+        end
+
         # Called by parent container to activate proxy focus on this widget.
         # Override for setup (e.g. TextInput starts cursor blink).
         def activate_proxy_focus

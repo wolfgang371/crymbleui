@@ -444,3 +444,87 @@ describe "VirtualMatrix TextInput proxy focus" do
     end
   end
 end
+
+describe "VirtualMatrix cell-flash vs. caret (fresh cell / typing / full-edit)" do
+  # The rule: cell-flash marks the cell while it's FRESH (just navigated to, not
+  # yet typed); the caret appears the moment you START TYPING or enter full-edit.
+  # Never both at once. `draws_edit_caret?` drives both (caret render + flash gate).
+
+  it "a fresh cursor cell shows the cell-flash and NO caret" do
+    matrix = make_ti_matrix
+    setup_ti_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+    cell = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+
+    cell.draws_edit_caret?.should be_false               # no caret on a fresh cell
+    matrix.cursor_cell_draws_edit_caret?.should be_false # → overlay draws the cell-flash
+  end
+
+  it "starting to type shows the caret and suppresses the cell-flash" do
+    matrix = make_ti_matrix
+    setup_ti_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+    cell = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+
+    fm.handle_text_input('X') # start typing (consumes pending_replace)
+    cell.value.should eq("X")
+    cell.draws_edit_caret?.should be_true               # caret appears
+    matrix.cursor_cell_draws_edit_caret?.should be_true # → cell-flash suppressed
+  end
+
+  it "entering full-edit shows the caret and suppresses the cell-flash" do
+    matrix = make_ti_matrix
+    setup_ti_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+    cell = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+
+    matrix.on_key_down(SF::Keyboard::Key::Enter, false, false) # enter full-edit
+    cell.edit_mode.should eq(CrymbleUI::TextInputMode::FullEdit)
+    cell.draws_edit_caret?.should be_true
+    matrix.cursor_cell_draws_edit_caret?.should be_true
+  end
+
+  it "leaving full-edit returns to a fresh cell (cell-flash, no caret)" do
+    matrix = make_ti_matrix
+    setup_ti_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+
+    matrix.on_key_down(SF::Keyboard::Key::Enter, false, false) # enter full-edit
+    matrix.on_key_down(SF::Keyboard::Key::Enter, false, false) # leave full-edit
+    live = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+
+    live.edit_mode.should eq(CrymbleUI::TextInputMode::QuickEntry)
+    live.draws_edit_caret?.should be_false               # no caret again (fresh)
+    matrix.cursor_cell_draws_edit_caret?.should be_false # cell-flash back
+  end
+end
+
+describe "VirtualMatrix Enter toggles full-edit (no cursor move, no dead cell)" do
+  it "Enter enters full-edit; Enter again leaves it (commit) on the SAME cell, still live" do
+    matrix = make_ti_matrix
+    setup_ti_matrix(matrix)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+    cell = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+
+    # QuickEntry Enter → ENTER full-edit (F2-style).
+    matrix.on_key_down(SF::Keyboard::Key::Enter, false, false)
+    cell.edit_mode.should eq(CrymbleUI::TextInputMode::FullEdit)
+
+    # Enter again → LEAVE full-edit: commit + re-arm QuickEntry on the SAME cell.
+    # (Previously FullEdit+Enter dropped the proxy and left a dead cursored cell.)
+    matrix.on_key_down(SF::Keyboard::Key::Enter, false, false)
+    matrix.cursor_rc.should eq({0, 0}) # Enter never moves the cursor
+    live = matrix.active_cells[{0, 0}].as(CrymbleUI::TextInput)
+    live.edit_mode.should eq(CrymbleUI::TextInputMode::QuickEntry)
+    live.effectively_focused?.should be_true # live, not an un-proxied dead cell
+
+    # Typing lands (QuickEntry replace) — proves it's not the old dead limbo.
+    fm.handle_text_input('Z')
+    live.value.should eq("Z")
+  end
+end
