@@ -96,6 +96,30 @@ describe "Layer Content Rendering" do
       root_layer.widgets.should_not contain(panel)
     end
 
+    it "keeps LayerBox and a direct-child Popup out of the root layer (own-layer partition)" do
+      # The Window partition classifies own-layer widgets by compositing_z_index, not by
+      # `layer != nil` — so it must catch EVERY own-layer type (WindowPanel, LayerBox, Popup),
+      # including a direct-child modal Popup. A WindowPanel/LayerBox-only marker would misclassify
+      # the Popup as content and paint it into the root layer at the wrong z (silent regression).
+      window = CrymbleUI::Window.new("Test", 800, 600)
+      button = CrymbleUI::Button.new("Click") { }
+      layer_box = CrymbleUI::LayerBox.new(50.0, 50.0, 120.0, 80.0, id: "lb")
+      popup = CrymbleUI::Popup.new(width: 100.0, height: 60.0, id: "pop")
+
+      window.add_child(button)
+      window.add_child(layer_box)
+      window.add_child(popup)
+
+      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
+      window.layout(constraints, CrymbleUI::Vec2.zero)
+
+      root_layer = window.root_layer.not_nil!
+      root_layer.widgets.should contain(button)         # content → root layer
+      root_layer.widgets.should_not contain(layer_box)  # own layer
+      root_layer.widgets.should_not contain(popup)      # own layer
+      root_layer.widgets.size.should eq(1)              # exactly the one content widget
+    end
+
     it "clears and repopulates layer widgets on re-layout" do
       window = CrymbleUI::Window.new("Test", 800, 600)
       panel = CrymbleUI::WindowPanel.new("P1", 100.0, 100.0, 200.0, 150.0)

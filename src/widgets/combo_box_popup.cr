@@ -601,11 +601,10 @@ module CrymbleUI
       size = measure(constraints)
       @bounds = Rect.new(position, size)
 
-      # Populate layer.widgets
-      if layer = @internal_layer
-        layer.widgets.clear
-        layer.widgets << self
-      end
+      # Populate layer.widgets (shares Popup's lazy layer creation)
+      layer = ensure_layer
+      layer.widgets.clear
+      layer.widgets << self
 
       # Layout TextInput at top
       text_constraints = BoxConstraints.tight(Size.new(

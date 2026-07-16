@@ -43,10 +43,8 @@ module CrymbleUI
             @width = Source(Float64?).new(width)
             @height = Source(Float64?).new(height)
             super(id: id)
-            # Create layer with higher z-index to appear on top
-            # Layer buffer always transparent (allows seeing content below)
-            # Widget background rendered separately via to_primitives if needed
-            @internal_layer = Layer.new("layer_#{id}", Rect.zero, z_index: @z_index, background_color: Color.new(0, 0, 0, 0), owner_widget: self)
+            # The compositing layer is created LAZILY on first perform_layout (not here) so a
+            # reconcile reuses the carried @[Reconcile] layer — mirroring ScrollView/VirtualMatrix.
         end
 
         # layer getter provided by LayerOwner mixin
@@ -69,14 +67,12 @@ module CrymbleUI
             actual_height = height || constraints.max_height
             @bounds = Rect.new(x, y, actual_width, actual_height)
 
-            # Update layer
-            if layer = @internal_layer
-                layer.z_index = @z_index
-
-                # Populate layer with children
-                layer.widgets.clear
-                children.each { |child| layer.widgets << child }
-            end
+            # Lazily create the compositing layer on first layout; carried across reconciles.
+            layer = (@internal_layer ||= Layer.new("layer_#{id}", Rect.zero, z_index: @z_index, background_color: Color.new(0, 0, 0, 0), owner_widget: self))
+            layer.z_index = @z_index
+            # Populate layer with children
+            layer.widgets.clear
+            children.each { |child| layer.widgets << child }
 
             # Stack children vertically (default vstack behavior)
             current_y = 0.0

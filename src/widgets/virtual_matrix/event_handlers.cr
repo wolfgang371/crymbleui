@@ -298,9 +298,17 @@ module CrymbleUI
           mark_needs_render
           @last_click_time = now
           @last_click_cell = {row, col}
-          # Set drag source for potential cell drag (DragManager detects threshold)
+          # Set drag source for potential cell drag (DragManager detects threshold).
+          # Flag it provisional: DragManager reads it to build the ghost, but the
+          # decal stays hidden until on_drag_start commits it — otherwise a plain
+          # click would flash the salmon highlight for the mouse-press duration.
           if adapter = @adapter
-            @drag_source_cell = adapter.cell_has_content?(row, col) ? {row, col} : nil
+            if adapter.cell_has_content?(row, col)
+              @drag_source_cell = {row, col}
+              @drag_source_provisional = true
+            else
+              @drag_source_cell = nil
+            end
           end
         end
       end
@@ -370,7 +378,8 @@ module CrymbleUI
       # Clear drag source if click didn't become a drag — but preserve cut highlights
       if @drag_source_cell && !@drag_source_was_preexisting
         @drag_source_cell = nil
-        mark_cursor_overlay_dirty
+        @drag_source_provisional = false
+        mark_drag_overlay_dirty
       end
     end
 
@@ -576,13 +585,17 @@ module CrymbleUI
     end
 
     def on_drag_start(data : DragData)
-      mark_cursor_overlay_dirty
+      # The drag crossed the threshold — the source is now committed, so its
+      # decal may paint (it was provisional through the mouse-down candidate).
+      @drag_source_provisional = false
+      mark_drag_overlay_dirty
     end
 
     def on_drag_end(data : DragData, dropped : Bool)
       @drag_source_cell = nil
       @drag_target_cell = nil
-      mark_cursor_overlay_dirty
+      @drag_source_provisional = false
+      mark_drag_overlay_dirty
     end
 
     # DropTarget: accept cell data from same matrix
@@ -616,12 +629,12 @@ module CrymbleUI
 
     def on_drag_over(data : DragData, position : Vec2)
       @drag_target_cell = point_to_cell(position)
-      mark_cursor_overlay_dirty
+      mark_drag_overlay_dirty
     end
 
     def on_drag_leave(data : DragData)
       @drag_target_cell = nil
-      mark_cursor_overlay_dirty
+      mark_drag_overlay_dirty
     end
   end
 end

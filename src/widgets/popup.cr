@@ -130,15 +130,20 @@ module CrymbleUI
             @background_color = background_color
             @border_color = border_color
             super(id: id)
-            # Create internal layer (bounds will be set in layout)
-            # Layer background should match popup background for correct selective rendering
-            @internal_layer = Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: self.background_color, owner_widget: self)
-
+            # The compositing layer is created LAZILY on first perform_layout (not here) so a
+            # reconcile reuses the carried @[Reconcile] layer — mirroring ScrollView/VirtualMatrix.
             # Register in the global popup registry (qualified — see the class-var caveat above).
             Popup.register(self)
         end
 
         # layer getter provided by LayerOwner mixin
+
+        # Lazily create the compositing layer on first layout, then reuse it — carried across
+        # reconciles via @[Reconcile]. Both Popup#perform_layout and the ComboBoxPopup override
+        # (which does its own layout but shares the layer) call this, so the creation lives once.
+        protected def ensure_layer : Layer
+            @internal_layer ||= Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: self.background_color, owner_widget: self)
+        end
 
         # Pull-based layer bounds: expand absolute_bounds by border margin
         def compute_bounds_for_layer(layer : Layer) : Rect
@@ -228,11 +233,10 @@ module CrymbleUI
 
             @bounds = Rect.new(actual_position, size)
 
+            layer = ensure_layer
             # Populate layer.widgets (popup first for background, then children)
-            if layer = @internal_layer
-                layer.widgets.clear
-                layer.widgets << self  # Popup renders background first
-            end
+            layer.widgets.clear
+            layer.widgets << self  # Popup renders background first
 
             # Layout children vertically inside popup
             # Use relative coordinates (relative to popup, not window)

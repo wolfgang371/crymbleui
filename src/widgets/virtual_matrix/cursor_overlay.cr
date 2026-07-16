@@ -1,18 +1,19 @@
 module CrymbleUI
   class VirtualMatrix < Widget
-    # === CURSOR OVERLAY WIDGET ===
+    # === MATRIX OVERLAY WIDGETS ===
 
-    # Renders cursor row/col highlight bands on the overlay layer.
-    # Reads cursor_rc, scroll_offset, and cached sizes from the parent matrix
-    # at render time, so cursor movement only requires marking this widget dirty.
-    private class CursorOverlayWidget < Widget
+    # Shared base for the matrix's non-scrolling overlay widgets (cursor band,
+    # drag decals). Each holds a back-reference to its parent matrix (re-bound on
+    # reconcile), never caches (CachePolicy::Never — it repaints its current
+    # highlight region every marked frame), and fills its layer. Subclasses only
+    # supply to_primitives.
+    private abstract class MatrixOverlayWidget < Widget
       include PrimitiveBuilder
 
       property matrix : VirtualMatrix
-      property flash_on : Bool = true
 
-      def initialize(@matrix : VirtualMatrix)
-        super(id: "#{matrix.id}_cursor_overlay")
+      def initialize(@matrix : VirtualMatrix, id : String)
+        super(id: id)
       end
 
       def cache_policy : CachePolicy
@@ -26,8 +27,20 @@ module CrymbleUI
       end
 
       def perform_layout(constraints : BoxConstraints, position : Vec2)
-        size = measure(constraints)
-        @bounds = Rect.new(position, size)
+        @bounds = Rect.new(position, measure(constraints))
+      end
+    end
+
+    # === CURSOR OVERLAY WIDGET ===
+
+    # Renders cursor row/col highlight bands on the overlay layer.
+    # Reads cursor_rc, scroll_offset, and cached sizes from the parent matrix
+    # at render time, so cursor movement only requires marking this widget dirty.
+    private class CursorOverlayWidget < MatrixOverlayWidget
+      property flash_on : Bool = true
+
+      def initialize(matrix : VirtualMatrix)
+        super(matrix, "#{matrix.id}_cursor_overlay")
       end
 
       def to_primitives(bounds : Rect) : Array(DrawPrimitive)
@@ -101,8 +114,10 @@ module CrymbleUI
         row_band_x = is_sticky_row ? sticky_w : 0.0
         row_band_w = {data_right - row_band_x, 0.0}.max
 
-        # Drag highlight color (reddish)
-        drag_color = Color.new(204_u8, 102_u8, 102_u8, 128_u8)
+        # NOTE: cell drag source/target highlights are NOT painted here. They ride
+        # their own DragOverlayWidget on a Normal-blend layer (drag_overlay_layer),
+        # because this layer's blend mode flips to Subtractive in a light theme —
+        # which would invert the fixed salmon decal into its teal-green complement.
 
         primitives do
           if row_visible
@@ -115,21 +130,6 @@ module CrymbleUI
           # (a focused TextInput) — the two would compete and read as jitter.
           if row_visible && col_visible && @flash_on && !@matrix.cursor_cell_draws_edit_caret?
             fill_rect(Rect.new(effective_band_x, effective_band_y, effective_col_w, effective_row_h), cell_flash_color)
-          end
-
-          # Drag source/target highlights (bounding box regions)
-          {@matrix.@drag_source_cell, @matrix.@drag_target_cell}.each do |drag_cell|
-            next unless drag_cell
-            if adapter = @matrix.adapter
-              bb = adapter.cell_get_drag_bounding_box(drag_cell[0], drag_cell[1])
-              min_r, min_c = bb[0]
-              max_r, max_c = bb[1]
-              bb_y = ruler_y + (0...min_r).sum { |r| row_sizes[r] }.to_f64 - scroll.y
-              bb_x = ruler_x + (0...min_c).sum { |c| col_sizes[c] }.to_f64 - scroll.x
-              bb_h = (min_r..max_r).sum { |r| row_sizes[r] }.to_f64
-              bb_w = (min_c..max_c).sum { |c| col_sizes[c] }.to_f64
-              fill_rect(Rect.new(bb_x, bb_y, bb_w, bb_h), drag_color)
-            end
           end
 
           # Change animation: white borders on cells with active highlights (skip when idle)
@@ -146,6 +146,67 @@ module CrymbleUI
                 fill_rect(Rect.new(cell_x, cell_y, cell_w, cell_h), glow_color)
               end
             end
+          end
+        end
+      end
+    end
+
+    # === DRAG OVERLAY WIDGET ===
+
+    # Renders the cell drag source/target highlights (the "salmon" decals that
+    # mark the cell being moved and the drop target). Lives on its OWN layer
+    # (drag_overlay_layer, Normal blend) rather than the cursor band overlay:
+    # the band layer flips to Subtractive blend in a light theme, which would
+    # invert this fixed-identity color into its complement (teal-green). Normal
+    # alpha compositing keeps the decal salmon over any background, in any theme.
+    private class DragOverlayWidget < MatrixOverlayWidget
+      # OPAQUE salmon. Theme-independent by design: this is an identity marker
+      # ("this cell is armed to move"), not a background-adaptive tint. The
+      # see-through comes from the LAYER's opacity, NOT the fill alpha: a
+      # semi-transparent fill drawn into a transparent-cleared RT is premultiplied
+      # over black by the GPU (salmon → muddy grey), which composites to a nearly
+      # invisible tint on a light background. layer.opacity attenuates an opaque RT
+      # once at composite time instead — the same pattern the drag ghost uses.
+      DRAG_HIGHLIGHT_COLOR = Color.new(204_u8, 102_u8, 102_u8, 255_u8)
+
+      def initialize(matrix : VirtualMatrix)
+        super(matrix, "#{matrix.id}_drag_overlay")
+      end
+
+      def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+        col_sizes = @matrix.@cached_col_sizes
+        row_sizes = @matrix.@cached_row_sizes
+        return [] of DrawPrimitive unless col_sizes && row_sizes
+        adapter = @matrix.adapter
+        return [] of DrawPrimitive unless adapter
+
+        scroll = @matrix.scroll_offset
+        ruler_x = @matrix.ruler_col_width_pixels
+        ruler_y = @matrix.ruler_row_height_pixels
+
+        cells = [] of Tuple(Int32, Int32)
+        # Source: painted only once the source is COMMITTED — a real drag has begun
+        # (on_drag_start) or an app-level cut set it. The provisional mouse-down
+        # candidate is skipped: DragManager needs the source set eagerly to build
+        # the ghost, but a plain click must not flash the decal before a drag starts.
+        if (src = @matrix.@drag_source_cell) && !@matrix.drag_source_provisional?
+          cells << src
+        end
+        # Target: only ever set during an active drag-over, so no gating needed.
+        if tgt = @matrix.@drag_target_cell
+          cells << tgt
+        end
+
+        primitives do
+          cells.each do |drag_cell|
+            bb = adapter.cell_get_drag_bounding_box(drag_cell[0], drag_cell[1])
+            min_r, min_c = bb[0]
+            max_r, max_c = bb[1]
+            bb_y = ruler_y + (0...min_r).sum { |r| row_sizes[r] }.to_f64 - scroll.y
+            bb_x = ruler_x + (0...min_c).sum { |c| col_sizes[c] }.to_f64 - scroll.x
+            bb_h = (min_r..max_r).sum { |r| row_sizes[r] }.to_f64
+            bb_w = (min_c..max_c).sum { |c| col_sizes[c] }.to_f64
+            fill_rect(Rect.new(bb_x, bb_y, bb_w, bb_h), DRAG_HIGHLIGHT_COLOR)
           end
         end
       end

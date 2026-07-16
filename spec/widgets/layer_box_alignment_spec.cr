@@ -232,6 +232,9 @@ describe "LayerBox alignment" do
             box = CrymbleUI::LayerBox.new(0.0, 0.0, 100.0, 50.0,
                 alignment: CrymbleUI::Alignment::TopRight, margin: 10.0)
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
+            # Lay out once so the (now lazy) compositing layer exists; its bounds are pull-based
+            # (Layer#bounds → compute_bounds_for_layer), so they reflect the post-constrain @bounds.
+            box.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(100.0, 50.0)), CrymbleUI::Vec2.zero)
 
             box.constrain_to_window_bounds(window_bounds)
 

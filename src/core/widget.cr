@@ -1045,14 +1045,50 @@ module CrymbleUI
                     {% if has_build %}
                         # Only reconcile if build value didn't change (app didn't change it)
                         if @{{build_var}} == old_widget.as({{@type}}).@{{build_var}}
+                            assert_no_constructor_layer(@{{ivar.name}}, old_widget.as({{@type}}).@{{ivar.name}})
                             @{{ivar.name}} = old_widget.as({{@type}}).@{{ivar.name}}
+                            adopt_reconciled_layer(@{{ivar.name}}, old_widget)
                         end
                     {% else %}
                         # No build tracking (manual @[Reconcile]) — always reconcile
+                        assert_no_constructor_layer(@{{ivar.name}}, old_widget.as({{@type}}).@{{ivar.name}})
                         @{{ivar.name}} = old_widget.as({{@type}}).@{{ivar.name}}
+                        adopt_reconciled_layer(@{{ivar.name}}, old_widget)
                     {% end %}
                 {% end %}
             {% end %}
+        end
+
+        # A @[Reconcile]-carried Layer keeps the OLD (discarded) widget as its owner_widget.
+        # Re-point it to this new instance, or Layer.active_layers' in_tree? walk (owner → root)
+        # can't find it → the compositor silently drops the layer AND pull-based bounds go stale.
+        # Generic on purpose: fires for EVERY reconciled Layer, so a widget that adds a new layer
+        # never has to remember a manual per-layer re-sync (the drag-overlay-invisible-after-rebuild
+        # bug this replaces). No-op for non-Layer reconciled properties.
+        protected def adopt_reconciled_layer(value, old_widget : Widget) : Nil
+            if value.is_a?(::CrymbleUI::Layer) && value.owner_widget == old_widget
+                value.owner_widget = self
+            end
+        end
+
+        # The reconcile-partner of adopt_reconciled_layer, and its INVARIANT guard.
+        # A @[Reconcile] Layer must be created LAZILY in perform_layout (@x ||= Layer.new),
+        # never in the constructor: a constructor-created layer is immediately displaced by
+        # the carried one on the first reconcile and leaks into @@all_layers (its owner is the
+        # live new instance, so in_tree? never reaps it). All own-layer widgets create lazily
+        # (ScrollView, VirtualMatrix, WindowPanel, LayerBox, Popup) → `current` is nil here on
+        # a fresh instance, so this asserts silently. A future widget that regresses to
+        # constructor creation trips it LOUD. Called BEFORE the overwrite, so `current` is the
+        # new instance's ivar and `incoming` the carried old one.
+        # `current.same?(incoming)` keeps it false-positive-safe under the DOUBLE auto_copy of
+        # override-then-super widgets (VirtualMatrix): pass 2 sees current == incoming == the
+        # already-carried layer (adopt set it in pass 1). No-op for non-Layer properties.
+        protected def assert_no_constructor_layer(current, incoming) : Nil
+            assert(
+                !current.is_a?(::CrymbleUI::Layer) || current.same?(incoming),
+                "a @[Reconcile] Layer must be created lazily in perform_layout (@x ||= Layer.new), " \
+                "not in the constructor — a constructor-created layer leaks into @@all_layers every reconcile"
+            )
         end
 
         # Copy internal state from old widget during reconciliation
@@ -1084,14 +1120,14 @@ module CrymbleUI
                 Widget.focus_manager?.try &.transfer_focus(old_widget, self)
             end
 
-            # Auto-copy all @[Reconcile] annotated properties
+            # Auto-copy all @[Reconcile] annotated properties. This also re-adopts every
+            # reconciled Layer (adopt_reconciled_layer) so a carried layer never keeps the
+            # old, discarded widget as its owner_widget.
             auto_copy_reconcile_properties(old_widget)
 
-            # A @[Reconcile]-carried layer keeps the OLD (discarded) widget as its owner_widget; re-point
-            # it to this new instance, else Layer.active_layers' in_tree? walk (owner→root) can't find it
-            # → stale/disposed backend. Mirrors VirtualMatrix's content_layer re-point. Guarded by
-            # responds_to?(:layer) (the codebase idiom) since only LayerOwner widgets have a layer, and
-            # Window names it @root_layer not @internal_layer.
+            # Backstop for a `layer` override whose backing field is NOT a @[Reconcile]
+            # property (Window returns @root_layer, created fresh per instance). Idempotent
+            # for the common case — @internal_layer et al. are already re-adopted above.
             if self.responds_to?(:layer) && (lyr = self.layer)
                 lyr.owner_widget = self
             end

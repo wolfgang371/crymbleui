@@ -450,13 +450,22 @@ module CrymbleUI
       mark_needs_render
     end
 
-    # Called when widget loses focus
-    def on_blur
+    # Reset the transient edit decoration a (real or proxy) focus left on the cell: stop the
+    # caret blink, hide the caret, drop FullEdit back to @default_mode, clear was_quick_entry,
+    # and drop any selection. Both on_blur (real focus) and deactivate_proxy_focus (proxy/cell
+    # focus) MUST run this so the two focus lifecycles stay in lockstep — their DRIFT (deactivate
+    # had silently dropped the mode reset) was the stuck-edit-mode-on-navigation bug.
+    private def reset_transient_edit_state
       stop_cursor_blink
       @cursor_visible.set(false)
       @edit_mode.set(@default_mode)
       @was_quick_entry = false
       clear_selection
+    end
+
+    # Called when widget loses focus
+    def on_blur
+      reset_transient_edit_state
       mark_needs_render
       # Fire Blur event so parent widgets (e.g., ComboBox) can respond
       @on_event.try &.call(value, TextInputEvent::Blur)
@@ -493,9 +502,11 @@ module CrymbleUI
     # fixed in LayerRenderer (it keeps dirty off-viewport cells in the render set).
     def deactivate_proxy_focus
       super
-      stop_cursor_blink
-      @cursor_visible.set(false)
-      @selection_anchor.set(nil)
+      reset_transient_edit_state
+      # Forget the caret position too, so re-navigating onto this cell (or F2-ing back in)
+      # lands fresh like a new cell instead of resurrecting the previous edit session's
+      # position. Proxy-only (matrix cells re-navigate); standalone on_blur leaves its caret.
+      @cursor_pos.set(value.size)
       @pending_replace.set(false)
       invalidate_primitive_cache
     end
@@ -762,17 +773,15 @@ module CrymbleUI
         reset_cursor_blink
         true
       when SF::Keyboard::Key::Escape
-        # Check if value was modified since focus
-        value_changed = value_on_focus && value != value_on_focus
-
-        # Undo any changes made
-        if value_changed
-          if saved_value = value_on_focus
-            @value.set(saved_value)
-            @cursor_pos.set(saved_value.size)
-            clear_selection
-          end
+        # Undo any edits made since focus (restore value + caret), THEN always drop the
+        # selection — Escape abandons the edit interaction, selection and all (mirrors on_blur).
+        # The selection was previously cleared only on the value-changed path, so an
+        # unchanged-value Escape left the characters stranded as selected.
+        if (saved_value = value_on_focus) && value != saved_value
+          @value.set(saved_value)
+          @cursor_pos.set(saved_value.size)
         end
+        clear_selection
 
         if @was_quick_entry
           # Came from QuickEntry: exit back to QuickEntry mode, stay focused

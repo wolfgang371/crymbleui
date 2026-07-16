@@ -675,10 +675,9 @@ module CrymbleUI
             @children << @chrome  # Chrome first (renders first)
             @children << @content  # Content second
 
-            # Create internal layer with panel background color (bounds will be set in layout)
-            # Background color used for buffer clearing instead of rendering as primitive
-            # Must be created after all ivars initialized (Crystal requirement)
-            @internal_layer = Layer.new("panel_#{id}", Rect.zero, z_index: z_index, background_color: background_color, owner_widget: self)
+            # The compositing layer is created LAZILY on first perform_layout (not here) so a
+            # reconcile reuses the carried @[Reconcile] layer instead of the constructor making
+            # a fresh one to be displaced+leaked every rebuild — mirroring ScrollView/VirtualMatrix.
 
             # Register in the global panel registry (qualified — see the class-var caveat above).
             WindowPanel.register(self)
@@ -695,18 +694,18 @@ module CrymbleUI
             # Panel is positioned absolutely at x, y
             # (ignoring position parameter - panels float)
             # Update internal layer (pull-based bounds reflect the live width/height)
-            if layer = @internal_layer
-                # Sync layer z_index with panel z_index (important after reconciliation)
-                layer.z_index = z_index
-                # Sync layer background color with current theme (important after theme switch)
-                layer.background_color = background_color
+            # Lazily create the compositing layer on first layout; carried across reconciles.
+            layer = (@internal_layer ||= Layer.new("panel_#{id}", Rect.zero, z_index: z_index, background_color: background_color, owner_widget: self))
+            # Sync layer z_index with panel z_index (important after reconciliation)
+            layer.z_index = z_index
+            # Sync layer background color with current theme (important after theme switch)
+            layer.background_color = background_color
 
-                # Populate layer.widgets with chrome and content (NOT panel self!)
-                # Chrome first (renders first for correct background capture order)
-                layer.widgets.clear
-                layer.widgets << @chrome
-                layer.widgets << @content
-            end
+            # Populate layer.widgets with chrome and content (NOT panel self!)
+            # Chrome first (renders first for correct background capture order)
+            layer.widgets.clear
+            layer.widgets << @chrome
+            layer.widgets << @content
 
             # recompute the content floor (structure may have changed — e.g. a section was
             # expanded) and grow the panel to it BEFORE laying out the chrome or content, so BOTH are

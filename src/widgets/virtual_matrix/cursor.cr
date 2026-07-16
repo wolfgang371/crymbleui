@@ -181,6 +181,17 @@ module CrymbleUI
       end
     end
 
+    # Re-render the drag decal layer (source/target cell highlights). Called on
+    # every drag-state change — kept separate from the cursor overlay so the
+    # 400ms cursor-flash tick doesn't needlessly repaint the drag decals.
+    def mark_drag_overlay_dirty
+      if overlay = @drag_overlay_layer
+        if widget = overlay.widgets.first?
+          overlay.mark_needs_render(widget)
+        end
+      end
+    end
+
     CURSOR_FLASH_MS = 400
 
     # Start or restart cursor flash cycle on the overlay layer.

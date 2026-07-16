@@ -137,10 +137,15 @@ module CrymbleUI
             # Separate children into menubar, statusbar, layered widgets, and content
             menubar = children.find { |c| c.is_a?(MenuBar) }
             statusbar = children.find { |c| c.is_a?(StatusBar) }
-            # Layered widgets (WindowPanel, LayerBox, etc.) render in their own layers
-            layered = children.select { |c| c.layer != nil && !c.is_a?(MenuBar) && !c.is_a?(StatusBar) }
-            # Content widgets render in root layer (exclude MenuBar/StatusBar even if layer not yet created)
-            content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(StatusBar) || c.layer != nil }
+            # Own-layer widgets (WindowPanel, LayerBox, Popup) declare a compositing z-boundary
+            # and render in their own layers. Ask the capability polymorphically instead of the
+            # `layer != nil` proxy — that proxy is FRAME-DEPENDENT now the owners create their
+            # layer lazily (nil frame-1 → content, non-nil frame-2 → layered); compositing_z_index
+            # is stable from construction. MenuBar/StatusBar don't declare it, so the select needs
+            # no MenuBar/StatusBar exclusion (redundant); the reject DOES (they'd fall into content).
+            layered = children.select { |c| c.responds_to?(:compositing_z_index) }
+            # Content widgets render in root layer (exclude MenuBar/StatusBar — they own their layout)
+            content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(StatusBar) || c.responds_to?(:compositing_z_index) }
 
             # Layout menubar at top if present (flush with window top, no padding above)
             content_y_offset = 0.0

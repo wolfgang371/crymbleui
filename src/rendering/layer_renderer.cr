@@ -165,7 +165,9 @@ module CrymbleUI
 
     # Layer collection cache: avoids O(widget_tree) traversal on every frame.
     # Invalidated when layout runs (which may add/remove layers).
-    @cached_layers : Array(Layer)? = nil
+    # Exposed for the layer-discovery invariant guard (spec/rendering/layer_discovery_spec):
+    # the post-collect/post-sort list actually iterated by the render + composite loops.
+    getter cached_layers : Array(Layer)? = nil
     @layers_need_recollect : Bool = true
     @cached_ghost_layer : Layer? = nil
     @cached_highlight_layer : Layer? = nil
@@ -266,6 +268,12 @@ module CrymbleUI
         if ghost = ghost_layer
           collected << ghost
         end
+
+        # Layers are distinct by construction: each_owned_layer yields auxiliaries
+        # only (disjoint from the primary `layer`), overlays live on Window's separate
+        # list (not `children`), and every layer is a unique registry object. The
+        # layer_discovery_spec asserts it (no-dup + aux ∩ primary = ∅) — so a
+        # double-publish fails loudly rather than being silently absorbed here.
 
         # Sort layers: group by parent panel z-index, then by layer z-index within panel
         # This prevents cross-panel layer interleaving (e.g., ScrollView from panel_1
@@ -1907,47 +1915,21 @@ module CrymbleUI
     private def collect_layers(widget : Widget) : Array(Layer)
       layers = [] of Layer
 
-      # Check if this widget has a layer
+      # This widget's PRIMARY layer (LayerOwner @internal_layer, Window @root_layer,
+      # VirtualMatrix @content_layer, ...). Base Widget#layer returns nil.
       if widget.responds_to?(:layer)
         if layer = widget.layer
           layers << layer
-          # Recursively collect child layers
-          layer.children.each do |child_layer|
-            layers.concat(collect_layers_recursive(child_layer))
-          end
         end
       end
 
-      # Check for scrollbar_layer (ScrollView, ComboBox have separate scrollbar overlay)
-      if widget.responds_to?(:scrollbar_layer)
-        if scrollbar_layer = widget.scrollbar_layer
-          layers << scrollbar_layer
-        end
-      end
-
-      # Check for sticky layers (ScrollView, VirtualMatrix)
-      # These layers render fixed headers that partially scroll with content
-      if widget.responds_to?(:sticky_row_layer)
-        if layer = widget.sticky_row_layer
-          layers << layer
-        end
-      end
-      if widget.responds_to?(:sticky_col_layer)
-        if layer = widget.sticky_col_layer
-          layers << layer
-        end
-      end
-      if widget.responds_to?(:sticky_corner_layer)
-        if layer = widget.sticky_corner_layer
-          layers << layer
-        end
-      end
-
-      # Check for cursor overlay layer (VirtualMatrix)
-      if widget.responds_to?(:cursor_overlay_layer)
-        if layer = widget.cursor_overlay_layer
-          layers << layer
-        end
+      # AUXILIARY layers the widget owns beyond its primary — published through ONE
+      # protocol so adding a layer can't silently miss the render pass (the class of
+      # bug the layer_discovery_spec guards). Opt-in via responds_to?, matching the
+      # find_panel_z_index / descendant_layer_clip_bounds idiom below. Today: ScrollView
+      # (scrollbar + 3 sticky) and VirtualMatrix (cursor + drag overlays).
+      if widget.responds_to?(:each_owned_layer)
+        widget.each_owned_layer { |aux| layers << aux }
       end
 
       # Check children
@@ -2019,15 +2001,6 @@ module CrymbleUI
         widget = widget.parent
       end
       nil
-    end
-
-    # Recursively collect layers from layer tree
-    private def collect_layers_recursive(layer : Layer) : Array(Layer)
-      layers = [layer]
-      layer.children.each do |child|
-        layers.concat(collect_layers_recursive(child))
-      end
-      layers
     end
 
     # Collect widgets to render based on render mode (full vs selective)

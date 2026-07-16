@@ -174,8 +174,11 @@ describe "Window layer integration" do
   end
 
   describe "WindowPanel layer integration" do
-    it "creates internal layer on initialization" do
+    it "creates its internal layer lazily on first layout" do
       panel = CrymbleUI::WindowPanel.new("Panel", 100.0, 100.0, 200.0, 150.0, z_index: 5)
+      panel.layer.should be_nil # lazy: no layer until laid out (mirrors ScrollView/VirtualMatrix)
+
+      panel.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 150.0)), CrymbleUI::Vec2.new(100.0, 100.0))
 
       layer = panel.layer
       layer.should_not be_nil
@@ -349,8 +352,11 @@ describe "Window layer integration" do
   end
 
   describe "Popup layer integration" do
-    it "creates internal layer on initialization" do
+    it "creates its internal layer lazily on first layout" do
       popup = CrymbleUI::Popup.new(width: 200.0, height: 100.0)
+      popup.layer.should be_nil # lazy: no layer until laid out
+
+      popup.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0)), CrymbleUI::Vec2.new(100.0, 50.0))
 
       layer = popup.layer
       layer.should_not be_nil
@@ -359,6 +365,7 @@ describe "Window layer integration" do
 
     it "respects custom z_index from initialization" do
       popup = CrymbleUI::Popup.new(width: 200.0, height: 100.0, z_index: 1500)
+      popup.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0)), CrymbleUI::Vec2.new(100.0, 50.0))
 
       layer = popup.layer.not_nil!
       layer.z_index.should eq(1500)

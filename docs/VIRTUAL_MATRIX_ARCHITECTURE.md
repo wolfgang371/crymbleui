@@ -501,17 +501,28 @@ Text input (on_text_input):
 
 ### QuickEntry vs FullEdit Modes (TextInput)
 
-```
-QuickEntry (default):
-  wants_arrow_keys? = false
-  Arrow keys -> grid navigation (move between cells)
-  Typing -> inserts text at cursor
+A grid text cell has two edit states. Enter TOGGLES between them (F2-style) and
+never moves the cursor; the arrow keys are what accept-and-move in QuickEntry.
 
-FullEdit (after pressing Enter):
-  wants_arrow_keys? = true
-  Arrow keys -> text cursor movement within cell
-  Enter/Escape -> exit FullEdit, return to QuickEntry
 ```
+QuickEntry (cell-nav, default):
+  wants_arrow_keys? = false
+  Arrow keys -> grid navigation (move between cells; commits the current edit)
+  Typing     -> replaces the cell's value (pending_replace on a fresh cell)
+  Enter      -> ENTER full-edit
+  A fresh cell (not yet typed) shows the cursor cell-flash and NO caret.
+
+FullEdit (character editing):
+  wants_arrow_keys? = true
+  Arrow keys -> move the text caret within the cell
+  Typing     -> inserts at the caret
+  Enter      -> commit + LEAVE full-edit (back to QuickEntry, SAME cell)
+  Escape     -> cancel + leave
+```
+
+The caret appears the moment you start typing or enter full-edit; a fresh cell
+shows no caret (just the cell-flash), and the two never run at once (see Cursor
+Overlay below).
 
 ## Cursor Overlay
 
@@ -530,7 +541,7 @@ Bands extend into sticky areas to highlight headers, but NOT when
 the cursor itself is on a sticky row/col (avoids header-highlighting-header).
 ```
 
-Cursor flash uses a repeating timer (`CURSOR_FLASH_MS = 400ms`) toggling `flash_on`. Moving the cursor restarts the flash cycle with `flash_on = true` for immediate visual feedback.
+Cursor flash uses a repeating timer (`CURSOR_FLASH_MS = 400ms`) toggling `flash_on`. Moving the cursor restarts the flash cycle with `flash_on = true` for immediate visual feedback. The whole-cell flash (primitive 3) is suppressed for the cursor cell while it draws its own caret (an actively-edited TextInput — see `cursor_cell_draws_edit_caret?`), so the flash and the caret never compete; a fresh (not-yet-typed) cursor cell shows the flash.
 
 ### Bounds-grow pixel-clear invariant
 

@@ -177,6 +177,17 @@ module CrymbleUI
       @sticky_corner_layer
     end
 
+    # Auxiliary layers this ScrollView owns beyond its primary content layer
+    # (@internal_layer, returned by #layer): the scrollbar overlay + 3 sticky
+    # headers. Published for LayerRenderer#collect_layers (the each_owned_layer
+    # protocol) so none is ever missed by the render pass.
+    def each_owned_layer(& : Layer ->)
+      @scrollbar_layer.try { |l| yield l }
+      @sticky_row_layer.try { |l| yield l }
+      @sticky_col_layer.try { |l| yield l }
+      @sticky_corner_layer.try { |l| yield l }
+    end
+
     # Update layer z-indices when parent panel's z-index changes
     # Called by WindowPanel.bring_to_front() to fix scrollbar bleeding
     # Layer z-order (bottom to top):

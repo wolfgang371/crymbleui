@@ -66,7 +66,21 @@ module CrymbleUI
     include DropTarget
 
     # Cell drag state
-    property drag_source_cell : Tuple(Int32, Int32)? = nil
+    getter drag_source_cell : Tuple(Int32, Int32)? = nil
+
+    # An EXTERNAL assignment (an app-level cut highlight) is a committed source:
+    # it paints its decal immediately. Only the internal mouse-down candidate
+    # (set on the ivar directly, then flagged provisional) is withheld until a
+    # drag actually starts — see drag_source_provisional? and on_mouse_down.
+    def drag_source_cell=(value : Tuple(Int32, Int32)?)
+      @drag_source_cell = value
+      @drag_source_provisional = false
+    end
+
+    # True while drag_source_cell is only the mouse-down candidate DragManager
+    # reads to build the ghost — no drag has crossed the threshold yet, so the
+    # source decal must stay hidden (prevents the salmon flash on a plain click).
+    getter? drag_source_provisional : Bool = false
     property drag_source_was_preexisting : Bool = false
 
     # Callback after cell drop completes (for app-level updates like a data refresh + rebuild)
@@ -146,6 +160,11 @@ module CrymbleUI
     # Z-index offsets for VirtualMatrix layers (relative to widget's base_z)
     CONTENT_LAYER_Z  = 1  # Main cell content layer
     CURSOR_OVERLAY_Z = 8  # Cursor highlight layer (above all ScrollView layers: SV uses +1..+5)
+    DRAG_OVERLAY_Z   = 9  # Cell drag source/target decals (above the cursor band; Normal blend)
+    # See-through for the drag decal. Applied as LAYER opacity over an opaque salmon
+    # fill (not fill alpha) so the RT stays opaque — a semi-transparent fill would be
+    # premultiplied over the transparent-black RT and composite to an invisible tint.
+    DRAG_OVERLAY_OPACITY = 0.5
 
     # Zoom tracking for change detection in perform_layout
     @last_zoom_factor : Float64 = 1.0
@@ -163,6 +182,8 @@ module CrymbleUI
     reconcile_property content_layer : Layer?
     reconcile_property cursor_overlay_layer : Layer?
     reconcile_property cursor_overlay_widget : CursorOverlayWidget?
+    reconcile_property drag_overlay_layer : Layer?
+    reconcile_property drag_overlay_widget : DragOverlayWidget?
 
     # Ruler widgets (rendered on sticky layers for column/row labels + resize handles)
     getter col_ruler_widget : ColumnRulerWidget? = nil
@@ -714,6 +735,17 @@ module CrymbleUI
       @content_layer
     end
 
+    # Auxiliary layers this matrix owns beyond its primary content layer
+    # (@content_layer, returned by #layer): the cursor band + drag decal overlays.
+    # Published for LayerRenderer#collect_layers (the each_owned_layer protocol) so
+    # a new matrix overlay can't be silently missed by the render pass. (The
+    # scrollbar/sticky layers belong to the inner @content_scroll_view child, not
+    # this matrix, and are collected through the child recursion.)
+    def each_owned_layer(& : Layer ->)
+      @cursor_overlay_layer.try { |l| yield l }
+      @drag_overlay_layer.try { |l| yield l }
+    end
+
     # Pull-based layer bounds: content and cursor overlay use effective content size.
     # A shrink_to_content matrix has FIXED-width content, so during an ancestor
     # resize it clips to the ancestor's live content rectangle — it shrinks only
@@ -824,6 +856,7 @@ module CrymbleUI
       setup_content_layer(content_x, content_y, content_width, content_height, base_z)
       if @interactive_cells
         setup_cursor_overlay_layer(content_x, content_y, content_width, content_height, base_z)
+        setup_drag_overlay_layer(content_x, content_y, content_width, content_height, base_z)
       end
       setup_scroll_view(full_width, full_height)
       sync_scroll_offsets
@@ -944,6 +977,41 @@ module CrymbleUI
         cow = @cursor_overlay_widget.not_nil!
         overlay_constraints = BoxConstraints.tight(Size.new(overlay_bounds.width, overlay_bounds.height))
         cow.layout(overlay_constraints, Vec2.zero)
+      end
+    end
+
+    # Create or update the drag overlay layer — the cell drag source/target
+    # decals. Kept separate from the cursor band overlay because it needs Normal
+    # blend: the band layer flips to Subtractive in a light theme, which would
+    # invert the fixed salmon decal into teal-green. Mirrors the cursor overlay
+    # otherwise (non-scrolling, CachePolicy::Never widget, clear_on_grow).
+    private def setup_drag_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+      overlay_bounds = Rect.new(x, y, w, h)
+      @drag_overlay_layer ||= Layer.new(
+        "drag_overlay_#{id}",
+        overlay_bounds,
+        z_index: base_z + DRAG_OVERLAY_Z,
+        background_color: Color.new(0, 0, 0, 0),
+        owner_widget: self
+      )
+      @drag_overlay_layer.not_nil!.clear_on_grow = true
+      @drag_overlay_layer.not_nil!.z_index = base_z + DRAG_OVERLAY_Z
+      @drag_overlay_layer.not_nil!.blend_mode = BlendMode::Normal
+      @drag_overlay_layer.not_nil!.opacity = DRAG_OVERLAY_OPACITY
+      @drag_overlay_layer.not_nil!.skip_rebuild_clear = true
+
+      drag_layer = @drag_overlay_layer.not_nil!
+      unless @drag_overlay_widget
+        dow = DragOverlayWidget.new(self)
+        dow.parent = self
+        constraints = BoxConstraints.tight(Size.new(overlay_bounds.width, overlay_bounds.height))
+        dow.layout(constraints, Vec2.zero)
+        drag_layer.widgets << dow
+        @drag_overlay_widget = dow
+      else
+        dow = @drag_overlay_widget.not_nil!
+        constraints = BoxConstraints.tight(Size.new(overlay_bounds.width, overlay_bounds.height))
+        dow.layout(constraints, Vec2.zero)
       end
     end
 
@@ -2192,6 +2260,7 @@ module CrymbleUI
     def on_ancestor_z_index_changed(base_z : Int32)
       @content_layer.try { |l| l.z_index = base_z + CONTENT_LAYER_Z }
       @cursor_overlay_layer.try { |l| l.z_index = base_z + CURSOR_OVERLAY_Z }
+      @drag_overlay_layer.try { |l| l.z_index = base_z + DRAG_OVERLAY_Z }
 
       # Propagate to ScrollView child (for scrollbar layer z-index)
       @content_scroll_view.try(&.on_ancestor_z_index_changed(base_z + 2))
@@ -2220,16 +2289,15 @@ module CrymbleUI
       super
 
       if old = old_widget.as?(VirtualMatrix)
-        # Fix: Update owner_widget on reconciled content_layer.
-        # Without this, Layer.active_layers can't find the layer after rebuild
-        # (in_tree? walks from owner_widget up to root — stale owner = not found),
-        # so zoom invalidation skips it → stale backend → corruption.
-        @content_layer.try { |l| l.owner_widget = self }
-        @cursor_overlay_layer.try { |l| l.owner_widget = self }
-        # Update overlay widget's matrix reference to this (new) widget instance
-        @cursor_overlay_widget.try do |cow|
-          cow.matrix = self
-          cow.parent = self
+        # The content/cursor/drag layers' owner_widget is re-adopted generically by
+        # auto_copy_reconcile_properties (a stale owner drops the layer from
+        # Layer.active_layers → invisible, and breaks pull-based bounds). Here we only
+        # re-bind the overlay WIDGETS' back-reference to this new matrix instance.
+        {@cursor_overlay_widget, @drag_overlay_widget}.each do |ow|
+          ow.try do |w|
+            w.matrix = self
+            w.parent = self
+          end
         end
 
         # Fix: Preserve zoom tracking so perform_layout doesn't see false 1.0→1.0
