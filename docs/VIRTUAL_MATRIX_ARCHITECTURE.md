@@ -508,8 +508,11 @@ never moves the cursor; the arrow keys are what accept-and-move in QuickEntry.
 QuickEntry (cell-nav, default):
   wants_arrow_keys? = false
   Arrow keys -> grid navigation (move between cells; commits the current edit)
-  Typing     -> replaces the cell's value (pending_replace on a fresh cell)
+  Typing     -> replaces the cell's value (pending_replace on a fresh cell); the caret
+                appears, but the mode STAYS QuickEntry so arrows still accept-and-move
   Enter      -> ENTER full-edit
+  Escape     -> cancel any typed-but-uncommitted edit; back to the fresh type-to-replace
+                state (value restored, NO caret)
   A fresh cell (not yet typed) shows the cursor cell-flash and NO caret.
 
 FullEdit (character editing):
@@ -517,7 +520,7 @@ FullEdit (character editing):
   Arrow keys -> move the text caret within the cell
   Typing     -> inserts at the caret
   Enter      -> commit + LEAVE full-edit (back to QuickEntry, SAME cell)
-  Escape     -> cancel + leave
+  Escape     -> cancel (restore value) + back to QuickEntry (clean, no caret)
 ```
 
 The caret appears the moment you start typing or enter full-edit; a fresh cell

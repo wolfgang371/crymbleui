@@ -172,10 +172,20 @@ module CrymbleUI
 
     # Monotonic version of buffer-CLEAR events (mark_needs_clear_and_render — reflow / sticky
     # reposition / zoom). A clear bumps no widget/scroll/position rev, so without this it is invisible to
-    # frame_aggregate_rev and only the any_needs_render? backstop catches it. Summed into the aggregate so
-    # a clear moves the trigger directly — the prerequisite for deleting that backstop.
+    # frame_aggregate_rev. Summed into the aggregate so a clear moves the trigger directly — this is what
+    # let the any_needs_render? dirty-walk backstop be deleted (the trigger is now purely version-keyed).
     @clear_rev : UInt64 = 0
     getter clear_rev : UInt64
+
+    # Monotonic COMPLETENESS token for the layer dirty-marks that carry no other rev — the
+    # mark_needs_render / mark_needs_full_render / mark_needs_layout family sets @state (+ dirty_widgets)
+    # but bumps no scroll/clear/widget rev, so without this a bare layer mark is invisible to
+    # frame_aggregate_rev and the pure version-keyed trigger silently drops it (the cursor-flash class).
+    # Summed into content_rev so ANY layer-level dirty-mark moves the trigger. NOT a behavioural signal —
+    # render-vs-full-render-vs-layout stays in @state (+ @needs_clear / @resize_shift), so folding them
+    # into ONE completeness counter does NOT break signal-separation; it is separate from @clear_rev by
+    # that same separation (clear is the CLEAR signal), not because clear couldn't carry the value.
+    @render_rev : UInt64 = 0
 
     # Version of this layer's CONTENT at its last body-render — frame_aggregate_rev's per-layer
     # contribution MINUS position_rev (see content_rev / viewport_body_stale?). A viewport_cache layer
@@ -391,9 +401,9 @@ module CrymbleUI
       agg = 0_u64
       @@all_layers.each do |layer|
         next unless layer.in_tree?(root)
-        # content_rev = scroll_rev + clear_rev + Σ widget revs; add position_rev for the composite-move
-        # axis. ONE summation lives in content_rev — the render loop reuses it to gate viewport_cache
-        # layers, so the trigger and the gate can never drift apart.
+        # content_rev = scroll_rev + clear_rev + render_rev + Σ widget revs; add position_rev for the
+        # composite-move axis. ONE summation lives in content_rev — the render loop reuses it to gate
+        # viewport_cache layers, so the trigger and the gate can never drift apart.
         agg &+= layer.content_rev &+ layer.position_rev
       end
       agg
@@ -501,6 +511,7 @@ module CrymbleUI
     def mark_needs_render(widget : Widget)
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
       @dirty_widgets << widget
+      @render_rev &+= 1 # move the pull aggregate so the version-keyed trigger wakes (see @render_rev)
       # NOTE: Do NOT propagate to parent layer - rendering is independent per layer
     end
 
@@ -513,6 +524,7 @@ module CrymbleUI
       {% end %}
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
       @dirty_widgets.clear # Empty set means "all dirty"
+      @render_rev &+= 1 # move the pull aggregate so the version-keyed trigger wakes (see @render_rev)
       # NOTE: Do NOT propagate to parent layer - rendering is independent per layer
     end
 
@@ -525,6 +537,10 @@ module CrymbleUI
       @state = WidgetState::NeedsLayout
       @dirty_widgets.clear # Layout change = all widgets dirty (full re-render)
       @resize_shift = nil  # a full re-layout supersedes any pending resize blit-shift
+      @render_rev &+= 1 # move the pull aggregate so the version-keyed trigger wakes (see @render_rev).
+      # Redundant for every CURRENT caller (each is preceded by a widget-level layout mark that moves
+      # the aggregate via @layout_rev) — kept for completeness-by-construction, so a future bare
+      # layer.mark_needs_layout can never silently no-render. NOT dead code.
       # NOTE: Do NOT propagate to parent layer - layout is isolated per layer
     end
 
@@ -556,13 +572,14 @@ module CrymbleUI
       first_render? || @state == WidgetState::NeedsRender || @state == WidgetState::NeedsLayout
     end
 
-    # Per-layer CONTENT version: scroll + clear + the recursive widget-rev sum — every input to this
-    # layer's rendered pixels EXCEPT its composite position. The per-layer analogue of
-    # frame_aggregate_rev's contribution minus position_rev (which is why frame_aggregate_rev reuses it).
-    # O(visible): @widgets holds only the collected/visible roots. Recurses children (Layer.sum_widget_revs)
-    # so a change inside a composite cell — a Checkbox/Button nested in a cell — still moves it.
+    # Per-layer CONTENT version: scroll + clear + render (the layer-level-mark completeness token) + the
+    # recursive widget-rev sum — every input to this layer's rendered pixels EXCEPT its composite position.
+    # The per-layer analogue of frame_aggregate_rev's contribution minus position_rev (which is why
+    # frame_aggregate_rev reuses it). O(visible): @widgets holds only the collected/visible roots. Recurses
+    # children (Layer.sum_widget_revs) so a change inside a composite cell — a Checkbox/Button nested in a
+    # cell — still moves it.
     def content_rev : UInt64
-      agg = @scroll_rev &+ @clear_rev
+      agg = @scroll_rev &+ @clear_rev &+ @render_rev
       @widgets.each { |w| agg = Layer.sum_widget_revs(w, agg) }
       agg
     end

@@ -58,6 +58,22 @@ module CrymbleUI
     # Usage:
     #   CrymbleUI.run(MyApp.new)
     def self.run(app : App)
+        # Crystal's multi-threaded execution-context scheduler (default since 1.21: a Parallel context
+        # that starts with one worker but auto-grows under load) migrates fibers across OS threads.
+        # SFML/OpenGL contexts are OS-thread-local, so a migrated render loop makes the window's GL
+        # context current on the wrong thread → X_GLXMakeCurrent BadAccess (an intermittent, idle-
+        # triggered crash). Pin the ENTIRE GUI — window creation AND the render loop — to one dedicated,
+        # non-migrating thread so GL never leaves it. Guarded on the API actually EXISTING (not a Crystal
+        # version — a `-Dpreview_mt` build has no execution_context module even at 1.21+); Isolated is
+        # always safe when present, and when absent the runtime is single-threaded anyway (run inline).
+        {% if Fiber.has_constant?("ExecutionContext") %}
+          Fiber::ExecutionContext::Isolated.new("crymbleui-gui") { run_gui(app) }.wait
+        {% else %}
+          run_gui(app)
+        {% end %}
+    end
+
+    private def self.run_gui(app : App)
         # Build the widget tree
         app.build_tree
 

@@ -137,4 +137,32 @@ describe "VirtualMatrix edit-mode lifecycle (reported gaps)" do
     cell.value.should eq("R0C0")        # value undone to value_on_focus
     cell.has_selection?.should be_false # AND the selection dropped (the was_quick_entry branch)
   end
+
+  it "Escape after typing in a QuickEntry cell returns to clean cell-nav (no stuck caret)" do
+    app, matrix = build_editable_matrix(3, 3)
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix) # proxy-focus {0,0}: QuickEntry, pending_replace, no caret
+    matrix.cursor_rc = {0, 0}
+
+    cell = matrix.active_cells[{0, 0}]?.as(CrymbleUI::TextInput)
+    # Type a char in QuickEntry via the real routing (focus manager -> matrix -> proxy cell): it
+    # replaces the value and clears pending_replace, so a caret now shows while the mode stays
+    # QuickEntry (arrows still accept-and-move). Do NOT commit it.
+    fm.handle_text_input('Z')
+    cell.value.should eq("Z")                            # precondition: typed
+    matrix.cursor_cell_draws_edit_caret?.should be_true  # precondition: caret is showing
+
+    matrix.on_key_down(SF::Keyboard::Key::Escape, false, false) # cancel
+
+    # DESIRED: back to the clean QuickEntry resting state, not a stuck "looks-like-FullEdit" caret.
+    cell.value.should eq("R0C0")                          # edit cancelled, value restored
+    matrix.cursor_cell_draws_edit_caret?.should be_false  # caret gone -> clean cell-nav
+
+    # The reported "beliebig oft Escape, bleibe ich in diesem Modus": repeated Escape stays clean.
+    matrix.on_key_down(SF::Keyboard::Key::Escape, false, false)
+    matrix.cursor_cell_draws_edit_caret?.should be_false
+
+    fm.handle_text_input('Y')                             # and genuinely re-armed:
+    cell.value.should eq("Y")                             # the next char replaces the whole value again
+  end
 end

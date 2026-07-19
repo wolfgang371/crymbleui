@@ -1,5 +1,6 @@
 require "./types"
 require "./cached"
+require "./assert" # widget.cr uses the assert() macro (auto_copy_reconcile_properties)
 require "./scheduler"
 require "./cache_policy"
 require "./font"
@@ -123,6 +124,10 @@ module CrymbleUI
         # Can be disabled for tests
         @@enable_warnings : Bool = true
 
+        # bind: STABILITY GUARD — count of fresh-Source-per-build warnings (see note_bind_reconcile).
+        # Diagnostic + testable; independent of @@enable_warnings so a spec can assert it silently.
+        @@bind_stability_warnings : Int32 = 0
+
         # Set the global scheduler (called by renderer)
         def self.scheduler=(scheduler : Scheduler)
             @@scheduler = scheduler
@@ -198,6 +203,21 @@ module CrymbleUI
         # Get current enable_warnings setting
         def self.enable_warnings : Bool
             @@enable_warnings
+        end
+
+        # bind: STABILITY GUARD diagnostic — total fresh-Source-per-build warnings this session.
+        def self.bind_stability_warnings : Int32
+            @@bind_stability_warnings
+        end
+
+        def self.reset_bind_stability_warnings : Nil
+            @@bind_stability_warnings = 0
+        end
+
+        # Increment via an explicit Widget. reference (not a bare @@ from a subclass instance method,
+        # which would hit the subclass's shadowed copy — the same trap App.class_var_increment_rebuild_count avoids).
+        def self.increment_bind_stability_warnings : Nil
+            @@bind_stability_warnings += 1
         end
 
         # Measure text dimensions using global font
@@ -1091,11 +1111,47 @@ module CrymbleUI
             )
         end
 
+        # bind: STABILITY GUARD state. A two-way-bound widget must adopt the SAME app-owned Source each
+        # build (a stable ivar), NOT a fresh Source.new(...) per build() — else every reconcile re-adopts
+        # a new cell and edits + cross-widget sharing silently break. We can't hard-raise: a legitimate
+        # one-time rebind (a detail widget re-bound to the newly-selected row's Source) also changes
+        # identity, and sustained legitimate rebinding is indistinguishable at this seam. So we WARN once,
+        # only after the bound Source's identity changed on 2 CONSECUTIVE reconciles (skips the one-time
+        # swap). Unbound widgets (@bind_source nil) legitimately own a fresh Source each build → exempt.
+        # Mirrors the duplicate-widget-ID warning in add_child. We HOLD the adopted Source (not its
+        # object_id) so identity is compared on LIVE objects via same? — a stored address is UNSOUND
+        # (Boehm can reuse a freed Source's address, aliasing two distinct cells). The hold adds no GC
+        # cost: @value/@checked/@selected_index already keep that same object alive. (Extend the union
+        # when a new bind: widget type ships, e.g. MultiComboBox Source(Set(Int32)).)
+        @bind_source : (Source(String) | Source(Bool) | Source(Int32))? = nil # adopted cell; nil ⇒ unbound
+        @bind_swap_streak : Int32 = 0    # consecutive reconciles the bound Source changed identity
+
+        protected def note_bind_reconcile(old_widget : Widget) : Nil
+            cur = @bind_source
+            return unless cur                     # unbound ⇒ fresh-per-build is legitimate here
+            prev = old_widget.@bind_source
+            if prev && !cur.same?(prev)           # identity on LIVE objects (both held) — sound
+                @bind_swap_streak = old_widget.@bind_swap_streak + 1
+                if @bind_swap_streak == 2         # the crossing — warn exactly once per episode
+                    Widget.increment_bind_stability_warnings
+                    if Widget.enable_warnings
+                        STDERR.puts "WARNING: bind: Source changed identity on 2 consecutive rebuilds for " \
+                          "#{self.class.name}##{path_id} — pass a STABLE app-owned Source (an ivar re-passed " \
+                          "each build), not a fresh Source.new(...) in build(). Edits and cross-widget " \
+                          "sharing will silently break. (Ignore if this is a deliberate, sustained rebind.)"
+                    end
+                end
+            else
+                @bind_swap_streak = 0             # stable, or a one-time swap that then settled
+            end
+        end
+
         # Copy internal state from old widget during reconciliation
         # Override this in subclasses for custom logic (e.g., callback re-wiring)
         # Call auto_copy_reconcile_properties(old_widget) first, then add custom logic
         # Base implementation copies background_backend, constraints, focus, and all @[Reconcile] properties
         def copy_state_from(old_widget : Widget)
+            note_bind_reconcile(old_widget) # bind: stability guard (warns on fresh-Source-per-build)
             # CRITICAL: Only preserve background_backend (clean layer background behind widget)
             # Do NOT copy widget_backend - it contains old rendered content!
             # If we copied widget_backend and rendered on top, we'd get double rendering

@@ -7,6 +7,7 @@ class FocusTestAdapter
   include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
 
   getter paint_coords = [] of Tuple(Int32, Int32)
+  getter assign_coords = [] of Tuple(Int32, Int32)
 
   @merges = [] of Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
 
@@ -37,6 +38,15 @@ class FocusTestAdapter
       end
     end
     { {row, col}, {row, col} }
+  end
+
+  # Record the coordinate a commit targets, and RETURN the merged region's canonical
+  # top-left — mimicking embrace's pivot map_index, which normalizes any in-span sub-cell
+  # to the same underlying cell. (An echo adapter that returns {row,col} would make the
+  # commit-delta cancel and hide the cursor-misplacement symptom — validate-the-instrument.)
+  def cell_assign(row : Int32, col : Int32, value : String) : Tuple(Int32, Int32)
+    @assign_coords << {row, col}
+    cell_get_bounding_box(row, col)[0]
   end
 end
 
@@ -267,6 +277,40 @@ describe CrymbleUI::VirtualMatrix do
         has_compound = matrix.active_cells.keys.any? { |k| k[0] >= 1 && k[0] <= 2 && k[1] >= 1 && k[1] <= 3 }
         has_compound.should be_true, "Compound region should have an active cell"
       end
+    end
+
+    # Symmetric to the cell_paint canonical test above: a COMMIT from a non-handle sub-cell
+    # of a merged region must target the region's canonical top-left (what the adapter expects
+    # and what paint uses), not the raw sub-cell — otherwise commit_proxy_edit's delta math
+    # mixes a raw-rc delta with the canonical returned coord and mislands the cursor.
+    it "commits an edit from a non-handle sub-cell to the merged region's canonical coordinate (and lands the cursor where you navigated)" do
+      matrix, adapter = setup_compound_focus_matrix # merge {1,1}-{2,3}, FullEdit cells
+      fm = CrymbleUI::Widget.focus_manager
+      matrix.set_cursor_from_cell({1, 2}) # cursor on a NON-handle sub-cell of the region
+
+      handle = matrix.active_cells[{1, 1}]?.as(CrymbleUI::TextInput)
+      handle.effectively_focused?.should be_true # precondition: proxy activated on the handle widget
+
+      fm.handle_text_input('X')     # edit the value ("1,1" -> "1,1X"), uncommitted
+      matrix.move_cursor(:down)     # {2,2}: still inside the region -> no commit
+      matrix.move_cursor(:down)     # {3,2}: leaves the region -> commit fires
+
+      adapter.assign_coords.should eq([{1, 1}]) # wrote to the canonical top-left, NOT the raw {1,2}
+      matrix.cursor_rc.should eq({3, 2})        # cursor followed the navigation (unfixed: {3,1})
+    end
+
+    it "commits an edit from the merged region's handle cell to the same canonical coordinate (idempotent)" do
+      matrix, adapter = setup_compound_focus_matrix
+      fm = CrymbleUI::Widget.focus_manager
+      matrix.set_cursor_from_cell({1, 1}) # cursor ON the handle
+
+      matrix.active_cells[{1, 1}]?.as(CrymbleUI::TextInput).effectively_focused?.should be_true
+
+      fm.handle_text_input('X')
+      matrix.move_cursor(:down)
+      matrix.move_cursor(:down)
+
+      adapter.assign_coords.should eq([{1, 1}]) # already canonical — no double-normalize
     end
   end
 end

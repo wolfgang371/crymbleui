@@ -53,8 +53,9 @@ node.version = node.local_rev  +  Σ (dep.version for each captured dep)
   dep-walk. The expensive `to_primitives` recompute is deferred until something actually reads the value.
 
 The frame trigger (`RenderTrigger`) sums every widget's version into one aggregate — along with each layer's
-`scroll_rev`, `position_rev`, and `clear_rev`, so a scroll or a panel drag moves the aggregate without any
-widget re-rendering — and renders a frame **iff the aggregate moved**. No change → same number → 0% idle
+`scroll_rev`, `position_rev`, `clear_rev`, and `render_rev` (the completeness token for a bare layer-level
+dirty-mark), so a scroll or a panel drag moves the aggregate without any widget re-rendering — and renders a
+frame **iff the aggregate moved**. No change → same number → 0% idle
 CPU, no diffing, no dirty-walk. This is the same
 idea as Salsa / incremental-computation frameworks: identity by version, not by deep comparison.
 
@@ -120,6 +121,33 @@ accessors: `Theme`'s current data and `FontSizing`'s zoom index (`@@…_source :
 zoom change calls `.set`, and every widget that read the value while painting auto-captures it and re-renders.
 Inside a widget, wanting a bare `Source` field is the signal you actually wanted a `reactive_property`.
 
+**Two-way binding — the third bare-`Source` case (app-owned).** The exception to "a widget field should be a
+`reactive_property`, not a bare `Source`" is when the *app* owns the cell and hands it *in*. `text_input(bind: src)`
+(`TextInput.new(bind:)`) ADOPTS the caller's `Source(String)` as its value cell instead of allocating a fresh one:
+the widget reads it in `to_primitives` (auto-capture → re-render on `.set`) *and* its edits call `src.set` — so an
+edit writes straight back to app state with no callback and no `request_rebuild`, and any other widget reading the
+same `src` updates for free. The app holds `@name = Source(String).new(...)` (a bare `Source` — legitimate here, it
+is app state, not a widget field) and passes it each build; because the *caller* owns it, the binding survives
+reconcile with **no** widget-side carry — the freshly-built widget re-adopts the same object. `checkbox(bind: src)`
+adopts a `Source(Bool)` the same way (a click writes it two-way); across widgets, **`bind:` always means "adopt this
+`Source`"**. (The old plain-state checkbox auto-toggle sugar now lives on a separate keyword, `checkbox(toggle: state_var)`,
+so `bind:` is never overloaded to mean two different things.) `combo_box(bind: src)` adopts a `Source(Int32)` — the
+selected **INDEX**, not the value (derive the value via `items[idx]`); it is index-only, so `bind:` with an editable
+combo (whose free-typed text can't round-trip an `Int32`) raises. `selected_index` is itself `reconcile: true`, but
+that's a no-op for a bound combo — the reconcile carry is an identity *assignment* of the (shared) Source, never a
+`.set`, so it can't clobber the caller's cell. **Invariant (all bind: widgets): pass a STABLE `Source` (an app ivar),
+not a fresh one per build** — the same discipline as a stable `id:`. **Enforced:** a bound widget whose `Source`
+changes identity on two consecutive rebuilds logs a one-time `WARNING` (gated on `Widget.enable_warnings`; test
+counter `Widget.bind_stability_warnings`), catching the fresh-`Source.new(...)`-in-`build()` footgun. A *legitimate*
+one-time rebind (identity changes once, then settles) does not trip it — the guard needs two consecutive swaps.
+(Still open: binding a multi-select `combo_box` to a `Source(Set(Int32))`, and binding an editable combo's text —
+both future work.)
+
+**Caller contract:** `bind:` is safe only for a cell consumed *reactively* — read by widgets that paint it. A `.set`
+on a bound `Source` fires a re-render, **not** a `request_rebuild`, so a value that gates a *structural* `build()`
+branch (e.g. `if src.get.empty?` deciding whether a section exists) will not re-run `build()` and will silently
+desync. Structure-gating state still uses `request_rebuild`.
+
 ## Where you read decides the channel
 
 `reactive_property` defaults to *correct*. The one lever you have is **where you read the field** — that, not
@@ -150,3 +178,38 @@ The SFML render loop checks `app.needs_rebuild?` on every iteration, not only af
 renderer's `render_frame_if_needed` does the same. A timer callback that mutates app state and calls
 `request_rebuild` therefore fires a frame without waiting for the next mouse move or keypress — making the
 pull model equally reliable for clock displays, polled data, and state-based animations.
+
+## Using widgets: the two-mechanism model (the imgui-ease path)
+
+Everything above is how the framework decides what to re-render. As a *consumer* of crymbleui (an app author
+who mostly *uses* widgets rather than writing them) you almost never touch it. The design goal is that updating
+the UI is as thoughtless as immediate-mode — change state, it shows — and two mechanisms cover nearly everything:
+
+- **Structure or a display value changed → `request_rebuild`.** Re-run `build()`. This is the retained-mode
+  analogue of imgui re-running every frame, and a full rebuild is cheap enough (~12–22 ms even for a large,
+  matrix-heavy tree) that "just rebuild on any change" is a valid default — you do *not* have to reason about
+  rebuild cost per interaction. This is also the *only* correct choice when a value's dependents are structural
+  (rows/sections/chips that appear or disappear): a paint-only channel can't add or remove widgets.
+- **A user EDITS a value → `bind: Source(T)`.** `text_input(bind: src)` / `checkbox(bind: src)` /
+  `combo_box(bind: src)` (the selected index). The edit writes straight back to `src` with **no callback and no
+  rebuild**, and every widget reading `src` updates for free. This is the one place the reactive model earns its
+  keep — an edit that would otherwise cost a full rebuild per keystroke (a filter box, a form field).
+
+`find(id)` + a reactive setter (`w.text = v`) is a **third, rare** tool: a targeted push into a *named* widget,
+worth it only for a high-frequency *display* update where even a cheap rebuild is wasteful (e.g. a statusbar on
+every mouse-move). If a plain `request_rebuild` would do, prefer it — it needs no id and no reasoning. Reaching
+for `find+setter` on ordinary state is a premature optimization.
+
+### The two footguns (the sweet spots to stay clear of)
+
+1. **A fresh `Source.new(...)` created inside `build()` and passed to `bind:`.** Every rebuild re-adopts a *new*
+   cell, so edits don't persist and cross-widget sharing breaks. Pass a STABLE `Source` — an app ivar re-passed
+   each build; for keyed state a *storing* default gives stable per-key identity
+   (`Hash(K, Source(String)).new { |h, k| h[k] = Source(String).new("") }`). **This footgun is now caught at
+   runtime** — the widget logs a `WARNING` after two consecutive fresh Sources (see the bind: invariant above).
+2. **Reading a `Source` in `build()` expecting it to be reactive.** `src.get` inside `build()` returns a *frozen
+   snapshot* — `build()` is not a render node, so the read does not subscribe (see "Where you read decides the
+   channel"). To make a value reactive you PASS the Source into the widget (`bind:`); you do not read it in
+   `build()` and hope. **This one cannot be caught** — a build-time snapshot read is correct and common (the
+   bind ctors themselves do it), so there is no false-positive-free runtime check; it is documentation only.
+   The rule of thumb: **in `build()`, Sources are *passed*, not *read-for-reactivity*.**

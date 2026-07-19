@@ -118,11 +118,24 @@ module CrymbleUI
 
       cell_widget = @active_cells[cursor_rc]?
 
+      # The coordinate to store as @proxy_focused_rc. For a cursor on a NON-handle sub-cell of
+      # a merged region, normalize to the region's STATIC top-left (bounding[0] below) so
+      # commit_proxy_edit persists to the same coordinate the cell is PAINTED at (paint
+      # normalizes identically, vm:1720-1723) and the stored rc stays consistent with the
+      # handle widget @proxy_focused_widget points at — otherwise commit's delta math mixes a
+      # raw-rc delta with the canonical new_rc and mislands the cursor. A directly-keyed cell
+      # (non-merged, or the cursor on a region's dynamic handle) keeps cursor_rc; in the rare
+      # scrolled-off case where the dynamic handle isn't the static top-left the adapter
+      # re-normalizes it (embrace map_index) and a for_edit snap re-canonicalizes on next
+      # establish. Reuse the bounding box already computed here — no extra get_bounding_box.
+      handle_rc = cursor_rc
+
       # If cursor is on a non-handle cell within a merged region,
       # find the widget at the handle cell instead.
       unless cell_widget
         bounding = get_bounding_box(cursor_rc)
         if bounding[0] != bounding[1]  # Is merged
+          handle_rc = bounding[0]      # canonical top-left of the merged region
           (bounding[0][0]..bounding[1][0]).each do |r|
             (bounding[0][1]..bounding[1][1]).each do |c|
               if w = @active_cells[{r, c}]?
@@ -146,7 +159,7 @@ module CrymbleUI
 
       # Activate new
       @proxy_focused_widget = target
-      @proxy_focused_rc = target ? cursor_rc : nil
+      @proxy_focused_rc = target ? handle_rc : nil
       target.try(&.activate_proxy_focus)
     end
 
@@ -174,11 +187,14 @@ module CrymbleUI
     # remain in the layer buffer after cursor moves. Lighter than mark_needs_layout:
     # avoids NeedsLayout semantics (sibling validation, disabled viewport culling).
     def mark_cursor_overlay_dirty
-      if overlay = @cursor_overlay_layer
-        if widget = overlay.widgets.first?
-          overlay.mark_needs_render(widget)
-        end
-      end
+      # mark_needs_clear_and_render, NOT mark_needs_render: the render trigger is purely version-keyed
+      # (the dirty-walk backstop was removed), and mark_needs_render moves no rev the trigger sees — so a
+      # TIMER-driven flash toggle (no input event to force a redraw) would never wake the render loop, and
+      # the cursor would only repaint when some other timer moved the aggregate (aliasing the ~400ms blink
+      # to whenever that fires). clear_rev IS in frame_aggregate_rev, and a clear is anyway correct here:
+      # the overlay's content toggles between drawing the cursor and nothing, so the old cursor must be
+      # cleared. (Cursor MOVEMENT is event-driven and already forces a redraw; only the flash needs this.)
+      @cursor_overlay_layer.try &.mark_needs_clear_and_render
     end
 
     # Re-render the drag decal layer (source/target cell highlights). Called on

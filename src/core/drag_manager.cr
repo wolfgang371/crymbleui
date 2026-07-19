@@ -6,13 +6,16 @@ require "../dsl/primitive_builder"
 require "../widgets/highlight_widget"
 
 module CrymbleUI
-  # Simple ghost preview widget that renders a semi-transparent rectangle
-  # representing the dragged item
+  # Ghost preview widget for a dragged item. Fill, border and label all track the active
+  # theme (like the sibling SimpleGhostWidget), read at paint time. The fill is OPAQUE — the
+  # see-through comes from the ghost layer's opacity (GHOST_OPACITY), never the fill alpha:
+  # a semi-transparent fill on the transparent-black RT layer would premultiply over black
+  # and darken to muddy grey (Theme.current.drag_ghost is opaque, so this holds).
   class GhostWidget < Widget
     include PrimitiveBuilder
 
-    GHOST_BACKGROUND = Color.new(100, 150, 200, 180)
-    GHOST_BORDER = Color.new(50, 100, 150, 255)
+    # Border = the themed fill darkened; 0.3 -> 70% HSV value (Color#darken(a) scales value by 1-a).
+    BORDER_DARKEN = 0.3
 
     @width : Float64
     @height : Float64
@@ -20,6 +23,12 @@ module CrymbleUI
 
     def initialize(@width : Float64, @height : Float64, @display_text : String? = nil)
       super(id: nil)
+    end
+
+    # Re-rendered every frame (the drag position drives it, not the reactive system) — same as
+    # SimpleGhostWidget and the "drag ghost" Never category documented in Widget#primitives_version.
+    def cache_policy : CachePolicy
+      CachePolicy::Never
     end
 
     def measure(constraints : BoxConstraints) : Size
@@ -31,16 +40,17 @@ module CrymbleUI
     end
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
+      fill = Theme.current.drag_ghost
       primitives do
-        # Semi-transparent background
-        fill_rect(Rect.new(0, 0, bounds.width, bounds.height), GHOST_BACKGROUND)
+        # Opaque themed fill — see-through is the layer's job (GHOST_OPACITY), not the fill alpha
+        fill_rect(Rect.new(0, 0, bounds.width, bounds.height), fill)
 
-        # Border
-        draw_rect(Rect.new(0, 0, bounds.width, bounds.height), GHOST_BORDER, 2.0)
+        # Border: a darker shade of the same themed fill
+        draw_rect(Rect.new(0, 0, bounds.width, bounds.height), fill.darken(BORDER_DARKEN), 2.0)
 
-        # Display text if provided
+        # Display text if provided (themed so it stays readable on the themed fill)
         if text = @display_text
-          draw_text(text, Vec2.new(5, 5), Color.new(0, 0, 0, 255), 0)
+          draw_text(text, Vec2.new(5, 5), Theme.current.text_default, 0)
         end
       end
     end

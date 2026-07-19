@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.0.4**
+**Version 1.0.5**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~33193 LOC
-- spec/: ~59881 LOC
+- src/: ~33481 LOC
+- spec/: ~60921 LOC
 
 ## Features
 
@@ -579,7 +579,7 @@ class Tutorial23App < CrymbleUI::App
 
         separator
 
-        checkbox("Enable notifications", bind: notify)
+        checkbox("Enable notifications", toggle: notify)
 
         separator
 
@@ -774,8 +774,8 @@ class CheckboxDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
     window("Checkbox Demo", 400, 250) do
       vstack(spacing: 15.0, padding: 20.0) do
-        text("Auto-toggle with bind:")
-        checkbox("Option 1 (#{option1})", bind: option1)
+        text("Auto-toggle with toggle:")
+        checkbox("Option 1 (#{option1})", toggle: option1)
 
         text("Manual toggle:")
         checkbox("Option 2 (#{option2})", checked: option2) do
@@ -1839,7 +1839,7 @@ class Tutorial23App < CrymbleUI::App
 
         separator
 
-        checkbox("Enable notifications", bind: notify)
+        checkbox("Enable notifications", toggle: notify)
 
         separator
 

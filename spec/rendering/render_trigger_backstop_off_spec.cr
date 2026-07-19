@@ -115,4 +115,41 @@ describe "Render-trigger completeness — backstop OFF (aggregate alone)" do
     agg = CrymbleUI::Layer.frame_aggregate_rev(root)
     CrymbleUI::Layer.frame_aggregate_rev(root).should eq agg
   end
+
+  # A bare Layer#mark_needs_render must move the aggregate ALONE — the completeness axis the backstop
+  # deletion assumed but that was FALSE (mark_needs_render set @state/@dirty_widgets but bumped no rev,
+  # so the pure version-keyed trigger silently dropped it — the cursor-flash bug). RED without the
+  # layer render_rev, GREEN with it.
+  it "a bare Layer#mark_needs_render moves the aggregate alone" do
+    matrix = CrymbleUI::VirtualMatrix.new(BOMatrixAdapter.new, id: "m")
+    renderer = CrymbleUI::Testing::TestRenderer.new(330, 220)
+    app = TestApp.new
+    app.root_widget = matrix
+    app.build_tree
+    matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(330.0, 200.0)), CrymbleUI::Vec2.zero)
+    renderer.settle_rendering(app)
+    root = app.root.not_nil!
+
+    layer = matrix.content_layer.not_nil!
+    widget = layer.widgets.first? || matrix
+    agg = CrymbleUI::Layer.frame_aggregate_rev(root)
+    layer.mark_needs_render(widget) # sets @state + dirty_widgets; must ALSO move the aggregate now
+    CrymbleUI::Layer.frame_aggregate_rev(root).should_not eq agg
+  end
+
+  # Inversion guard: making layer marks visible to the trigger must NOT cause a materialized matrix
+  # (content + sticky + scrollbar + cursor/drag overlays) to render every frame at idle — a
+  # 100%-CPU-at-idle regression. With no timer advanced, the loop must idle across consecutive frames.
+  it "materialized overlay/sticky/scrollbar layers stay idle-stable across frames" do
+    matrix = CrymbleUI::VirtualMatrix.new(BOMatrixAdapter.new, id: "m")
+    renderer = CrymbleUI::Testing::TestRenderer.new(330, 220)
+    app = TestApp.new
+    app.root_widget = matrix
+    app.build_tree
+    matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(330.0, 200.0)), CrymbleUI::Vec2.zero)
+    matrix.set_cursor_from_cell({1, 1}) # materialize the cursor overlay + arm the (still-pending) flash
+    renderer.settle_rendering(app)
+
+    3.times { renderer.render_frame_if_needed(app).should be_false } # no timer fired → stable → idle
+  end
 end

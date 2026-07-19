@@ -59,6 +59,18 @@ module CrymbleUI
             @cancelled_ids.add(timer_id)
         end
 
+        # Number of timers currently scheduled (pending or repeating). `cancel` reject!s
+        # synchronously, so this reflects the live count immediately after a stop.
+        def pending_count : Int32
+            @timers.size
+        end
+
+        # Earliest scheduled wake time (nil if empty). Exposed for tests that verify the
+        # absolute-grid reschedule; the queue is kept sorted so `first` is the soonest.
+        def first_wake_time : Time::Instant?
+            @timers.first?.try(&.wake_time)
+        end
+
         # Get time until next timer fires
         # Returns nil if no timers scheduled
         def next_wake_time : Time::Span?
@@ -73,11 +85,11 @@ module CrymbleUI
         end
 
         # Run all expired timers
-        # Returns number of timers that fired
-        def run_expired_timers : Int32
+        # Returns number of timers that fired.
+        # `now` is injectable so the reschedule grid can be tested deterministically.
+        def run_expired_timers(now : Time::Instant = Time.instant) : Int32
             return 0 if @timers.empty?
 
-            now = Time.instant
             fired_count = 0
 
             # Find all expired timers
@@ -97,8 +109,19 @@ module CrymbleUI
                 fired_count += 1
 
                 # Reschedule if repeating — but skip if callback self-cancelled
-                if timer.repeating? && timer.interval && !@cancelled_ids.includes?(timer.id)
-                    timer.wake_time = Time.instant + timer.interval.not_nil!
+                if timer.repeating? && (iv = timer.interval) && !@cancelled_ids.includes?(timer.id)
+                    # Reschedule on an ABSOLUTE grid (wake_time + interval), NOT from the clock.
+                    # Rescheduling from `Time.instant` here made every period drift by however late
+                    # this fire was serviced (a GC pause, competing timers, render time), so e.g. the
+                    # cursor blink wandered "off longer/shorter". Advancing the scheduled wake keeps
+                    # every repeating timer phase-locked to T0 + k·interval.
+                    timer.wake_time += iv
+                    if timer.wake_time <= now
+                        # Fell behind by more than one interval (e.g. a long GC pause) — skip the
+                        # missed ticks so we resume just after `now` instead of firing a catch-up burst.
+                        missed = ((now - timer.wake_time).total_nanoseconds / iv.total_nanoseconds).to_i + 1
+                        timer.wake_time += iv * missed
+                    end
                     @timers << timer
                 end
             end

@@ -20,9 +20,13 @@ module CrymbleUI
   #   self.accepted = !self.accepted
   # end
   #
-  # # Auto-toggle with macro (no block)
+  # # Auto-toggle over a plain state Bool (toggle: sugar, no block)
   # state accepted : Bool = false
-  # checkbox("Accept terms", bind: accepted)
+  # checkbox("Accept terms", toggle: accepted)
+  #
+  # # Two-way bound to a caller-owned Source(Bool) (a click writes it, no rebuild)
+  # @accepted = CrymbleUI::Source(Bool).new(false)
+  # checkbox("Accept terms", bind: @accepted)
   # ```
   #
   # ## Tristate Usage
@@ -40,16 +44,15 @@ module CrymbleUI
   #
   # ## How It Works
   #
-  # 1. **User clicks** → Checkbox calls the provided block
-  # 2. **Block executes** → User code updates state (with any logic)
-  # 3. **State changes** → Triggers rebuild via state macro
-  # 4. **Next frame** → Checkbox renders with new checked/state value
+  # Block / `toggle:` form (state-driven): **click** → the block updates a `state` var → the state
+  # macro triggers a rebuild → next frame renders the new value. `bind:` form (Source-driven): **click**
+  # → `trigger_click` writes the adopted `Source(Bool)` → only the widgets reading it re-render, NO
+  # rebuild (two-way; the app owns the cell).
   #
   # ## Benefits
   #
-  # - **User control**: Block decides what happens on click
-  # - **Flexible logic**: Can add validation, side effects, etc.
-  # - **Efficient**: State change triggers rebuild, checkbox updates automatically
+  # - **User control**: the block/`toggle:` form decides what happens on click (validation, side effects)
+  # - **Localized**: the `bind:` form updates without a rebuild — a click writes the shared Source directly
   # - **Type-safe**: Bool and CheckState are distinct types
   #
   class Checkbox < Widget
@@ -99,9 +102,15 @@ module CrymbleUI
       spacing : Float64 = 8.0,
       background_color : Color? = nil,
       on_click : Proc(Nil)? = nil,
+      bind : Source(Bool)? = nil,
     )
+      # bind: adopts a caller-owned Bool cell (two-way). It targets the `checked` Bool only, so it
+      # is mutually exclusive with an explicit checked/tristate — trigger_click toggles only the Bool
+      # and to_primitives keys the glyph off `checked ? Checked : check_state` (they'd desync).
+      raise ArgumentError.new("Checkbox: bind: is boolean-only — not compatible with checked: or check_state:") if bind && (checked || check_state != CheckState::Unchecked)
       @text = Source(String).new(text)
-      @checked = Source(Bool).new(checked)
+      @checked = bind || Source(Bool).new(checked) # bind: adopt the caller's cell; else own a fresh one
+      @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
       @check_state = Source(CheckState).new(check_state)
       @background_color = Source(Color?).new(background_color)
       @box_scale = Source(Int32).new(box_scale)

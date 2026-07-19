@@ -43,13 +43,15 @@ module CrymbleUI
     # Double-click detection threshold
     DOUBLE_CLICK_THRESHOLD_MS = 300
 
-    # Current text value — tracked Source for auto-capture in to_primitives
+    # Current text value — tracked Source for auto-capture in to_primitives.
+    # May be a caller-owned Source adopted via `bind:` (two-way binding), so an EXTERNAL writer can
+    # change it out from under the cursor; edit entries re-clamp via clamp_indices_to_value.
     reactive_property value : String
 
-    # Override the macro-generated setter to also clamp cursor position
+    # Override the macro-generated setter to also clamp the cursor to the new length.
     def value=(v : String)
       @value.set(v)
-      @cursor_pos.set(cursor_pos.clamp(0, v.size))
+      clamp_indices_to_value
     end
 
     # Display-only prefix drawn at the cell's left edge before the
@@ -80,6 +82,17 @@ module CrymbleUI
     # Selection anchor (start of selection, nil = no selection)
     # Selection range is between @selection_anchor and @cursor_pos
     reactive_property selection_anchor : Int32? = nil
+
+    # Clamp both cursor indices to the current value length. Called at every write/edit ENTRY
+    # (value=, copy_state_from, on_text_input, on_key_down) so an operation always starts with valid
+    # indices — in particular when an EXTERNAL writer has shrunk a bound value cell (a re-render, not
+    # a rebuild, so copy_state_from's clamp never ran). Clamped ONCE at entry, NOT on read, so an
+    # operation's own cursor arithmetic (e.g. backspace's `cursor_pos - 1`) is never shifted mid-op.
+    # (insert_char is ComboBox-internal, never caller-bound, so it needs no guard.)
+    private def clamp_indices_to_value : Nil
+      @cursor_pos.set(cursor_pos.clamp(0, value.size))
+      @selection_anchor.set(selection_anchor.try(&.clamp(0, value.size)))
+    end
 
     # Selection highlight color (dynamic - must follow theme changes)
 
@@ -190,11 +203,16 @@ module CrymbleUI
       mode : TextInputMode = TextInputMode::FullEdit,
       on_event : Proc(String, TextInputEvent, Nil)? = nil,
       on_change : Proc(String, Nil)? = nil,
+      bind : Source(String)? = nil,
     )
+      # bind: adopts a caller-owned value cell (two-way binding). value: seeds a fresh
+      # cell. They are mutually exclusive — the bound Source IS the value.
+      raise ArgumentError.new("TextInput: bind: and a non-empty value: are mutually exclusive") if bind && !value.empty?
       @placeholder = Source(String).new(placeholder)
       @prefix = Source(String).new(prefix)
-      @value = Source(String).new(value)
-      @cursor_pos = Source(Int32).new(value.size) # Start cursor at end
+      @value = bind || Source(String).new(value) # bind: adopt the caller's cell; else own a fresh one
+      @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
+      @cursor_pos = Source(Int32).new(@value.get.size) # Start cursor at end (of the adopted/own value)
       @selection_anchor = Source(Int32?).new(nil)
       @padding = Source(Float64).new(padding)
       @text_color = text_color
@@ -255,14 +273,20 @@ module CrymbleUI
       return unless old_widget.is_a?(TextInput)
       old = old_widget.as(TextInput)
 
-      # Clamp cursor_pos to new value length (value may have changed during rebuild)
-      @cursor_pos.set(old.cursor_pos.clamp(0, value.size))
+      # Carry cursor + selection from the old instance, clamped to the new value length
+      # (value may have changed during rebuild).
+      @cursor_pos.set(old.cursor_pos)
+      @selection_anchor.set(old.selection_anchor)
+      clamp_indices_to_value
 
-      # Clamp selection anchor too
-      if anchor = old.selection_anchor
-        @selection_anchor.set(anchor.clamp(0, value.size))
-      end
-
+      # Reap the OLD instance's blink timer. transfer_focus (in super) moves focus to
+      # THIS new instance WITHOUT firing the old one's on_blur, so its repeating timer
+      # would otherwise run forever — pinning the discarded widget tree and forcing a
+      # redraw every tick. UNCONDITIONAL: on_focus starts the blink even in the
+      # pending_replace state, so a focused field whose new instance does NOT restart the
+      # caret (carried pending_replace) would still orphan the old timer.
+      # Mirror of VirtualMatrix's stop_cursor_flash_for_transfer.
+      old.stop_cursor_blink
       # Restart blink only while a caret is actually shown (actively editing, not
       # the fresh type-to-replace state). A matrix cell is PROXY-focused, so use
       # effectively_focused? (a bare focused? left the caret frozen after a reconcile).
@@ -441,6 +465,10 @@ module CrymbleUI
 
     # Called when widget gains focus
     def on_focus
+      # Chain to Widget#on_focus (request_scroll_into_view) so a focused field scrolls into view
+      # inside a ScrollView — the base behavior every other focusable keeps (VirtualMatrix also
+      # chains super; TextInput was the lone override that dropped it).
+      super
       @cursor_visible.set(true)
       @edit_mode.set(@default_mode)
       @pending_replace.set(@default_mode == TextInputMode::QuickEntry)  # Only in QuickEntry mode
@@ -528,8 +556,10 @@ module CrymbleUI
       end
     end
 
-    # Stop cursor blinking timer
-    private def stop_cursor_blink
+    # Stop cursor blinking timer. `protected` (not `private`) so a reconcile can reap the
+    # OLD instance's timer via `old.stop_cursor_blink` (see copy_state_from). Side-effect-free
+    # (cancels the timer + nils the id only), so no `_for_transfer` variant is needed.
+    protected def stop_cursor_blink
       if timer_id = @blink_timer_id
         cancel_timer(timer_id)
         @blink_timer_id = nil
@@ -540,6 +570,8 @@ module CrymbleUI
 
     # Handle text input (printable characters)
     def on_text_input(char : Char)
+      clamp_indices_to_value # a bound value may have shrunk externally since the last op
+
       # Space-as-toggle (opt-in): fire Toggle and DON'T insert the space. This is the
       # only seam that suppresses the char — on_key_down's return can't, since the
       # TextEntered event is dispatched independently of KeyPressed.
@@ -584,6 +616,8 @@ module CrymbleUI
 
     # Handle key down events
     def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
+      clamp_indices_to_value # a bound value may have shrunk externally since the last op
+
       # === CLIPBOARD OPERATIONS ===
       # Ctrl+C or Ctrl+Insert = Copy
       if (control && key == SF::Keyboard::Key::C) || (control && key == SF::Keyboard::Key::Insert)
@@ -593,19 +627,21 @@ module CrymbleUI
 
       # Ctrl+X or Shift+Delete = Cut
       if (control && key == SF::Keyboard::Key::X) || (shift && key == SF::Keyboard::Key::Delete)
-        # QuickEntry: the cell owner cuts the whole cell — decline so Ctrl+X
-        # bubbles to its panel shortcut. Shift+Delete (no cell-op) stays
-        # editor-handled.
-        return false if edit_mode == TextInputMode::QuickEntry && control
+        # PARKED QuickEntry (nothing typed yet): the cell owner cuts the whole cell —
+        # decline so Ctrl+X bubbles to its panel shortcut. Once you've started typing
+        # (immediate editing, pending_replace cleared) it's a TEXT cut. Shift+Delete
+        # (no control, no competing cell-op) always stays editor-handled.
+        return false if edit_mode == TextInputMode::QuickEntry && control && pending_replace
         cut_selection
         return true
       end
 
       # Ctrl+V or Shift+Insert = Paste
       if (control && key == SF::Keyboard::Key::V) || (shift && key == SF::Keyboard::Key::Insert)
-        # QuickEntry: the cell owner pastes the cell — decline so Ctrl+V
-        # bubbles. Shift+Insert (no cell-op) stays editor-handled.
-        return false if edit_mode == TextInputMode::QuickEntry && control
+        # PARKED QuickEntry (nothing typed yet): the cell owner pastes the cell — decline
+        # so Ctrl+V bubbles. Once you've started typing (immediate editing) it's a TEXT
+        # paste. Shift+Insert (no control, no cell-op) always stays editor-handled.
+        return false if edit_mode == TextInputMode::QuickEntry && control && pending_replace
         paste_clipboard
         return true
       end
@@ -618,14 +654,16 @@ module CrymbleUI
 
       case key
       when SF::Keyboard::Key::Enter
-        if edit_mode == TextInputMode::QuickEntry
-          # QuickEntry: Enter ENTERS full-edit mode (F2-style toggle). Committing
-          # and moving is the arrow keys' job (accept-and-move) — Enter never moves.
+        if edit_mode == TextInputMode::QuickEntry && pending_replace
+          # PARKED QuickEntry (nothing typed yet): Enter opens full character-edit of the
+          # EXISTING value (F2-style). Committing/moving is the arrow keys' job — Enter never moves.
           enter_edit_mode
           true
         else
-          # FullEdit: Enter LEAVES full-edit — the parent (matrix) commits and
-          # re-arms QuickEntry on the SAME cell (no cursor move, no dead cell).
+          # FullEdit, OR QuickEntry with a typed replacement: Enter ACCEPTS the value and LEAVES
+          # edit — the parent (matrix) commits and re-arms the cursor-flash state on the SAME cell
+          # (no cursor move, no dead cell). Typing directly into a cell then Enter must commit +
+          # exit, NOT drop into full-edit (the pending_replace guard above is what distinguishes them).
           exit_edit_mode if @was_quick_entry
           notify_submit
           deactivate_proxy_focus
@@ -644,10 +682,12 @@ module CrymbleUI
         @pending_replace.set(false) # Any editing clears pending replace
         true
       when SF::Keyboard::Key::Delete
-        # QuickEntry: the host owns bare Delete (e.g. a delete shortcut) — decline
-        # so it bubbles to the host. Without this the proxy consumes it and the
-        # host's delete shortcut would be dead.
-        return false if edit_mode == TextInputMode::QuickEntry
+        # PARKED QuickEntry (nothing typed yet): the host owns bare Delete (its
+        # delete-record shortcut) — decline so it bubbles. Once you've started typing
+        # (immediate editing) Delete forward-deletes a character instead, and never
+        # bubbles to the destructive record delete. Without the parked decline the host
+        # shortcut would be dead.
+        return false if edit_mode == TextInputMode::QuickEntry && pending_replace
         if has_selection?
           delete_selection
           reset_cursor_blink
@@ -783,14 +823,16 @@ module CrymbleUI
         end
         clear_selection
 
-        if @was_quick_entry
-          # Came from QuickEntry: exit back to QuickEntry mode, stay focused
+        if @default_mode == TextInputMode::QuickEntry
+          # Resting mode is QuickEntry (a grid cell): cancel back to the clean type-to-replace
+          # state and stay focused. exit_edit_mode re-arms pending_replace + stops the blink, so
+          # the caret disappears — this also un-sticks a cell you TYPED in but never committed
+          # (which stays QuickEntry with the caret showing until now).
           exit_edit_mode
-          @pending_replace.set(true)
           notify_cancel
           mark_needs_render
         else
-          # Default FullEdit mode or QuickEntry mode: release focus
+          # Default FullEdit mode (standalone editor): release focus
           notify_cancel
           release_focus
         end

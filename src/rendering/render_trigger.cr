@@ -13,8 +13,10 @@ module CrymbleUI
   # The `|| Layer.any_needs_render?` dirty-walk backstop is GONE — the trigger is now PURE
   # version-keyed pull. Every input it used to catch moves the aggregate: widget content/layout (node
   # primitives_version via touch), scroll (scroll_rev), composite position (position_rev), buffer clear
-  # (clear_rev); structural/first-render come via the rebuild trigger. Proven complete by the
-  # backstop-off probe + the per-axis render_frame_if_needed completeness specs.
+  # (clear_rev), a bare layer-level dirty-mark — mark_needs_render/full_render/layout (render_rev, the
+  # completeness token that closed the last hole: those set @state but no other rev); structural/first-
+  # render come via the rebuild trigger. Proven complete by the backstop-off probe + the per-axis
+  # render_frame_if_needed completeness specs.
   class RenderTrigger
     @last_aggregate : UInt64 = 0
 

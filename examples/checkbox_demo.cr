@@ -30,9 +30,9 @@ class CheckboxDemo < CrymbleUI::App
                 text("Checkbox Widget Demo", font_scale: 5)
                 text("Rebuild count: #{@rebuild_count}", font_scale: 0)
 
-                # Section: Auto-toggle with Macro
-                text("Boolean Checkbox (Auto-toggle with Macro):", font_scale: 2)
-                checkbox("Enable auto-toggle feature", bind: auto_toggle)
+                # Section: Auto-toggle over a plain state Bool (toggle: sugar)
+                text("Boolean Checkbox (Auto-toggle with toggle:):", font_scale: 2)
+                checkbox("Enable auto-toggle feature", toggle: auto_toggle)
 
                 # Section: Boolean Checkbox with Manual Control
                 text("Boolean Checkbox (Manual Control):", font_scale: 2)

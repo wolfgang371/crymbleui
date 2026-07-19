@@ -543,8 +543,9 @@ module CrymbleUI
 
     # Focus the TextInput
     def focus_text_input
-      # IMPORTANT: request_focus FIRST, then enter_edit_mode
-      # Because on_focus resets edit_mode to QuickEntry
+      # IMPORTANT: request_focus FIRST, then enter_edit_mode —
+      # on_focus resets edit_mode to @default_mode (FullEdit for this input), so
+      # enter_edit_mode must run AFTER it to land in FullEdit.
       @text_input.request_focus
       # Enter FullEdit mode so Enter key fires Submit (not mode toggle)
       @text_input.enter_edit_mode

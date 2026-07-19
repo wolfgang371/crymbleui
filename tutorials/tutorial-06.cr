@@ -3,7 +3,7 @@
 # Boolean toggles and tristate checkboxes.
 #
 # Key concepts:
-# - checkbox(label, bind: state_var) for auto-toggle (recommended)
+# - checkbox(label, toggle: state_var) for auto-toggle over a plain state Bool (recommended)
 # - checkbox(label, checked: bool) { manual_toggle } for manual control
 # - checkbox(label, state: CheckState) { } for tristate
 # - Responds to click and keyboard (Space/Enter)
@@ -20,8 +20,8 @@ class CheckboxDemo < CrymbleUI::App
   def build : CrymbleUI::Widget
     window("Checkbox Demo", 400, 250) do
       vstack(spacing: 15.0, padding: 20.0) do
-        text("Auto-toggle with bind:")
-        checkbox("Option 1 (#{option1})", bind: option1)
+        text("Auto-toggle with toggle:")
+        checkbox("Option 1 (#{option1})", toggle: option1)
 
         text("Manual toggle:")
         checkbox("Option 2 (#{option2})", checked: option2) do

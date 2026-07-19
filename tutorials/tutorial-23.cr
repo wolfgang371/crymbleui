@@ -72,7 +72,7 @@ class Tutorial23App < CrymbleUI::App
 
         separator
 
-        checkbox("Enable notifications", bind: notify)
+        checkbox("Enable notifications", toggle: notify)
 
         separator
 

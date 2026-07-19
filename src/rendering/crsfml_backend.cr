@@ -176,6 +176,13 @@ module CrymbleUI
 
     def display
       @texture.display
+      # Release this RenderTexture's GL context back to SFML's shared context after each layer.
+      # draw_text/draw_image do `@texture.active = true` (glXMakeCurrent) but never deactivate, so a
+      # TRANSIENT RT (e.g. a ComboBox popup) can be SFML's tracked-active target when the Boehm GC
+      # later runs its ~RenderTexture finalizer — whose own glXMakeCurrent then fires from a dangling
+      # transient-context baseline → X_GLXMakeCurrent BadAccess (crash on first dropdown open→close).
+      # Deactivating here keeps that baseline clean; each RT#draw re-activates its own context anyway.
+      @texture.active = false
     end
 
     # Sample a pixel from the texture (for debugging)

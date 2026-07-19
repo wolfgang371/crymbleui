@@ -21,6 +21,10 @@ module CrymbleUI
   # combo_box(items: ["Apple", "Banana", "Cherry"], selected: 0) do |index, value|
   #   puts "Selected: #{value} at index #{index}"
   # end
+  #
+  # # Two-way bound to a caller-owned Source(Int32) — a pick writes the INDEX, no rebuild:
+  # @pick = CrymbleUI::Source(Int32).new(0)
+  # combo_box(items: ["Apple", "Banana", "Cherry"], bind: @pick) # non-editable, index-only
   # ```
   #
   # ## Editable mode (opt-in)
@@ -155,14 +159,19 @@ module CrymbleUI
       text_background_colors : Array(Color)? = nil,
       background_color : Color? = nil,
       editable : Bool = false,
+      bind : Source(Int32)? = nil,
       &block : Int32, String -> Nil
     )
+      # bind: adopts a caller-owned index cell (two-way). Index-only: not compatible with an editable
+      # combo (free-typed custom_text can't round-trip through an Int32) or a non-default selected: seed.
+      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with editable: or a non-default selected:") if bind && (editable || selected != 0)
       @text_background_color = Source(Color?).new(text_background_color)
       @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @background_color = Source(Color?).new(background_color)
       super(id: id)
       @items = items
-      @selected_index = Source(Int32).new(items.empty? ? -1 : selected.clamp(0, items.size - 1))
+      @selected_index = bind || Source(Int32).new(items.empty? ? -1 : selected.clamp(0, items.size - 1)) # bind: adopt the caller's cell AS-IS (unclamped; display handles out-of-range); else own a fresh clamped one
+      @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
       @_build_selected_index = selected_index
       @explicit_width = width
       @editable = editable
@@ -179,18 +188,23 @@ module CrymbleUI
       text_background_color : Color? = nil,
       text_background_colors : Array(Color)? = nil,
       background_color : Color? = nil,
-      editable : Bool = false
+      editable : Bool = false,
+      on_select : Proc(Int32, String, Nil)? = nil,
+      bind : Source(Int32)? = nil,
     )
+      # bind: adopts a caller-owned index cell (two-way). Index-only — see the block ctor's note.
+      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with editable: or a non-default selected:") if bind && (editable || selected != 0)
       @text_background_color = Source(Color?).new(text_background_color)
       @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @background_color = Source(Color?).new(background_color)
       super(id: id)
       @items = items
-      @selected_index = Source(Int32).new(items.empty? ? -1 : selected.clamp(0, items.size - 1))
+      @selected_index = bind || Source(Int32).new(items.empty? ? -1 : selected.clamp(0, items.size - 1)) # bind: adopt the caller's cell AS-IS (unclamped; display handles out-of-range); else own a fresh clamped one
+      @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
       @_build_selected_index = selected_index
       @explicit_width = width
       @editable = editable
-      @on_select = nil
+      @on_select = on_select
       # NO TextInput child - it's in the popup when expanded
     end
 

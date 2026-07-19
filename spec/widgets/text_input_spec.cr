@@ -1217,27 +1217,31 @@ describe CrymbleUI::TextInput do
         end
     end
 
-    # Cell-keyboard ops live in embrace, registered as cursor-scoped
-    # panel shortcuts. TextInput gates ONLY the keys with a competing cell-op
-    # (Ctrl+X cut, Ctrl+V paste, bare Delete delete-record) to FullEdit, so in
-    # QuickEntry they bubble (return false) to the owner. Keys with no cell-op
-    # counterpart (Ctrl+C, Backspace, Ctrl+A) stay editor-handled in both modes.
+    # Cell-keyboard ops live in embrace, registered as cursor-scoped panel shortcuts.
+    # TextInput declines the keys with a competing cell-op (Ctrl+X cut, Ctrl+V paste,
+    # bare Delete delete-record) — so they bubble to the owner — ONLY while PARKED in
+    # QuickEntry (on_focus armed pending_replace, nothing typed yet). Once you start
+    # typing (immediate editing, pending_replace cleared) they act on the text. Keys
+    # with no cell-op counterpart (Ctrl+C, Backspace, Ctrl+A) stay editor-handled always.
     describe "CNP mode gating" do
-        it "QuickEntry Ctrl+X is not consumed — bubbles to the cell-cut shortcut" do
+        it "PARKED QuickEntry Ctrl+X is not consumed — bubbles to the cell-cut shortcut" do
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked (pending_replace armed)
             input.on_key_down(SF::Keyboard::Key::X, true, false).should be_false
             input.value.should eq("abc")
         end
 
-        it "QuickEntry Ctrl+V is not consumed — bubbles to the cell-paste shortcut" do
+        it "PARKED QuickEntry Ctrl+V is not consumed — bubbles to the cell-paste shortcut" do
             CrymbleUI::Widget.clipboard.string = "xyz"
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked
             input.on_key_down(SF::Keyboard::Key::V, true, false).should be_false
             input.value.should eq("abc")
         end
 
-        it "QuickEntry bare Delete is not consumed — bubbles to the delete-record shortcut" do
+        it "PARKED QuickEntry bare Delete is not consumed — bubbles to the delete-record shortcut" do
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked
             input.on_key_down(SF::Keyboard::Key::Delete, false, false).should be_false
             input.value.should eq("abc")
         end

@@ -258,6 +258,35 @@ module CrymbleUI
                 widget
             end
 
+            # Two-way binding: adopt a caller-owned Source(Int32) as the combo's selected INDEX — a pick
+            # writes it directly (no callback, no rebuild); derive the value via `items[idx]`. `bind:` is
+            # required (disambiguates from the Int32-seed forms) and index-only (non-editable; on the ctor
+            # `bind:` + editable/non-default selected: raises). `on_select` is an optional side-effect.
+            def combo_box(
+                items : Array(String),
+                bind : Source(Int32),
+                width : Float64? = nil,
+                id : String? = nil,
+                text_background_color : Color? = nil,
+                text_background_colors : Array(Color)? = nil,
+                on_select : Proc(Int32, String, Nil)? = nil,
+            )
+                ensure_container_stack
+                widget = ComboBox.new(
+                    items: items,
+                    bind: bind,
+                    width: width,
+                    id: id,
+                    text_background_color: text_background_color,
+                    text_background_colors: text_background_colors,
+                    on_select: on_select,
+                )
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(widget)
+                end
+                widget
+            end
+
             # Multi-select combo box — `selected` is a Set(Int32).
             # `selected` is REQUIRED (no default) so a bare `combo_box(items: …)`
             # stays unambiguously the Int32 path.
@@ -589,20 +618,54 @@ module CrymbleUI
                 widget
             end
 
-            # Macro for auto-toggle boolean checkbox (no block needed)
+            # Macro for auto-toggle boolean checkbox over a plain `state` Bool (no block needed).
+            # (`bind:` is reserved for two-way Source-adoption — see the `bind : Source(Bool)` overload.)
             #
             # Example:
             #   state accepted : Bool = false
-            #   checkbox("Accept terms", bind: accepted)
+            #   checkbox("Accept terms", toggle: accepted)
             #
             # Expands to:
             #   checkbox("Accept terms", checked: self.accepted) do
             #     self.accepted = !self.accepted
             #   end
-            macro checkbox(label, bind var_name, **options)
+            macro checkbox(label, toggle var_name, **options)
                 checkbox({{label}}, checked: self.{{var_name.id}}, {{options.double_splat}}) do
                     self.{{var_name.id}} = !self.{{var_name.id}}
                 end
+            end
+
+            # Two-way binding: adopt a caller-owned Source(Bool) as the checkbox's `checked` cell.
+            # A click toggles the shared Source directly (no callback, no rebuild); any widget reading
+            # the same Source updates. `on_click` is an optional side-effect. Boolean-only (no tristate).
+            def checkbox(
+                label : String,
+                bind : Source(Bool),
+                id : String? = nil,
+                font_scale : Int32 = 0,
+                text_color : Color? = nil,
+                box_scale : Int32 = 0,
+                box_color : Color? = nil,
+                check_color : Color? = nil,
+                spacing : Float64 = 8.0,
+                background_color : Color? = nil,
+                on_click : Proc(Nil)? = nil,
+            )
+                widget = Checkbox.new(
+                    label,
+                    id: id,
+                    font_scale: font_scale,
+                    text_color: text_color,
+                    box_scale: box_scale,
+                    box_color: box_color,
+                    check_color: check_color,
+                    spacing: spacing,
+                    background_color: background_color,
+                    on_click: on_click,
+                    bind: bind,
+                )
+                current_container.add_child(widget)
+                widget
             end
 
             # Create a text input widget for single-line text entry
@@ -611,6 +674,10 @@ module CrymbleUI
             #   text_input(placeholder: "Username") { |v| @username = v }
             #   text_input(id: "email", width: 200.0, value: @email) { |v| @email = v }
             #   text_input(value: @name, user_data: {:hover_text => "Enter your name"}) { |v| @name = v }
+            #
+            # `bind:` (two-way binding to a caller-owned Source(String)) is NOT available with a
+            # `&block` — the block form seeds a value + write-back callback instead. For a bound
+            # input that also wants a side-effect, use the on_event overload: text_input(bind: src, on_event: …).
             def text_input(
                 value : String = "",
                 id : String? = nil,
@@ -669,10 +736,12 @@ module CrymbleUI
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
-                on_event : Proc(String, TextInputEvent, Nil)? = nil
+                on_event : Proc(String, TextInputEvent, Nil)? = nil,
+                bind : Source(String)? = nil
             )
                 widget = TextInput.new(
                     value: value,
+                    bind: bind,
                     id: id,
                     width: width,
                     placeholder: placeholder,
@@ -705,10 +774,12 @@ module CrymbleUI
                 placeholder_color : Color? = nil,
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
-                user_data : Hash(Symbol, String)? = nil
+                user_data : Hash(Symbol, String)? = nil,
+                bind : Source(String)? = nil
             )
                 widget = TextInput.new(
                     value: value,
+                    bind: bind,
                     id: id,
                     width: width,
                     placeholder: placeholder,

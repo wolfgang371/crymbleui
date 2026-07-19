@@ -353,6 +353,7 @@ module CrymbleUI
 
       # Render each layer that needs it
       rendered_count = 0
+      perf_layers = ENV["CRYMBLE_PERF"]? == "1" # per-layer render-time breakdown (diagnostic; same flag as the [PERF] line)
       profile("render_layers") do
         layers.each do |layer|
           # A viewport_cache layer is version-keyed: it re-renders its O(visible) body only when its
@@ -367,7 +368,10 @@ module CrymbleUI
           if should_render
             LayerRenderer.frame_layers_needing_render += 1 # Instrumentation
             LayerRenderer.rendered_layer_ids << layer.id
+            layer_start = Time.instant
             render_layer(layer)
+            layer_ms = (Time.instant - layer_start).total_milliseconds
+            STDERR.puts "  [LAYER] #{layer_ms.round(1)}ms #{layer.id}" if perf_layers && layer_ms > 0.3
             rendered_count += 1
           end
         end

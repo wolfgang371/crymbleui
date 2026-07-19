@@ -1,6 +1,25 @@
 require "../spec_helper"
 require "../../src/input/focus_manager"
 require "../../src/widgets/scroll_view"
+require "../../src/widgets/text_input"
+
+# A ScrollView of 20 stacked TextInputs (each ~24px: font14 + padding8 + border2) inside a
+# 150px viewport, so fields[7..] are below the fold. Real focus manager wired.
+private def build_text_field_scroll_view
+  fm = CrymbleUI::FocusManager.new
+  CrymbleUI::Widget.focus_manager = fm
+  sv = CrymbleUI::ScrollView.new(id: "sv")
+  vstack = CrymbleUI::VStack.new
+  fields = [] of CrymbleUI::TextInput
+  20.times do |i|
+    ti = CrymbleUI::TextInput.new(value: "f#{i}", id: "ti#{i}")
+    fields << ti
+    vstack.add_child(ti)
+  end
+  sv.set_content(vstack)
+  sv.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 150.0)), CrymbleUI::Vec2.zero)
+  {fm, sv, fields}
+end
 
 # Test that ScrollView scrolls to keep focused widget visible
 # User bug report: When moving focus outside visible area, scroller doesn't follow
@@ -262,6 +281,45 @@ describe "ScrollView focus scrolling" do
       # Widget bottom should be within effective visible area (above scrollbar)
       (target_bounds.y + target_bounds.height).should be <= visible_bottom,
         "Widget should be fully visible above the scrollbar"
+    end
+  end
+
+  # TextInput#on_focus must chain to super (request_scroll_into_view), like every other
+  # focusable — it was the lone override that dropped it. RED without super: no scroll.
+  describe "TextInput scroll-into-view on focus" do
+    it "scrolls a below-fold TextInput into view on focus" do
+      fm, sv, fields = build_text_field_scroll_view
+      sv.scroll_offset.y.should eq(0.0)                            # precondition: at the top
+      target = fields[15]
+      (target.bounds.y + target.bounds.height).should be > 150.0  # precondition: genuinely below the fold
+
+      fm.focus(target) # real focus -> on_focus -> (super) request_scroll_into_view
+
+      sv.scroll_offset.y.should be > 0.0 # scrolled down (RED without super: stays 0)
+      top = sv.scroll_offset.y           # ...and the field is now fully within the viewport:
+      target.bounds.y.should be >= top
+      (target.bounds.y + target.bounds.height).should be <= top + 150.0
+    end
+
+    it "scrolls an above-fold TextInput back into view on focus (scroll up)" do
+      fm, sv, fields = build_text_field_scroll_view
+      sv.set_scroll_offset_for_test(CrymbleUI::Vec2.new(0.0, 300.0)) # scroll down; fields[0] now above the fold
+      target = fields[0]
+      target.bounds.y.should be < 300.0 # precondition: above the current viewport top
+
+      fm.focus(target)
+
+      sv.scroll_offset.y.should be < 300.0            # scrolled up (RED without super: stays 300)
+      target.bounds.y.should be >= sv.scroll_offset.y # field now at/below the viewport top
+    end
+
+    it "does not scroll when focusing an already-visible TextInput (no spurious scroll)" do
+      fm, sv, fields = build_text_field_scroll_view
+      sv.scroll_offset.y.should eq(0.0) # fields[0] is at the top, already visible
+
+      fm.focus(fields[0])
+
+      sv.scroll_offset.y.should eq(0.0) # unchanged (control — passes with or without the fix)
     end
   end
 end

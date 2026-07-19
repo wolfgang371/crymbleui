@@ -21,7 +21,7 @@ module CrymbleUI
     abstract def get_drag_data : DragData?
 
     # Optional: Override to customize ghost preview widget
-    # Default: uses a semi-transparent copy of the source widget
+    # Default: an opaque GhostWidget shown through the ghost layer's opacity
     def create_ghost_preview : Widget?
       nil
     end

@@ -609,7 +609,7 @@ or idle matrix at near-zero render work while still catching a single edited cel
 **Layer-level gate (above the per-slot pull).** The visit-all-visible pass is itself O(visible) — cheap per
 cell, but not free when a maximized matrix is dragged and a frame fires per mouse-move. So a `viewport_cache`
 layer runs the pass **only when its content could have changed**: `Layer#viewport_body_stale?` gates it on a
-per-layer version, `content_rev` (= `scroll_rev + clear_rev + Σ visible-widget `primitives_version``) plus the
+per-layer version, `content_rev` (= `scroll_rev + clear_rev + render_rev + Σ visible-widget `primitives_version``) plus the
 push flags (`needs_render?`/`needs_clear`), a pending resize `resize_shift`, and `size_changed?`. Crucially it
 **excludes `position_rev`**: a WindowPanel *drag* bumps only the layer's composite position, and the
 unconditional composite already re-blits the cached buffer at the pulled `bounds` (`compute_bounds_for_layer` →

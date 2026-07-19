@@ -197,4 +197,29 @@ describe CrymbleUI::Scheduler do
             scheduler.cancel(9999)
         end
     end
+
+    describe "repeating-timer reschedule grid (steady cursor blink)" do
+        it "reschedules on an absolute grid, not from the (late) service time" do
+            scheduler = CrymbleUI::Scheduler.new
+            scheduler.schedule(100.milliseconds, repeating: true) { }
+            t0 = scheduler.first_wake_time.not_nil! # scheduled wake = start + 100ms
+
+            # Service the timer 250ms LATE (past 2 full intervals) — a long GC pause / busy loop.
+            scheduler.run_expired_timers(t0 + 250.milliseconds)
+
+            # Absolute grid: the next wake is the first t0 + k·100ms strictly after `now`
+            # (t0+100, +200 are <= now; +300 lands). A "reschedule from now" regression would
+            # give (t0+250)+100 = t0+350ms and drift permanently.
+            scheduler.first_wake_time.not_nil!.should eq(t0 + 300.milliseconds)
+        end
+
+        it "does not carry sub-interval lateness into the next period" do
+            scheduler = CrymbleUI::Scheduler.new
+            scheduler.schedule(100.milliseconds, repeating: true) { }
+            t0 = scheduler.first_wake_time.not_nil!
+
+            scheduler.run_expired_timers(t0 + 15.milliseconds) # serviced 15ms late
+            scheduler.first_wake_time.not_nil!.should eq(t0 + 100.milliseconds)
+        end
+    end
 end

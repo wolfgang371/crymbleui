@@ -129,15 +129,21 @@ describe CrymbleUI::TextInput do
       input.edit_mode.should eq(CrymbleUI::TextInputMode::FullEdit)
     end
 
-    it "Escape releases focus" do
+    it "Escape on a focused QuickEntry input cancels to the clean type-to-replace state (stays focused, no caret)" do
       input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
       input.on_focus
-      input.request_focus  # Make it actually focused
+      input.request_focus     # actually focused
+      input.on_text_input('x') # type -> pending_replace cleared, caret would show
+      input.draws_edit_caret?.should be_true # precondition: caret showing
 
       input.on_key_down(SF::Keyboard::Key::Escape, control: false, shift: false)
 
-      # Escape already releases focus in current implementation
-      # This test verifies the behavior is preserved
+      # A quick-entry input's resting state is type-to-replace: Escape returns to it and STAYS
+      # focused (it does NOT blur), caret gone, value restored.
+      input.focused?.should be_true
+      input.draws_edit_caret?.should be_false
+      input.pending_replace.should be_true
+      input.value.should eq("hello")
     end
   end
 
@@ -202,6 +208,7 @@ describe CrymbleUI::TextInput do
       input.on_key_down(SF::Keyboard::Key::Escape, control: false, shift: false)
 
       input.edit_mode.should eq(CrymbleUI::TextInputMode::QuickEntry)
+      input.pending_replace.should be_true # re-armed to the clean type-to-replace resting state
     end
 
     it "up/down arrow keys are consumed (cursor movement)" do
@@ -294,6 +301,51 @@ describe CrymbleUI::TextInput do
       # First char should still replace
       new_input.on_text_input('x')
       new_input.value.should eq("x")
+    end
+  end
+
+  # In a QuickEntry cell, Ctrl+X / Ctrl+V / Delete are cell-ops (decline -> the owner cell
+  # cut/move/delete) ONLY while PARKED (not yet typed). Once you start typing (pending_replace
+  # cleared, caret showing) they become TEXT-ops, editor-handled — like Backspace already is.
+  # The return value IS the behavior: false = declined/bubbles-to-cell-op, true = editor-handled.
+  describe "immediate-editing mode: cell-op keys become text-ops once you type" do
+    it "PARKED QuickEntry declines Ctrl+X / Ctrl+V / Delete (they bubble to the cell owner)" do
+      input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
+      input.on_focus
+      input.pending_replace.should be_true # parked (nothing typed yet)
+
+      input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: false).should be_false
+      input.on_key_down(SF::Keyboard::Key::X, control: true, shift: false).should be_false
+      input.on_key_down(SF::Keyboard::Key::V, control: true, shift: false).should be_false
+    end
+
+    it "EDITING QuickEntry handles Ctrl+X / Ctrl+V / Delete as text-ops (no bubble to the cell owner)" do
+      input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
+      input.on_focus
+      input.on_text_input('X')             # started typing -> pending_replace cleared, caret showing
+      input.pending_replace.should be_false
+
+      input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: false).should be_true
+      input.on_key_down(SF::Keyboard::Key::X, control: true, shift: false).should be_true
+      input.on_key_down(SF::Keyboard::Key::V, control: true, shift: false).should be_true
+    end
+
+    it "EDITING Delete forward-deletes a character rather than deleting the cell" do
+      input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
+      input.on_focus
+      input.on_text_input('a') # "a" (replace), caret at end
+      input.on_text_input('b') # "ab"
+      input.on_text_input('c') # "abc", editing
+      # Home moves the caret to the start (forwarded to the editor since it's not a nav key here)
+      input.on_key_down(SF::Keyboard::Key::Home, control: false, shift: false)
+      input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: false).should be_true
+      input.value.should eq("bc") # forward-deleted 'a' at the caret — NOT a cell delete
+    end
+
+    it "Shift+Delete stays editor-handled in QuickEntry regardless (it carries no cell-op)" do
+      input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
+      input.on_focus # parked
+      input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: true).should be_true
     end
   end
 end
