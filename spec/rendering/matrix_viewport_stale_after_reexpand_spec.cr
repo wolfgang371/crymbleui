@@ -80,4 +80,42 @@ describe "VirtualMatrix grow-ghost: top rows survive collapse → expand → re-
     painted = top_cells.count { |cell| !renderer.widget_disposition(cell).nil? }
     painted.should eq(top_cells.size)
   end
+
+  # The uncovered scenario: a PLAIN collapse → expand (no intervening shrink/resize). The matrix goes
+  # 0 → full directly; the zero size is never rendered (a culled layer early-bails without stamping
+  # @last_rendered_bounds), so size_changed?/grew? read false on the way back and the grow-repaint path
+  # never fires → the whole viewport body is dropped (only a sticky Rank column would survive in the
+  # app). On SFML the RenderTexture shows this as blank; headless retains its pixel array, so this MUST
+  # be guarded via the disposition oracle (a dropped cell has a nil disposition), never pixels.
+  it "paints the body after a plain collapse → re-expand (no resize in between)" do
+    CrymbleUI::Theme.set(:dark)
+    renderer = CrymbleUI::Testing::TestRenderer.new(700, 950)
+    app = TestApp.new
+    window = CrymbleUI::Window.new("T", 700, 950)
+    panel = CrymbleUI::WindowPanel.new("Shape", 20.0, 20.0, 520.0, 720.0)
+    vstack = CrymbleUI::VStack.new(spacing: 4.0)
+    vstack.add_child(CrymbleUI::Button.new("Header") { })
+    tree = CrymbleUI::TreeNode.new("Perspective", expanded: true)
+    matrix = CrymbleUI::VirtualMatrix.new(CellAdapter.new, id: "m")
+    inner_exp = CrymbleUI::Expanded.new
+    inner_exp.add_child(matrix)
+    tree.add_child(inner_exp)
+    outer_exp = CrymbleUI::Expanded.new
+    outer_exp.add_child(tree)
+    vstack.add_child(outer_exp)
+    panel.add_child(vstack)
+    window.add_child(panel)
+    app.root_widget = window
+    renderer.settle_rendering(app)
+
+    tree.toggle # collapse (matrix + its cells → 0×0)
+    renderer.render_frame(app)
+    tree.toggle # re-expand back to the SAME size — no resize
+    renderer.render_frame(app)
+
+    top_cells = (0..4).flat_map { |r| (0...5).map { |c| matrix.active_cells[{r, c}]? } }.compact
+    top_cells.should_not be_empty
+    painted = top_cells.count { |cell| !renderer.widget_disposition(cell).nil? }
+    painted.should eq(top_cells.size)
+  end
 end

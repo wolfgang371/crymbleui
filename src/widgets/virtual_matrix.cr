@@ -1518,7 +1518,16 @@ module CrymbleUI
       last_phys_col = col_physical_cum.bsearch_index { |p| p > max_x }
       last_phys_row = row_physical_cum.bsearch_index { |p| p > max_y }
       visible_key = {visible_rows, visible_cols, last_phys_col, last_phys_row}
-      exact_indices_changed = @last_visible_key != visible_key || @force_cell_update
+      # An ancestor collapse (e.g. the enclosing "Perspective" TreeNode section closing) zeros the
+      # matrix's cell bounds DIRECTLY — without going through this matrix's perform_layout — so on
+      # re-expand the visible-index key is UNCHANGED and the early-exit below would leave the cells at
+      # 0×0, where the zero-size collect guard drops the whole body (only a sticky Rank column survives:
+      # blank on SFML, whose culled RenderTexture didn't persist; retained headless). The early-exit's
+      # premise (active cells are validly laid out) is then false, so re-run the creation loop, which
+      # re-lays-out any zeroed cell. O(1) probe of one active cell; a normal scroll/resize is untouched.
+      first = @active_cells.first?
+      cells_zeroed = !first.nil? && (first[1].bounds.width <= 0.0 || first[1].bounds.height <= 0.0)
+      exact_indices_changed = @last_visible_key != visible_key || @force_cell_update || cells_zeroed
 
       {% if flag?(:DEBUG_BLIT) %}
         # Log early-exit decisions

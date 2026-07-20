@@ -670,6 +670,17 @@ list, a ComboBox popup) leaves cell edges exposed over the layer bg, so it stays
 > renderer's per-frame **disposition** (`widget_disposition(cell)` → `:rendered`/`:blitted`/`:skipped` =
 > painted; `nil` = culled), or a `get_pixel` on the **layer buffer** — never `widget_backend` presence.
 >
+> **LAW — assert viewport-cache RE-RENDER via the disposition oracle, NOT pixels.** For any test of
+> whether a viewport-cache body *re-rendered* (collapse→re-expand, grow-ghost, reflow), use
+> `widget_disposition` (`nil` = the cell was dropped — the bug), NEVER a pixel assertion. The headless
+> `TestRenderBackend` is a plain pixel array that **retains** stale content, whereas a real SFML
+> `RenderTexture` **blanks** a culled/un-repainted buffer — so a pixel assertion is a **false green**
+> headless (the bug is invisible). The disposition is deterministic and backend-agnostic. (A pixel
+> `get_pixel` is fine for a *within-frame* paint check, e.g. border parity above — just not for
+> re-render-after-cull correctness.) An "unavailable pixel" fault on the test backend was considered and
+> rejected: a collapse drops individual *cells*, not the layer (`valid_layer_dimensions?` stays true),
+> so a correct fault would just re-derive the disposition oracle.
+>
 > **Border pixel-parity:** the direct path draws a cell's primitives at a *buffer offset*, whereas the texture
 > path drew them widget-local at (0,0). `draw_rect` (borders) simulates SFML clipping the outline's outer half
 > at the scissor edge; that skip is **clip-relative** (`bounds.x <= clip.x`), NOT origin-0, so a border renders

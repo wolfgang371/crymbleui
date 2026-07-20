@@ -277,6 +277,17 @@ work and only repositions sticky cells / computes blit plans. Whether content
 cells re-render is decided entirely by the per-slot check at render time, not by
 this key.
 
+> **Soundness guard — the early-exit's premise can be externally falsified.** The gate assumes the
+> active cells are validly laid out when the index set is unchanged. An **ancestor collapse** breaks
+> that: a `TreeNode` section closing zeros its descendants' bounds *directly* — the matrix's cells go
+> to `0×0` without the matrix's own `perform_layout` ever seeing a zero size (it always measures its
+> natural full size; the collapse clips at the ancestor). On a *plain* re-expand (no intervening
+> resize) the visible key is unchanged, so a naive early-exit leaves the cells at `0×0`, the zero-size
+> collect guard drops the whole body, and only the sticky Rank column survives — a blank matrix. So
+> the gate ALSO re-runs the create/destroy loop (which re-lays-out any zeroed cell) when a probe of one
+> active cell finds it zeroed. Guarded by `spec/rendering/matrix_viewport_stale_after_reexpand_spec.cr`
+> (both the resize-grow scenario and the plain collapse→expand one).
+
 ## Scroll and Viewport Integration
 
 ### Bi-directional ScrollView Sync
