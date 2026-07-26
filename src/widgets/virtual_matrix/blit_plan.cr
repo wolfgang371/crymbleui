@@ -40,12 +40,12 @@ module CrymbleUI
       cells_with_backend > 0  # Need at least one cell with cached texture
     end
 
-    # Compute blit plans for sticky layers.
-    # Called AFTER reposition_sticky_cells (which handles compound cell sizing).
+    # Compute blit plans for sticky layers — the FAST-PATH sibling of
+    # reposition_sticky_cells: the two run EITHER/OR per frame (update_visible_cells
+    # picks one on sticky_cells_can_use_blit_plan?), so compound positioning MUST
+    # agree between them — both delegate to StickyMath.compound_axis.
     # Non-compound sticky cells: blit cached widget_backend at current bounds position (O(blit)).
     # Compound cells + rulers: added to blit_plan_render_widgets for normal rendering.
-    # This overrides the mark_needs_clear_and_render set by reposition_sticky_cells,
-    # replacing full re-render with the much cheaper blit-plan fast path.
     private def compute_sticky_blit_plans
       sticky_rows = sticky_row_count
       sticky_cols = sticky_col_count
@@ -68,6 +68,23 @@ module CrymbleUI
       row_cum = @cached_row_physical_cum
       ruler_x_offset = ruler_col_width_pixels
       ruler_y_offset = ruler_row_height_pixels
+      # Shared content-space scroll quantization — see reposition_sticky_cells.
+      scroll_x_i = scroll_offset.x.to_i.to_f64
+      scroll_y_i = scroll_offset.y.to_i.to_f64
+
+      # The SAME per-axis compound-disposition contexts the layout pass builds —
+      # one StickyMath.compound_axis implementation, so the passes cannot
+      # disagree. Y passes shifted: nil (physical-only) — pending its own arc.
+      col_view = AxisView.new(
+        sizes: col_sizes, cum: col_cum, ruler_offset: ruler_x_offset,
+        sticky_extent: sticky_col_width_pixels + ruler_col_width_pixels,
+        viewport_extent: bounds.width, scroll_q: scroll_x_i,
+        shifted: @cached_col_shifted, park: OFFSCREEN_PARK)
+      row_view = AxisView.new(
+        sizes: row_sizes, cum: row_cum, ruler_offset: ruler_y_offset,
+        sticky_extent: sticky_row_height_pixels + ruler_row_height_pixels,
+        viewport_extent: bounds.height, scroll_q: scroll_y_i,
+        shifted: nil, park: OFFSCREEN_PARK)
 
       row_entries = [] of BlitEntry
       col_entries = [] of BlitEntry
@@ -119,9 +136,7 @@ module CrymbleUI
           # Compound cell that may resize on scroll. Always reposition (sets correct
           # bounds including OFFSCREEN_PARK when off-screen). Then decide render vs blit.
           reposition_compound_in_blit_plan(widget, key, bounding,
-            is_sticky_row, is_sticky_col,
-            col_sizes, row_sizes, col_cum, row_cum,
-            ruler_x_offset, ruler_y_offset)
+            is_sticky_row, is_sticky_col, col_view, row_view)
           # Compound cells resize/reposition on scroll+resize — conservatively activate their layer.
           if is_sticky_row && is_sticky_col
             corner_active = true
@@ -131,9 +146,12 @@ module CrymbleUI
             col_active = true
           end
           if wb && !widget.needs_render? && widget.has_valid_primitive_cache?
-            # Compound cell only moved — blit cached texture
-            dest_x = (vm_abs.x + widget.bounds.x - layer.bounds.x).to_i
-            dest_y = (vm_abs.y + widget.bounds.y - layer.bounds.y).to_i
+            # Compound cell only moved — blit cached texture. Cell-texture→layer dests
+            # floor the difference (PixelSnap.origin) so they land on the SAME layer
+            # pixel the render path stamps (round_to_layer_pixels) — truncation
+            # diverged at negative fractional coords.
+            dest_x = PixelSnap.origin(vm_abs.x + widget.bounds.x - layer.bounds.x)
+            dest_y = PixelSnap.origin(vm_abs.y + widget.bounds.y - layer.bounds.y)
             target << BlitEntry.new(wb, dest_x, dest_y)
           else
             # Resized, needs render, or newly created (no wb) — render normally.
@@ -154,14 +172,14 @@ module CrymbleUI
         # smaller than one column. Sticky layers aren't viewport_cache, so they carry the scroll.)
         if !is_sticky_col
           content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-          new_x = ruler_x_offset + content_x - scroll_offset.x.to_i.to_f64
+          new_x = ruler_x_offset + content_x - scroll_x_i
         else
           new_x = ruler_x_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
         end
 
         if !is_sticky_row
           content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-          new_y = ruler_y_offset + content_y - scroll_offset.y.to_i.to_f64
+          new_y = ruler_y_offset + content_y - scroll_y_i
         else
           new_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
         end
@@ -207,8 +225,8 @@ module CrymbleUI
           next
         end
 
-        dest_x = (vm_abs.x + new_x - layer.bounds.x).to_i
-        dest_y = (vm_abs.y + new_y - layer.bounds.y).to_i
+        dest_x = PixelSnap.origin(vm_abs.x + new_x - layer.bounds.x)
+        dest_y = PixelSnap.origin(vm_abs.y + new_y - layer.bounds.y)
         target << BlitEntry.new(wb, dest_x, dest_y)
       end
 
@@ -347,19 +365,20 @@ module CrymbleUI
       end
     end
 
-    # Reposition a single compound cell within the blit-plan path.
-    # Same logic as reposition_sticky_cells but for one cell only.
+    # Reposition ONE compound cell on the blit-plan fast path — the SAME
+    # StickyMath.compound_axis as the layout pass (the passes run either/or per
+    # frame and must agree, see compute_sticky_blit_plans header).
     # Updates widget bounds and calls invalidate_primitive_cache if size changed.
     private def reposition_compound_in_blit_plan(
         widget : Widget, key : Tuple(Int32, Int32),
         bounding : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32)),
         is_sticky_row : Bool, is_sticky_col : Bool,
-        col_sizes : Array(Int32), row_sizes : Array(Int32),
-        col_cum : Array(Int32)?, row_cum : Array(Int32)?,
-        ruler_x_offset : Float64, ruler_y_offset : Float64)
+        col_view : AxisView, row_view : AxisView)
       row, col = key
-      true_x = ruler_x_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-      true_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
+      col_cum = col_view.cum
+      row_cum = row_view.cum
+      true_x = col_view.ruler_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_view.sizes[c] }.to_f64)
+      true_y = row_view.ruler_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_view.sizes[r] }.to_f64)
 
       compound_w = 0.0
       compound_h = 0.0
@@ -367,100 +386,13 @@ module CrymbleUI
       new_y = true_y
 
       if !is_sticky_col
-        bb_c1 = bounding[0][1]
-        bb_c2 = bounding[1][1]
-        min_screen_x = Float64::MAX
-        max_screen_x = -Float64::MAX
-        sticky_col_w = sticky_col_width_pixels + ruler_col_width_pixels
-        viewport_right = self.bounds.width
-        visible_col_count = 0
-        single_col_x = 0.0
-        single_col_size = 0.0
-        (bb_c1..bb_c2).each do |ci|
-          next if ci >= col_sizes.size
-          true_ci_x = ruler_x_offset + (col_cum ? col_cum[ci].to_f64 : (0...ci).sum { |c| col_sizes[c] }.to_f64)
-          unclamped_scr_x = true_ci_x - scroll_offset.x.to_i.to_f64
-          col_right = unclamped_scr_x + col_sizes[ci].to_f64
-          next if col_right <= sticky_col_w
-          next if unclamped_scr_x >= viewport_right
-          visible_col_count += 1
-          single_col_x = unclamped_scr_x
-          single_col_size = col_sizes[ci].to_f64
-          scr_x = {unclamped_scr_x, sticky_col_w}.max
-          capped_right = {col_right, viewport_right}.min
-          min_screen_x = {min_screen_x, scr_x}.min
-          max_screen_x = {max_screen_x, capped_right}.max
-        end
-        if min_screen_x < Float64::MAX
-          if visible_col_count > 1
-            new_x = min_screen_x
-            compound_w = max_screen_x - min_screen_x
-          else
-            new_x = single_col_x
-            compound_w = single_col_size
-          end
-        else
-          # All constituent columns outside viewport. Distinguish scrolled-past
-          # (behind sticky header) from not-yet-visible (right of viewport).
-          # Without this, row-0 compound headers whose cols are initially right-of-
-          # viewport get parked at OFFSCREEN_PARK with w=0 instead of their true
-          # off-screen content position — so returning from scroll-right leaves
-          # them parked instead of restoring their original layout.
-          last_col_right = ruler_x_offset + (col_cum ? col_cum[bb_c2 + 1].to_f64 : (0..bb_c2).sum { |c| col_sizes[c] }.to_f64)
-          if last_col_right - scroll_offset.x.to_i.to_f64 <= sticky_col_w
-            new_x = OFFSCREEN_PARK
-            compound_w = 0.0
-          else
-            new_x = true_x
-            compound_w = (bb_c1..bb_c2).sum { |ci| col_sizes[ci].to_f64 }
-          end
-        end
+        new_x, compound_w = Widgets::VirtualMatrix::StickyMath.compound_axis(
+          col_view, bounding[0][1], bounding[1][1], true_x)
       end
 
       if !is_sticky_row
-        bb_r1 = bounding[0][0]
-        bb_r2 = bounding[1][0]
-        min_screen_y = Float64::MAX
-        max_screen_y = -Float64::MAX
-        sticky_row_h = sticky_row_height_pixels + ruler_row_height_pixels
-        viewport_bottom = self.bounds.height
-        visible_row_count = 0
-        single_row_y = 0.0
-        single_row_size = 0.0
-        (bb_r1..bb_r2).each do |ri|
-          next if ri >= row_sizes.size
-          true_ri_y = ruler_y_offset + (row_cum ? row_cum[ri].to_f64 : (0...ri).sum { |r| row_sizes[r] }.to_f64)
-          unclamped_scr_y = true_ri_y - scroll_offset.y.to_i.to_f64
-          row_bottom = unclamped_scr_y + row_sizes[ri].to_f64
-          next if row_bottom <= sticky_row_h
-          next if unclamped_scr_y >= viewport_bottom
-          visible_row_count += 1
-          single_row_y = unclamped_scr_y
-          single_row_size = row_sizes[ri].to_f64
-          scr_y = {unclamped_scr_y, sticky_row_h}.max
-          capped_bottom = {row_bottom, viewport_bottom}.min
-          min_screen_y = {min_screen_y, scr_y}.min
-          max_screen_y = {max_screen_y, capped_bottom}.max
-        end
-        if min_screen_y < Float64::MAX
-          if visible_row_count > 1
-            new_y = min_screen_y
-            compound_h = max_screen_y - min_screen_y
-          else
-            new_y = single_row_y
-            compound_h = single_row_size
-          end
-        else
-          # Mirror of the column path above for rows (row-scroll case).
-          last_row_bottom = ruler_y_offset + (row_cum ? row_cum[bb_r2 + 1].to_f64 : (0..bb_r2).sum { |r| row_sizes[r] }.to_f64)
-          if last_row_bottom - scroll_offset.y.to_i.to_f64 <= sticky_row_h
-            new_y = OFFSCREEN_PARK
-            compound_h = 0.0
-          else
-            new_y = true_y
-            compound_h = (bb_r1..bb_r2).sum { |ri| row_sizes[ri].to_f64 }
-          end
-        end
+        new_y, compound_h = Widgets::VirtualMatrix::StickyMath.compound_axis(
+          row_view, bounding[0][0], bounding[1][0], true_y)
       end
 
       new_w = is_sticky_col ? widget.bounds.width : (compound_w == 0.0 ? 0.0 : {compound_w - grid_spacing, 1.0}.max)

@@ -119,10 +119,10 @@ module CrymbleUI
 
             x_offset = padding
             @children.each_with_index do |child, i|
-                child_size = sizes[i]
+                child_size = sizes[i] # cross-axis centering needs the height BEFORE layout
                 child_y = padding + (content_height - child_size.height) / 2.0
                 child.layout(child_constraints, Vec2.new(x_offset, child_y))
-                x_offset += child_size.width + spacing
+                x_offset += child.bounds.width + spacing # main axis: actual extent, not a re-measure
             end
         end
 
@@ -175,10 +175,11 @@ module CrymbleUI
                     child_size = child.measure(child_constraints)
                     # Cross-axis: center intrinsic-sized children within the content band
                     # (tallest fixed child), anchored at the top. Expanded children keep the
-                    # top edge — they fill / carry their own content.
+                    # top edge — they fill / carry their own content. The measure is needed here
+                    # (the position must be known before layout); only the main axis uses bounds.
                     child_y = padding + (content_height - child_size.height) / 2.0
                     child.layout(child_constraints, Vec2.new(x_offset, child_y))
-                    x_offset += child_size.width + spacing
+                    x_offset += child.bounds.width + spacing
                 end
             end
         end

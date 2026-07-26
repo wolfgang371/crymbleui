@@ -323,7 +323,7 @@ describe "ScrollView viewport_cache integration" do
 
       # Sample point near top of content area
       # Note: Button starts at x=8 (CONTENT_PADDING) and is ~40px wide
-      sample_x = 25  # Within button width
+      sample_x = 12  # button BG left of the centered label — robust to text-ink snapping (re-baselined: headless draw_text now snaps like SFML)
       sample_y = 20  # Within first button (starts at y=8)
 
       # Verify initial render shows RED (first buttons are red)
@@ -378,7 +378,7 @@ describe "ScrollView viewport_cache integration" do
       renderer.render_frame(app)
 
       magenta = CrymbleUI::Color.new(255, 0, 255, 255)
-      sample_x = 25  # Within button width
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
 
       # Initially, button 10 (first off-screen magenta) is not visible
       # Scroll down to bring button 10 into view
@@ -627,7 +627,7 @@ describe "ScrollView viewport_cache integration" do
 
       # Now verify buttons appear in SEQUENTIAL ORDER
       # Sample X position (within button content area)
-      sample_x = 25
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
 
       # Collect button indices visible at different Y positions
       # by reading pixel colors and extracting index from R channel
@@ -816,7 +816,7 @@ describe "ScrollView viewport_cache integration" do
       renderer.render_frame(app)
 
       # Verify yellow is visible initially
-      sample_x = 25
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
       initial_has_yellow = (10..280).any? do |y|
         pixel = renderer.backend.get_pixel(sample_x, y)
         pixel && pixel.r > 200 && pixel.g > 200 && pixel.b < 50
@@ -874,7 +874,7 @@ describe "ScrollView viewport_cache integration" do
       renderer.render_frame(app)
 
       # Scan vertically to find button-to-gap-to-button transitions
-      sample_x = 25
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
       gap_found = false
       in_button = false
       gap_size = 0

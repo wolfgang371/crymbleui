@@ -293,7 +293,7 @@ module CrymbleUI
         merged_width = (min_col..max_col).sum { |c| col_sizes[c] }
         sticky_w = (sticky_col_width_pixels + ruler_col_width_pixels).to_i32
         ruler_col_w_i = ruler_col_width_pixels.to_i32
-        scroll_x_i = scroll_offset.x.to_i32
+        scroll_x_i = scroll_offset.x.to_i32 # snap-exempt: content-space scroll-into-view
         vp_w = viewport_width.to_i32
 
         # Cell content-space position includes ruler offset: ruler_col_w + data_pos_x
@@ -315,7 +315,7 @@ module CrymbleUI
         merged_height = (min_row..max_row).sum { |r| row_sizes[r] }
         sticky_h = (sticky_row_height_pixels + ruler_row_height_pixels).to_i32
         ruler_row_h_i = ruler_row_height_pixels.to_i32
-        scroll_y_i = scroll_offset.y.to_i32
+        scroll_y_i = scroll_offset.y.to_i32 # snap-exempt: content-space scroll-into-view
         vp_h = viewport_height.to_i32
 
         # Cell content-space position includes ruler offset: ruler_row_h + data_pos_y

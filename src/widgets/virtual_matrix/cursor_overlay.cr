@@ -129,7 +129,16 @@ module CrymbleUI
           # Skip the whole-cell flash when the cursor cell draws its own caret
           # (a focused TextInput) — the two would compete and read as jitter.
           if row_visible && col_visible && @flash_on && !@matrix.cursor_cell_draws_edit_caret?
-            fill_rect(Rect.new(effective_band_x, effective_band_y, effective_col_w, effective_row_h), cell_flash_color)
+            # Size the flash to the CELL, not the row/col pitch: cells are laid out at
+            # pitch MINUS grid_spacing (update_visible_cells), so a pitch-sized flash
+            # overhangs the inter-row gap below the cell — and as the flash blinks that
+            # asymmetric overhang reads as the cell's text jittering ~1px. The row/col
+            # bands above deliberately keep the full pitch (a contiguous strip); only the
+            # blinking whole-cell flash must match its cell.
+            gap = @matrix.grid_spacing.to_f64
+            flash_w = {effective_col_w - gap, 0.0}.max
+            flash_h = {effective_row_h - gap, 0.0}.max
+            fill_rect(Rect.new(effective_band_x, effective_band_y, flash_w, flash_h), cell_flash_color)
           end
 
           # Change animation: white borders on cells with active highlights (skip when idle)

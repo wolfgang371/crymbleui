@@ -136,9 +136,8 @@ module CrymbleUI
       y_offset = padding
       @children.each do |child|
         child_constraints = BoxConstraints.loose(Size.new(inner_width, Float64::INFINITY))
-        child_size = child.measure(child_constraints)
         child.layout(child_constraints, Vec2.new(padding, y_offset))
-        y_offset += child_size.height + spacing
+        y_offset += child.bounds.height + spacing # actual extent, mirrors VStack
       end
     end
 
@@ -184,9 +183,8 @@ module CrymbleUI
         else
           # Use INFINITY for intrinsic-sized widgets (buttons, labels, etc.)
           child_constraints = BoxConstraints.loose(Size.new(inner_width, Float64::INFINITY))
-          child_size = child.measure(child_constraints)
           child.layout(child_constraints, Vec2.new(padding, y_offset))
-          y_offset += child_size.height + spacing
+          y_offset += child.bounds.height + spacing # actual extent, mirrors VStack
         end
       end
     end

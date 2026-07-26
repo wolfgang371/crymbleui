@@ -17,9 +17,9 @@ src/widgets/virtual_matrix/cursor.cr       (327 lines)  Cursor navigation, snap_
 src/widgets/virtual_matrix/cursor_overlay.cr (152 lines) CursorOverlayWidget (highlight bands)
 src/widgets/virtual_matrix/event_handlers.cr (639 lines) Mouse/keyboard/text event dispatch
 src/widgets/virtual_matrix/ruler_widget.cr (188 lines)  4 ruler widgets (col/row/corner/corner_row_strip)
-src/widgets/virtual_matrix/sticky_reposition.cr (240 lines) Sticky cell screen-space repositioning
-src/widgets/virtual_matrix/sticky_math.cr  (275 lines)  Pure geometry: visibility ranges, sticky offsets
-src/widgets/virtual_matrix/blit_plan.cr    (426 lines)  Fast-path blit plans for sticky cells
+src/widgets/virtual_matrix/sticky_reposition.cr (153 lines) Sticky cell screen-space repositioning
+src/widgets/virtual_matrix/sticky_math.cr  (347 lines)  Pure geometry: visibility ranges, sticky offsets, compound_axis
+src/widgets/virtual_matrix/blit_plan.cr    (409 lines)  Fast-path blit plans for sticky cells
                                            ─────────
                                            4630 lines total
 ```
@@ -547,13 +547,20 @@ cursor_highlight_delta > 0:  Additive blend (brighten, for dark themes)
 cursor_highlight_delta < 0:  Subtractive blend (darken, for light themes)
 
 Primitives (when flash_on):
-  1. Horizontal band  (row highlight, full width minus sticky col area)
-  2. Vertical band    (col highlight, full height minus sticky row area)
-  3. Cell flash rect  (intersection, brighter/darker intensity)
+  1. Horizontal band  (row highlight, full row PITCH thick — a contiguous strip)
+  2. Vertical band    (col highlight, full col PITCH thick — a contiguous strip)
+  3. Cell flash rect  (the cursor CELL, brighter/darker intensity)
 
 Bands extend into sticky areas to highlight headers, but NOT when
 the cursor itself is on a sticky row/col (avoids header-highlighting-header).
 ```
+
+The cell flash (primitive 3) is sized to the **cell** — the pitch MINUS `grid_spacing`,
+matching how cells are laid out (`update_visible_cells`) — not the full row/col pitch the
+bands use. A pitch-sized flash would overhang the inter-row gap below the cell, and since
+the flash blinks (400ms) that asymmetric overhang reads as the cell's text jittering ~1px;
+sizing it to the cell keeps the blink aligned. Guarded by
+`spec/widgets/virtual_matrix/cursor_flash_cell_align_spec.cr`.
 
 Cursor flash uses a repeating timer (`CURSOR_FLASH_MS = 400ms`) toggling `flash_on`. Moving the cursor restarts the flash cycle with `flash_on = true` for immediate visual feedback. The whole-cell flash (primitive 3) is suppressed for the cursor cell while it draws its own caret (an actively-edited TextInput — see `cursor_cell_draws_edit_caret?`), so the flash and the caret never compete; a fresh (not-yet-typed) cursor cell shows the flash.
 
@@ -666,7 +673,8 @@ Eligibility (sticky_cells_can_use_blit_plan?):
   sticky rows became visible) and fall through to the render_list below.
 
 Fast path:
-  1. Compute new position (same logic as reposition)
+  1. Compute new position (same logic as reposition — compound cells literally so,
+     both delegate to StickyMath.compound_axis)
   2. Update widget.bounds (for hit-testing)
   3a. If widget_backend present: create BlitEntry(source_backend, dest_x, dest_y)
   3b. If widget_backend absent: append widget to blit_plan_render_widgets
@@ -684,6 +692,23 @@ skipping a cell that lacks a cache (instead of rendering it) leaves its layer
 region untouched — blank pixels for the user.
 
 ## Push-Based Adapter Invalidation
+
+**The invalidation CONTRACT**: an adapter that changes its STRUCTURE (dimensions,
+sizes, merge spans, scroll order) while bound to a VirtualMatrix MUST announce it via
+`invalidate_all!` at mutation time, before requesting the rebuild/render that shows
+the change. Announces count once bound — a call on a not-yet-bound adapter is a
+silent no-op — and a swapped-in adapter INSTANCE needs no announcement (reconcile
+treats it as a new world and clears every VM layer; see Reconciliation below).
+Adapters must be classes (reference types): reconcile compares instances by identity.
+
+Enforcement: an UNANNOUNCED same-instance dimension drift detected at reconcile
+raises under `-Dverify_bounds`; release builds emit one `[MATRIX_ADAPTER_CONTRACT]`
+STDERR warning and self-heal by injecting the pending invalidation (full clear +
+dims/sizes re-read through the flush below). This canary sees dims-DRIFTING
+violations only — a same-dims structural change (e.g. merged spans splitting at
+constant grid size) is invisible at reconcile time and reaches the screen as stale
+pixels; the only protection there is announcing. Guarded by
+`spec/widgets/virtual_matrix_reconcile_adapter_contract_spec.cr`.
 
 The MatrixAdapter supports push-based change notification:
 
@@ -740,10 +765,26 @@ reconcile_property content_layer : Layer?
 
 The `copy_state_from` override handles:
 1. `auto_copy_reconcile_properties(old_widget)` -- copies all `@[Reconcile]` annotated properties
-2. Preserves user-resized col/row widths (`.dup` to avoid aliasing)
-3. Clamps cursor to new matrix dimensions
-4. Rebinds adapter invalidation callbacks to the new widget instance
+2. Transfers pending adapter invalidations (an announce that fired on the old widget
+   before the callbacks were rebound must not be lost)
+3. Preserves user-resized col/row widths while the grid dimensions still match —
+   identity-INDEPENDENT (fresh-adapter-per-build apps keep their resize state) and
+   dims-GATED (a drifted grid keeps the constructor's fresh `get_sizes` arrays; a
+   carried short array would raise IndexError in the scroll clamp). The arrays are
+   carried by reference — safe because the old instance is discarded.
+4. Applies the CLEAR rule: a swapped-in adapter instance (identity compare) clears
+   every VM layer via the same helper `flush_invalidate_all` uses — deliberate
+   heuristic default, since a fresh instance has no announce history; a same-instance
+   unannounced dims drift is a contract violation (see Push-Based Adapter
+   Invalidation above). Fresh-adapter-per-build apps (the DSL `matrix` sugar,
+   dialog-local adapters) are legal: they pay a full clear per rebuild — felt cost
+   ~nil, the body repaints on a rebuild anyway — and keep their resize state via
+   rule 3. NOTE: sticky layers are additionally cleared unconditionally on every
+   `perform_layout`; do not "optimize" that away without re-checking adapter-swap
+   ghosts on sticky headers.
 5. Invalidates dimension caches and forces cell update
+6. Clamps cursor and scroll offset to the new matrix dimensions
+7. Rebinds adapter invalidation callbacks to the new widget instance
 
 `@last_synced_scroll_offset` is deliberately NOT reconciled: after rebuild, the ScrollView is fresh (offset=0), so the push branch must fire to seed it with the reconciled scroll_offset.
 

@@ -175,7 +175,7 @@ primitive caching, not just rendering caching.
 | (none) | Crymble pipeline only, zero validation overhead |
 | `-Dcache_validation` | Both pipelines run, pixel comparison after each frame |
 | `-Dimmediate_mode_only` | Only immediate-mode pipeline, all caching bypassed |
-| `-Dverify_bounds` | Asserts the viewport-cache `buffer_origin` invariant at its sole writer and at both composite seams (SFMLRenderer + TestRenderer); raises on a non-whole origin or a composite that would clamp. Paired with `-Dcache_validation` by `tools/cv-coherency.sh` as the buffer-origin gate. |
+| `-Dverify_bounds` | Asserts the viewport-cache `buffer_origin` invariant at its sole writer and at both composite seams (SFMLRenderer + TestRenderer); raises on a non-whole origin or a composite that would clamp. Also re-checks the sibling no-overlap invariant on every re-LAYOUT (release checks it only on a layer's first render) — that one WARNS and bumps `Widget.sibling_overlap_warnings` instead of raising, so a retro-fitted invariant can be triaged rather than aborting a run. Paired with `-Dcache_validation` by `tools/cv-coherency.sh`, whose spec list therefore also carries the layout/panel specs. |
 
 `-Dimmediate_mode_only` is useful for visual debugging: if a rendering bug
 disappears with this flag, the bug is in caching. If it persists, the bug is in

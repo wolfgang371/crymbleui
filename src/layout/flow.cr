@@ -138,8 +138,11 @@ module CrymbleUI
                 end
                 x += hspacing if row_has_any
                 child.layout(child_constraints, Vec2.new(x, y))
-                x += sz.width
-                row_height = Math.max(row_height, sz.height)
+                # The wrap decision above needs `sz` BEFORE the child is laid out, but the cursor and
+                # the row height advance by what the child actually occupies — a skipped child keeps its
+                # previous size, which a fresh measure can contradict. Same rule as VStack/HStack.
+                x += child.bounds.width
+                row_height = Math.max(row_height, child.bounds.height)
                 row_has_any = true
             end
         end

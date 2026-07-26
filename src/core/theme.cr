@@ -304,6 +304,12 @@ module CrymbleUI
       @@current_source.get
     end
 
+    # Observability: how many pull nodes currently depend on the theme Source. A dependents leak shows
+    # as this growing per rebuild; the dispose-on-rebuild fix keeps it at ~one live generation.
+    def self.current_source_dependent_count : Int32
+      @@current_source.dependent_count
+    end
+
     # The active theme's registry name (e.g. :light / :dark).
     def self.current_name : Symbol
       @@current_name

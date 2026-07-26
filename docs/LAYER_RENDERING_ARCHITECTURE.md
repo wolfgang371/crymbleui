@@ -229,8 +229,17 @@ end
 
 A widget can skip layout if ALL of these are true:
 1. `!needs_layout?` - widget not marked dirty via `mark_needs_layout()`
-2. `@last_constraints != nil` - not first layout
-3. `@last_constraints == constraints` - same available space from parent
+2. `@last_zoom_epoch == FontSizing.zoom_epoch` - zoom unchanged since the last layout
+3. `@last_constraints != nil` - not first layout
+4. EITHER `@last_constraints == constraints` (same available space from parent), OR the new constraints
+   are a **relaxation this widget did not use**: its last size still fits them, and in each axis whose
+   max grew it was not already filling the old max. See `docs/ARCHITECTURE.md` "Loose content +
+   relaxation-skip" for why a panel hands its content a loose box.
+5. `!subtree_layout_depends_on_available_space?` - neither this widget nor any descendant re-arranges
+   against the available space. A wrapping `FlowLayout` does, and the check has to be the SUBTREE
+   closure: the skip that would strand it happens at an ancestor, which returns before the flow's
+   `layout()` is reached. (Condition 5 does not apply to case "identical constraints" in 4 — nothing can
+   change when the available space did not.)
 
 **Key insight**: Position is irrelevant for layout. A widget's internal layout depends ONLY on constraints (available space). Position is just a translation applied at the end.
 
@@ -848,10 +857,17 @@ Layer-local position = 0 + 110 - 100 = 10
 So primitive renders at (10, 30) within layer texture
 ```
 
-### Float-to-Integer Coordinate Rounding
+### Float-to-Integer Coordinate Rounding — the PixelSnap policy
 
 Widget bounds use `Float64` for layout precision (sub-pixel positioning, DPI scaling, layout division).
-GPU operations require `Int32` pixel coordinates. The rounding strategy must be **consistent** to avoid visual artifacts.
+GPU operations require `Int32` pixel coordinates. Every float→device-pixel conversion follows ONE
+policy, keyed by the coordinate's ROLE — ad-hoc rounding is the defect class behind a long line of
+shipped 1px/blur/ghost/seam bugs (scissor-vs-compositor edge seams, glyph-atlas blur, ghosted
+sprites, cache-validator false seams, the cursor-cell text jitter from parity-dependent
+ties-to-even rounding). The policy is ENFORCED by `spec/rendering/pixel_snap_lint_spec.cr`, which
+fails on any raw conversion in render-path files outside its reviewed per-file baseline — covering
+the rendering core (`src/rendering/`), the headless instruments, the matrix blit/park internals
+(`src/widgets/virtual_matrix/`), and the layer sampling seam (`src/core/layer.cr`).
 
 **Why floats for layout:**
 - Smooth scrolling (scroll_offset accumulates sub-pixel deltas)
@@ -859,32 +875,33 @@ GPU operations require `Int32` pixel coordinates. The rounding strategy must be 
 - Zoom/DPI scaling produces fractional sizes
 - Drag offset for smooth panel movement
 
-**Rounding rules (in `layer_renderer.cr`):**
+**The role table:**
 
-| Coordinate | Rounding | Why |
-|------------|----------|-----|
-| Widget position (layer_local_x/y) | `.to_i` (truncate) | Consistent direction for all widgets |
-| Widget backend size (width/height) | `device_pixel_span(start, length)` | Floors both edges (`(start+length).to_i - start.to_i`) so adjacent siblings tile exactly without gap or 1-pixel overlap; see comment at `layer_renderer.cr:963-967` |
-| Layer culling bounds (width/height) | `.ceil.to_i` | Conservative visibility test — ensures widgets at the layer edge are not prematurely culled (`layer_renderer.cr:986-987`) |
+| Coordinate role | Conversion | Owner | Why |
+|-----------------|-----------|-------|-----|
+| DRAW position: glyph-atlas text, texture-blit sprite/layer-composite destinations | `PixelSnap.snap` (half-up, `floor(v+0.5)`) | `src/rendering/pixel_snap.cr` | Whole pixels avoid GPU bilinear blur on the glyph atlas; half-up is TRANSLATION-INVARIANT (`snap(v+n) == snap(v)+n` for integer n), so widget-local (texture) and layer-local (direct) rasterization land on the same device pixel, and the headless and SFML compositors place layers identically. `Float#round`'s ties-to-even is parity-dependent at exact .5 fractions and violated this — text visibly jumped 1px whenever a cell flipped between render paths. |
+| Value WHOLE BY CONSTRUCTION (viewport-cache `buffer_origin`) | `PixelSnap.whole` (asserting cast, exact tolerance) | `pixel_snap.cr` + the single writer (`recenter_origin!`) | Not a rounding: a fractional value is a broken invariant. The buffer-origin quantization itself is a separate, deliberately bespoke owner. |
+| Widget/layer-local ORIGIN | `PixelSnap.origin` (floor) | `round_to_layer_pixels` → PixelSnap | Floor of the DIFFERENCE (never floor terms separately — `floor(a-b) != floor(a)-floor(b)`). Floor equals the old truncation for non-negative coords and, unlike it, stays translation-invariant at negative fractions (top/left-clipped content at fractional zoom). |
+| Backend/texture EXTENT | `PixelSnap.span` (via `device_pixel_span`) | `pixel_snap.cr` | Defined AS `origin(start+len) - origin(start)`, so both edges share origin's floor direction BY CONSTRUCTION — exact sibling tiling, and a 1px widget at a negative fractional start keeps its pixel (truncate-both-edges dropped it). |
+| Slot keys (viewport-cache stamp + blit-shift bookkeeping) | `slot_axis` | `layer_renderer.cr` | ONE arithmetic for both sides: `origin(abs - layer_bound) - buffer_origin`. The blit-shift previously re-derived keys with term-wise ties-even rounds, diverging from the stamp whenever widget coords were fractional → mis-classified boundary cells moved slot stamps onto stale pixels. |
+| Culling/visibility BOUND | `PixelSnap.cover` (ceil) | culling sites | Conservative: may over-include, never under-include (`cover(len) >= span(start, len)` for every placement), so edge widgets are not prematurely culled. |
+| Blit destinations — SPLIT BY TARGET | compositor layer→window: `snap` · cell-texture→layer: `origin` | per the target's frame | A cell blitted INTO a layer must land on the render path's slot origin (same `origin` arithmetic) or it jumps 1px between blit-frames and render-frames; the whole-layer composite to the window snaps (half-up) like every draw position. |
+| Vector shapes: fills, lines, borders, circles | RAW (no snapping) | — | Sub-pixel BY DESIGN: the GPU rasterizes them by center coverage (the headless backend models the same rule). Snapping them would cause fill seams. Only glyph-atlas text and texture-blit destinations snap. |
+| Sizes (font size, zoom-scaled metrics like grid spacing) | RAW | their single owner | One producer, all consumers see the same value — no cross-frame invariant at stake. Migrating them would CHANGE layout at tie values (e.g. a zoom-scaled spacing hitting exactly .5). |
+| CONTENT-SPACE values (scroll grids, scroll-into-view targets, visible cell ranges) | RAW, or content-quantized via the `x.to_i.to_f64` round-trip | matrix scroll sites | Content pixels, not device pixels: the round-trip RETURNS to `Float64`, so it is never a device conversion (the lint recognizes the idiom and leaves it in scope-exempt content space). LAW: every consumer of the same content-space predicate must use the SAME quantized value — the sticky park predicates in `sticky_reposition` and `blit_plan` both compare against `scroll.to_i` per axis, so the reposition pass and the blit plan can never disagree about whether a header is parked. |
 
-**The helper function:**
-```crystal
-# In LayerRenderer - converts absolute coords to layer-local pixels
-private def round_to_layer_pixels(abs_x, abs_y, layer_x, layer_y)
-  layer_local_x = (abs_x - layer_x).to_i  # Truncate for consistency
-  layer_local_y = (abs_y - layer_y).to_i
-  {layer_local_x, layer_local_y}
-end
-```
+**FBO surface orientation (the Y-flip convention):** owned by `src/rendering/fbo_math.cr` —
+its header carries the full convention table (RenderTexture.texture is bottom-up; the window and
+copy_to_image are top-down; full-sprite blits need NO flip) and the pure flip algebra
+(`blit_region_flip`, `scissor_gl_y`), property-spec'd in `spec/rendering/fbo_math_spec.cr`. Those
+specs prove self-consistency with the convention; the real FBO orientation axiom is witnessed only
+by the SFML parity sweep (`tools/sfml-parity.sh`).
 
-**Historical note (bug fixed in commit 54d6254):**
-Scissor clipping used `.to_i` (giving 298 for bounds 298.666) while compositor used `.ceil.to_i` (giving 299).
-Result: pixel 298 was never rendered but was sampled → white/garbage pixels at right edge.
-The intermediate fix unified both to `.ceil.to_i`. The current code goes further: widget backend sizes use
-`device_pixel_span` (floors both edges) to prevent 1-pixel overlaps between siblings that `.ceil.to_i` would
-introduce — an overlapping pixel captured as "background" by an earlier sibling before the later sibling has
-rendered causes a stale strip on selective re-render. Layer culling bounds remain `.ceil.to_i`
-(a conservative bound for visibility testing only, not for sizing the backend texture).
+**Historical seam note:**
+Scissor clipping once truncated (giving 298 for bounds 298.666) while the compositor ceiled (giving 299):
+pixel 298 was never rendered but was sampled — white/garbage pixels at the right edge. The lesson
+generalizes: two code paths converting the SAME coordinate MUST share one conversion — which is what
+PixelSnap and the lint tripwire enforce structurally.
 
 **Cache-validation instrument (`render_layer_immediate`):**
 The `render_layer_immediate` method (the ground-truth pass used by the cache-validation harness,
@@ -1263,7 +1280,9 @@ def validate_sibling_bounds(widgets)
 end
 ```
 
-**Performance optimization**: Validation currently runs only on `first_render?`, not during scroll frames (scroll doesn't change widget structure, so re-validating would be wasted O(n²) work). Note: it is **not** re-run on a `NeedsLayout` re-render either, so an overlap introduced by a later layout change is not caught — re-enabling on layout is a deferred perf tradeoff.
+**Performance optimization**: in a release build the raising validation runs only on `first_render?`, not during scroll frames (scroll doesn't change widget structure, so re-validating would be wasted O(n²) work). An overlap introduced by a LATER layout change used to escape entirely — that is how a stale-skip overlap reached a beta tester — so under `-Dverify_bounds` every re-**LAYOUT** re-checks it as a **warn + `Widget.sibling_overlap_warnings`** rather than a raise (self-tested by `spec/rendering/sibling_overlap_guard_spec.cr`, run by `tools/cv-coherency.sh`). Deliberately keyed on `NeedsLayout`, not on the `full_render` flag: `mark_needs_clear_and_render` sets `NeedsRender`, and several call sites choose it *because* it does not imply sibling validation.
+
+**Known limit**: this checks siblings against each other, never a child against its parent. Stacks size themselves from `measure` but advance their cursor by each child's post-layout `bounds`, so a child whose laid-out extent exceeds its measured one escapes the PARENT instead of overlapping a sibling. That case is covered by the containment warning in `Widget#layout`'s own `-Dverify_bounds` block.
 
 **Catches**: Layout bugs where children overlap, background corruption
 

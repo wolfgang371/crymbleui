@@ -52,24 +52,19 @@ module CrymbleUI
                 @@last_wall_time = Time.instant
                 @@initialized = true
 
-                # Update every second (scheduler might not be initialized yet during build)
-                begin
+                # Update every second — skip until the scheduler is installed (retries on next
+                # rebuild); guard on the predicate so a real schedule() error isn't swallowed.
+                if Widget.scheduler?
                     @@timer_id = schedule_timer(1.second, repeating: true) do
                         CPUMonitor.update_cpu_usage
                     end
-                rescue
-                    # Scheduler not initialized yet - will retry on next rebuild
                 end
             end
 
-            # If we have no timer yet but scheduler is available, start it now
-            if @@timer_id.nil?
-                begin
-                    @@timer_id = schedule_timer(1.second, repeating: true) do
-                        CPUMonitor.update_cpu_usage
-                    end
-                rescue
-                    # Scheduler still not ready
+            # If we have no timer yet but the scheduler is now available, start it.
+            if @@timer_id.nil? && Widget.scheduler?
+                @@timer_id = schedule_timer(1.second, repeating: true) do
+                    CPUMonitor.update_cpu_usage
                 end
             end
         end

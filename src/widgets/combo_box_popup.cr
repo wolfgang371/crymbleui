@@ -26,7 +26,6 @@ module CrymbleUI
   # ```
   class ComboBoxPopup < Popup
     # Layout constants
-    ITEM_SPACING      = 0.0
     FLASH_INTERVAL_MS = 300
 
     # Index reported to on_select when an editable popup commits free-typed text
@@ -424,7 +423,10 @@ module CrymbleUI
       end
 
       value = @filtered_items[@highlighted_index]
-      original_index = @all_items.index(value) || 0
+      # @filtered_items is always a subset of @all_items (only ever assigned items.dup / [] /
+      # @all_items.select), so the highlighted value is always present — a nil means that invariant
+      # broke, which must surface, not silently commit item 0.
+      original_index = @all_items.index(value) || raise "ComboBoxPopup: highlighted item not in @all_items"
       @on_select.try(&.call(original_index, value))
     end
 
@@ -435,8 +437,9 @@ module CrymbleUI
       @item_widgets.clear
 
       @filtered_items.each_with_index do |item_text, idx|
-        # Find original index for callback and per-item colors
-        original_index = @all_items.index(item_text) || 0
+        # Find original index for callback and per-item colors. @filtered_items ⊆ @all_items (same
+        # invariant as select_highlighted), so this is always found.
+        original_index = @all_items.index(item_text) || raise "ComboBoxPopup: filtered item not in @all_items"
 
         # Determine text_background_color for this item
         item_text_bg = if colors = @text_background_colors
@@ -502,8 +505,9 @@ module CrymbleUI
       hdr.on_toggle = -> { toggle_all } # gutter-click toggles all/none too
 
       hdr.parent = self
-      # Insert header as the second child (after TextInput, before ScrollView).
-      ti_idx = @children.index(@text_input) || 0
+      # Insert header as the second child (after TextInput, before ScrollView). @text_input is added
+      # to @children in the ctor and never removed, so it's always found.
+      ti_idx = @children.index(@text_input) || raise "ComboBoxPopup: @text_input missing from @children"
       @children.insert(ti_idx + 1, hdr)
       @header_item = hdr
     end

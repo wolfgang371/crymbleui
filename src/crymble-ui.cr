@@ -23,7 +23,6 @@ require "./widgets/scroll_view"
 require "./widgets/virtual_matrix"
 require "./widgets/simple_matrix"
 require "./widgets/dir_browser"
-require "./widgets/virtual_grid_base"
 require "./widgets/tree_node"
 
 # Layout containers

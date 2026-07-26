@@ -21,9 +21,9 @@ CrymbleUI uses three complementary strategies:
 **What gets validated**:
 - Layer dimensions (width/height > 0, finite)
 - Widget absolute_bounds (width/height > 0, finite)
-- Backend type compatibility (graceful skip instead of crash)
+- Backend type compatibility (a mismatch **raises** — see "What Still Asserts", below — it is a broken invariant, not a degradable edge case; the raise lives in the backends' `blit`/`blit_region`, `crsfml_backend.cr` / `test_render_backend.cr`)
 
-**Location**: `layer_renderer.cr`
+**Location**: `layer_renderer.cr` (dimension/bounds validation)
 
 ```crystal
 private def valid_layer_dimensions?(layer : Layer) : Bool
@@ -115,7 +115,7 @@ Full app reset for recovery:
 |----------|----------|-----------|
 | Zero-size widget | Validate, skip | Edge case, not a bug |
 | NaN/Infinity bounds | Validate, skip | Edge case, not a bug |
-| Backend type mismatch | Validate, skip | Graceful degradation |
+| Backend type mismatch | **Assert (raise)** | Broken invariant, not a degradable condition (No-Fallbacks) |
 | Sibling overlap | Assert | Invariant violation = bug |
 | Missing background before render | Assert | Invariant violation = bug |
 | Rendering before layout | Assert | Invariant violation = bug |
@@ -142,7 +142,7 @@ See `spec/rendering/graceful_degradation_spec.cr` for tests covering:
 ## Design Decisions
 
 1. **Keep assertions for invariants** - bugs should crash, not degrade silently
-2. **Validation for edge cases** - zero sizes, NaN, type mismatches
+2. **Validation for edge cases** - zero sizes, NaN (a backend *type mismatch* is NOT an edge case — it raises)
 3. **Reset ALL caches on exception** - can't know what's corrupted
 4. **Force re-layout** - safest recovery path
 5. **Log to STDERR** - visible but doesn't pollute stdout

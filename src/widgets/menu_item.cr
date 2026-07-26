@@ -92,7 +92,8 @@ module CrymbleUI
         # Click callback
         @on_click : Proc(Nil)?
 
-        # Setter for click action (allows setting action without shortcut registration)
+        # Setter for click action (allows setting action without shortcut registration).
+        # Used by the embrace consumer (zoom/maximize menu items) — a public API, not dead.
         def on_click_action=(callback : Proc(Nil))
             @on_click = callback
         end

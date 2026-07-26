@@ -951,21 +951,34 @@ draw_text("Hello", text_pos, color, @font_scale)  # Glyphs appear exactly at tex
 
 ### SFML Text: Integer Coordinates Required
 
-**CRITICAL**: All SFML text positions MUST be rounded to integer pixels before rendering.
+**CRITICAL**: All SFML text positions MUST be snapped to integer pixels before rendering —
+via `PixelSnap.snap` (`src/rendering/pixel_snap.cr`), never `Float#round`.
 
 Fractional (sub-pixel) coordinates cause GPU bilinear interpolation on the font glyph atlas,
 producing visually washed-out/blurry text. This is most visible after zoom (e.g. 110%) where
 centering arithmetic produces non-integer positions like (143.7, 28.3).
+
+The snap must also be **translation-invariant** (`snap(v + n) == snap(v) + n` for integer n):
+the same text primitive is rasterized either widget-LOCAL (into the widget's own texture,
+blitted at an integer offset) or layer-LOCAL (offset added before rasterizing), and both must
+land on the same device pixel. `Float#round`'s ties-to-even breaks this for exact .5 fractions
+(the result depends on the integer part's parity) — a vertically-centered text y like 3.5 then
+renders 1px lower via the texture path than via the direct path, and anything that flips a
+cell's render path (a click, a cursor move, an invalidate) makes its text visibly jump 1px.
+`PixelSnap.snap` is half-up (`floor(v + 0.5)`), which commutes with all integer offsets;
+guarded by `spec/rendering/pixel_snap_spec.cr`.
 
 This applies to ALL `SF::Text` position assignments across the codebase:
 - `CrSFMLBackend.draw_text` — per-widget texture rendering
 - `SFMLRenderer` DrawText execution — direct-to-window primitives
 - `SFMLPaintContext.draw_text` — paint context text drawing
 
-Similarly, sprite positions for layer compositing must be rounded (see commit 7fb1c03 —
-sub-pixel sprite positioning caused ghosted text in viewport_cache layers).
+Similarly, sprite positions for layer compositing snap via PixelSnap (sub-pixel sprite
+positioning caused ghosted text in viewport_cache layers; both the SFML and headless
+compositors share the same snap, so instrument and production cannot drift).
 
-**History**: Fixed in commit 20a683b (blurry button text) and commit 7fb1c03 (ghosted text).
+**History**: Fixed in commit 20a683b (blurry button text) and commit 7fb1c03 (ghosted text);
+the ties-to-even path divergence (1px cursor-cell text jitter) fixed with PixelSnap.
 
 ## Intrinsic Minimum Size & the WindowPanel Content Floor
 
@@ -1019,10 +1032,33 @@ content subtree is skipped (zero re-measures). A fill body (size == max) fails t
 correctly. The one exception is a widget whose *arrangement* depends on the available space while its own
 size stays sub-max — a wrapping `FlowLayout` re-packs rows against `max_width` — which would be silently
 skipped; such widgets override `layout_depends_on_available_space? → true` to opt out of the relaxation
-branch (they re-flow on any constraint change). Before this, panel content got a tight width that changed
-every grow-frame ⇒ the entire content tree was re-measured per frame (an ~30%-CPU live-resize cost). Consequence to know: **content no
-longer auto-stretches to the panel width** — use a fill widget (or an explicit width) if you want that.
-Pinned by `spec/rendering/grow_resize_perf_spec.cr` (measure/grow-frame is content-independent).
+branch (they re-flow on any constraint change).
+
+**The opt-out is SUBTREE-wide, not per widget.** Declaring it is not enough on its own: the skip that
+matters happens at an *ancestor*, which returns before the wrapping widget's `layout()` is ever reached.
+So `can_skip_layout?` consults `subtree_layout_depends_on_available_space?` — the closure of that
+predicate over `@children`, recomputed bottom-up at the end of every non-skip `layout()` (a skipped
+subtree cannot have changed, and any structural change marks the whole ancestor chain `NeedsLayout`
+first). It is seeded `true` so a never-laid-out widget can never be wrongly skipped, and cleared by
+`zero_bounds!` so a collapsed section — which is never re-laid-out — cannot latch its ancestors into
+permanent re-layout. A container that lays out NON-children (`Menu` → its popup overlay,
+`PopupHost`, `Window` → `@overlays`) is outside the closure and must opt out itself. Those cases are
+safe today for a reason other than layer ownership (`Menu` owns no layer): `Window#perform_layout` lays
+out every overlay on every pass, and `App#prepare_layout` only enters that pass when the root needs
+layout, so the root never takes a skip branch — a `Menu` skip could strand a popup's POSITION, never
+its internal arrangement.
+
+**Consequence for the "grow is O(1)" claim above**: it holds for content that contains no wrapping
+layout. A panel whose content *does* — e.g. embrace's shape panel while its Filter section is expanded —
+re-measures that path on every grow frame, and returns to the fast path when the section is collapsed.
+That is the price of a correct re-flow; `spec/layout/subtree_relaxation_skip_spec.cr` pins both halves
+(the skip survives for non-wrapping content, and the cost stays bounded to the wrapping subtree).
+
+Before the loose-content change, panel content got a tight width that changed every grow-frame ⇒ the
+entire content tree was re-measured per frame (an ~30%-CPU live-resize cost). Consequence to know:
+**content no longer auto-stretches to the panel width** — use a fill widget (or an explicit width) if
+you want that. Pinned by `spec/rendering/grow_resize_perf_spec.cr` (measure/grow-frame is
+content-independent *for content with no wrapping layout* — see the paragraph above for the exception).
 
 *Deferred extensions*: a remembered desired-height to shrink back on collapse; growing **upward** /
 clamping when a panel is pinned to the screen bottom (today an over-tall panel's bottom edge can go
@@ -1106,28 +1142,12 @@ when SF::Event::TextEntered
 3. `TextEntered` filtering handles control characters naturally
 4. No need for event consumption tracking, priority systems, or event pairing
 
-**Conclusion**: Keep the architecture simple. When implementing text fields later, just filter `TextEntered` events to only accept printable characters (≥ 32). The existing shortcut system and SFML's event queue handle everything else correctly.
+**Conclusion**: Keep the architecture simple. Text fields filter `TextEntered` events to only accept printable characters (≥ 32); the shortcut system and SFML's event queue handle everything else correctly.
 
-## Open Questions
-
-1. **State ownership**: Should state live in widgets or be external (like Elm model)?
-   - Current proposal: Widgets own state (easier migration)
-   - Alternative: External state tree (more pure, harder to migrate)
-
-2. **Immutability**: Should state be immutable with snapshots?
-   - Current proposal: Mutable state (simpler, faster)
-   - Alternative: Immutable snapshots for rendering (safer, more memory)
-
-3. **Change batching**: How do we batch multiple state changes before render?
-   - Current proposal: Mark needs_render, render once per frame
-   - Alternative: Event queue with batch processing
-
-## Next Steps
-
-1. **Review this architecture** - Is this the right direction?
-2. **Prototype with Menu** - Implement for one widget as proof of concept
-3. **Iterate based on learnings** - Refine architecture based on what we discover
-4. **Roll out incrementally** - Migrate widget by widget, not all at once
+<!-- (Historical "Open Questions"/"Next Steps" design-phase blocks removed — the state-ownership
+     and change-batching questions were resolved by the shipped pull-based version-counting model,
+     documented above and in REACTIVITY.md; the batching "Current proposal: Mark needs_render, render
+     once per frame" was the OPPOSITE of what shipped.) -->
 
 ## Future Work
 

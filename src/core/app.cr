@@ -240,13 +240,10 @@ module CrymbleUI
 
     # Build and set the widget tree
     def build_tree
-      # Clear shortcuts before rebuilding to avoid duplicates
-      # Shortcuts will be re-registered as widgets are created
-      begin
-        Widget.shortcut_manager.clear
-      rescue
-        # ShortcutManager not initialized yet (first build before renderer)
-      end
+      # Clear shortcuts before rebuilding to avoid duplicates. Skipped before the renderer installs the
+      # manager (first build); a real error from clear() now propagates instead of being swallowed by a
+      # blanket rescue. Shortcuts re-register as widgets are created.
+      Widget.shortcut_manager?.try(&.clear)
 
       @root = build()
     end
@@ -288,13 +285,9 @@ module CrymbleUI
       # Use explicit class reference to avoid subclass variable shadowing
       CrymbleUI::App.class_var_increment_rebuild_count
 
-      # Clear shortcuts before rebuilding to avoid duplicates
-      # Shortcuts will be re-registered as widgets are created
-      begin
-        Widget.shortcut_manager.clear
-      rescue
-        # ShortcutManager not initialized yet (shouldn't happen in rebuild, but be safe)
-      end
+      # Clear shortcuts before rebuilding to avoid duplicates; a real error from clear() propagates
+      # (no blanket rescue). Shortcuts re-register as widgets are created.
+      Widget.shortcut_manager?.try(&.clear)
 
       old_root = @root
 
@@ -370,6 +363,15 @@ module CrymbleUI
       # Reconciled layers may retain widgets from the old tree that weren't
       # @[Reconcile]d — new widgets get appended, old ones accumulate.
       Layer.cleanup_orphaned_widgets(new_root)
+
+      # Release the DISCARDED tree's pull-cache nodes. Each Dynamic widget's @primitives_node captured
+      # the immortal global Sources (theme/zoom) during its last recompute; those Sources clear
+      # @dependents only on their own `set` (a rare theme/zoom toggle), so without this every rebuild
+      # would leave another dead generation pinned via Source→node→on_dirty→widget. Safe: reconcile
+      # built new_root fresh and never copies @primitives_node, so old and new node sets are disjoint;
+      # runs after all old→new ref repointing above. (Overlays are migrated-LIVE out of old_root and
+      # disposed on their own drop paths — see Window#remove_overlay / cleanup_orphaned_overlays.)
+      old_root.try(&.dispose_subtree)
 
       # Validate reconciliation integrity (debug mode only).
       # Catches orphaned references that would cause rendering bugs.

@@ -35,12 +35,11 @@ describe "VStack measure count optimization" do
     # Debug output
     # puts "Measure count for 20 buttons: #{measure_count}"
 
-    # Expected: ~40 measures (2 per button: VStack.measure + perform_layout)
-    # Bug was: ~60 measures (VStack.measure + Pass 1 + Pass 2)
-    #
-    # At dacd384, VStack measured children twice: once in measure(), once in layout loop
-    # The fix removes the extra Pass 1 when no Expanded children present
-    measure_count.should be <= 45  # ~40 expected (2 per child), allow small overhead
+    # Expected: 20 measures — ONE per button, in VStack.measure. perform_layout no longer
+    # re-measures: it advances its cursor by each child's post-layout bounds (the child's actual
+    # extent, which a fresh measure can contradict when the child skipped its layout).
+    # Bug was: ~60 measures (VStack.measure + Pass 1 + Pass 2); then ~40 (2 per child).
+    measure_count.should be <= 25 # 20 expected (1 per child), small headroom
   end
 
   it "Expanded VStack uses two-pass layout (acceptable overhead)" do

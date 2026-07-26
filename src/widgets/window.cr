@@ -47,6 +47,10 @@ module CrymbleUI
         def remove_overlay(widget : Widget)
             @overlays.delete(widget)
             widget.parent = nil
+            # A closed overlay (combo collapse, menu close, submenu replace) is a genuine drop — its
+            # Dynamic content nodes captured theme/zoom and would leak there forever otherwise. parent
+            # is now nil ⇒ its layer leaves active_layers ⇒ it won't render again ⇒ dispose is terminal.
+            widget.dispose_subtree
             @overlay_version += 1
             mark_needs_render
         end
@@ -98,6 +102,11 @@ module CrymbleUI
                         false
                     else
                         Popup.unregister(overlay.as(Popup))
+                        # Orphaned popup (its owning combo left the tree while open) — release its pull
+                        # nodes so they don't leak on the theme/zoom Sources. Terminal in practice: once
+                        # unregistered + dropped from @overlays it no longer paints, so the nilled node is
+                        # not recreated (verified by the orphan-reject leak spec — count returns to baseline).
+                        overlay.dispose_subtree
                         true
                     end
                 else

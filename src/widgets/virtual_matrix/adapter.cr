@@ -2,6 +2,15 @@ module CrymbleUI::Widgets::VirtualMatrix
   # Abstract interface for matrix data binding.
   # Implement this module to connect VirtualMatrix to your data source.
   #
+  # CONTRACT: an adapter that changes its STRUCTURE (dimensions, sizes, merge spans,
+  # scroll order) while bound to a VirtualMatrix must announce it via `invalidate_all!`
+  # at mutation time, before requesting the rebuild/render that shows the change.
+  # Adapters must be classes (reference types) — reconciliation compares instances by
+  # identity: a swapped-in instance needs no announcement (it is treated as a new world
+  # and the matrix clears its cached layers), and announces before the adapter is bound
+  # are silent no-ops. See `invalidate_all!` and VIRTUAL_MATRIX_ARCHITECTURE.md
+  # "Push-Based Adapter Invalidation".
+  #
   # Example:
   # ```
   # class MyDataAdapter
@@ -156,23 +165,27 @@ module CrymbleUI::Widgets::VirtualMatrix
       @_on_invalidate_all = on_all
     end
 
-    def _unbind_invalidation
-      @_on_invalidate_cell = nil
-      @_on_invalidate_all = nil
-    end
-
     # Public API for adapter authors: signal that a single cell changed
     def invalidate_cell!(row : Int32, col : Int32)
       @_on_invalidate_cell.try &.call(row, col)
     end
 
-    # Public API for adapter authors: signal that structure changed (dimensions, merges, etc.)
+    # Public API for adapter authors: signal that structure changed (dimensions, sizes,
+    # merges, scroll order). This is a CONTRACT, not a courtesy: a bound adapter that
+    # changes structure without calling this before the next rebuild/render leaves the
+    # matrix's cached layers stale. Enforcement: an unannounced dimension drift detected
+    # at reconcile raises under `-Dverify_bounds`; release builds log one
+    # `[MATRIX_ADAPTER_CONTRACT]` STDERR warning and self-heal (full clear + re-read).
+    # A same-dims structural change cannot be detected there — it MUST be announced.
+    # No-op while unbound; a swapped-in instance needs no announcement (identity rule).
     def invalidate_all!
       @_on_invalidate_all.try &.call
     end
   end
 
   # Convenience module for adapters without sticky headers.
+  # The MatrixAdapter invalidation CONTRACT applies here too: announce structural
+  # changes — e.g. a changed row_count/col_count — via `invalidate_all!`.
   # Provides a default sequential get_scrollorder derived from
   # row_count and col_count, so implementors only need:
   #

@@ -391,7 +391,15 @@ describe "hot-path tree-walk perf audit" do
     puts "=" * 108
     puts ""
 
-    # Sanity: the spec ran and produced numbers (not a behavioral contract).
-    true.should be_true
+    # A3-A6 are KNOWN O(n) content-dependent walks (each mechanism documented per-row above; A4 is the
+    # per-frame render-state sweep tracked as its own optimization ticket) — UNLIKE A1/A2's O(1) (asserted
+    # <= 1.3). Content roughly DOUBLES between the small/big runs, so a linear path lands near 2.0 and an
+    # O(n^2) REGRESSION would land near 4.0. Guard "not worse than linear" (<= 3.0 — headroom on both
+    # sides): this catches a quadratic regression in scroll / state-sweep / DnD / col-resize WITHOUT
+    # pinning the current linear value.
+    content_independence_ratio(a3[0], a3[1]).should be <= 3.0, "A3 scroll: collect_widgets_visits went super-linear (#{a3[0]} -> #{a3[1]})"
+    content_independence_ratio(a4[0], a4[1]).should be <= 3.0, "A4 state sweep: state_sweep_visits went super-linear (#{a4[0]} -> #{a4[1]})"
+    content_independence_ratio(a5[0], a5[1]).should be <= 3.0, "A5 DnD move: drop_target_visits went super-linear (#{a5[0]} -> #{a5[1]})"
+    content_independence_ratio(a6[0], a6[1]).should be <= 3.0, "A6 col resize: row_cache_rebuild_rows went super-linear (#{a6[0]} -> #{a6[1]})"
   end
 end

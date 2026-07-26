@@ -128,6 +128,10 @@ module CrymbleUI
         # Diagnostic + testable; independent of @@enable_warnings so a spec can assert it silently.
         @@bind_stability_warnings : Int32 = 0
 
+        # SIBLING NO-OVERLAP GUARD state — see self.sibling_overlap_warnings. Counts overlaps the
+        # -Dverify_bounds re-layout check reported; always 0 without that flag.
+        @@sibling_overlap_warnings : Int32 = 0
+
         # Set the global scheduler (called by renderer)
         def self.scheduler=(scheduler : Scheduler)
             @@scheduler = scheduler
@@ -138,6 +142,13 @@ module CrymbleUI
             @@scheduler || raise "Scheduler not initialized"
         end
 
+        # Get the global scheduler if set (nil before the renderer installs it — e.g. early build /
+        # tests). Lets callers branch on presence instead of catching the raise above with a blanket
+        # rescue (which would also swallow a real error from the scheduler itself).
+        def self.scheduler? : Scheduler?
+            @@scheduler
+        end
+
         # Set the global shortcut manager (called by renderer)
         def self.shortcut_manager=(manager : ShortcutManager)
             @@shortcut_manager = manager
@@ -146,6 +157,12 @@ module CrymbleUI
         # Get the global shortcut manager
         def self.shortcut_manager : ShortcutManager
             @@shortcut_manager || raise "ShortcutManager not initialized"
+        end
+
+        # Get the global shortcut manager if set (nil before the renderer installs it). Lets callers
+        # branch on presence rather than catch the raise with a blanket rescue.
+        def self.shortcut_manager? : ShortcutManager?
+            @@shortcut_manager
         end
 
         # Set the global focus manager (called by renderer)
@@ -218,6 +235,21 @@ module CrymbleUI
         # which would hit the subclass's shadowed copy — the same trap App.class_var_increment_rebuild_count avoids).
         def self.increment_bind_stability_warnings : Nil
             @@bind_stability_warnings += 1
+        end
+
+        # SIBLING NO-OVERLAP diagnostic — overlaps found by the -Dverify_bounds re-layout check
+        # (layer_renderer's warn_sibling_overlaps). Zero in an un-flagged build; a spec asserts zero
+        # without having to scrape STDERR.
+        def self.sibling_overlap_warnings : Int32
+            @@sibling_overlap_warnings
+        end
+
+        def self.reset_sibling_overlap_warnings : Nil
+            @@sibling_overlap_warnings = 0
+        end
+
+        def self.increment_sibling_overlap_warnings : Nil
+            @@sibling_overlap_warnings += 1
         end
 
         # Measure text dimensions using global font
@@ -864,8 +896,59 @@ module CrymbleUI
         # sub-max "widest row". Such a widget must NOT take the can_skip_layout? relaxation branch (which
         # assumes a sub-max body is intrinsic and unaffected by more space); it skips only on identical
         # constraints. Default false. Override → true to opt out of relaxation.
+        #
+        # Declaring it is NOT enough on its own: the skip that matters happens at an ANCESTOR, which
+        # returns before this widget's layout() is ever reached. The closure below is what carries the
+        # declaration upward.
         def layout_depends_on_available_space? : Bool
             false
+        end
+
+        # The SUBTREE closure of layout_depends_on_available_space? — true iff this widget or any
+        # descendant re-arranges against the available space. This, not the own-only predicate, is what
+        # can_skip_layout? must consult: a container whose own size is sub-max would otherwise take the
+        # relaxation branch and never call the wrapping descendant that needed the re-flow (the filter
+        # chip list that stopped re-packing when its panel was widened).
+        #
+        # Recomputed bottom-up at the end of every non-skip layout(), where children's flags are already
+        # fresh. Sound by induction: a child either re-laid-out this pass, or skipped — and a skip means
+        # its subtree is unchanged, so its flag still holds. Any structural change marks the whole
+        # ancestor chain NeedsLayout (add_child/remove_child/clear_children), which precedes the skip check.
+        #
+        # Seeded TRUE so the unsafe direction (a stale false ⇒ a wrongly skipped re-flow) is unreachable
+        # by construction rather than by audit: a widget that has never completed a layout already fails
+        # can_skip_layout? via needs_layout?/@last_constraints, so the conservative seed costs nothing and
+        # the first real layout replaces it. zero_bounds! clears it — see there for why that is exact.
+        #
+        # Scope: the closure is over @children, so a widget that lays out NON-children is outside it and
+        # must opt out itself. The known cases are the popup/overlay ones — Menu (which also empties
+        # @children into @menu_items during perform_layout), PopupHost, Window's @overlays — and they are
+        # safe for a different reason than layer ownership (Menu owns no layer): Window#perform_layout
+        # lays out EVERY overlay on every pass, and App#prepare_layout only enters that pass when the
+        # root needs layout, so the root never takes a skip branch. A Menu skip could strand the popup's
+        # POSITION, never its internal arrangement.
+        getter? subtree_layout_depends_on_available_space : Bool = true
+
+        # Re-close the dependency over the CURRENT children. Widget#layout does this for every widget it
+        # lays out; this is the escape hatch for containers that populate @children outside
+        # add_child/remove_child (VirtualMatrix's virtualized cells), where the bottom-up pass can
+        # otherwise miss a child that appeared after the container was laid out.
+        protected def refresh_subtree_layout_dependency : Nil
+            was = @subtree_layout_depends_on_available_space
+            @subtree_layout_depends_on_available_space =
+                layout_depends_on_available_space? || @children.any?(&.subtree_layout_depends_on_available_space?)
+            return if was || !@subtree_layout_depends_on_available_space
+            # A false→true flip OUTSIDE a layout pass — the escape-hatch case, where cells arrive from
+            # pre_render_flush after this widget was already laid out — has to reach the ANCESTORS too.
+            # Writing the flag locally would leave one of them holding a stale false and skipping the
+            # subtree that just became re-flow-dependent: the very defect this closure exists to prevent,
+            # moved one level up. Stops at the first ancestor that already knows, so it costs O(depth)
+            # once, on the frame the wrapping descendant appears.
+            ancestor = @parent
+            while ancestor && !ancestor.subtree_layout_depends_on_available_space?
+                ancestor.mark_needs_layout
+                ancestor = ancestor.parent
+            end
         end
 
         # Check if layout can be skipped (incremental layout optimization).
@@ -881,7 +964,7 @@ module CrymbleUI
             old = @last_constraints
             return false if old.nil?
             return true if old == constraints
-            return false if layout_depends_on_available_space?
+            return false if subtree_layout_depends_on_available_space?
 
             sz = @bounds.size
             return false unless constraints.min_width <= sz.width <= constraints.max_width
@@ -980,6 +1063,41 @@ module CrymbleUI
             w
         end
 
+        # A widget moved within its parent. Its captured background belongs to the OLD spot, and the
+        # pixels it left behind belong to nobody: selective rendering repaints a widget where it now is,
+        # never where it was. Both layout paths funnel here so they cannot drift apart again.
+        private def note_position_change : Nil
+            self.background_backend = nil
+            mark_needs_render
+            # A widget that has never painted vacated nothing — and without this gate a FIRST layout is
+            # indistinguishable from a move (@bounds starts at Rect.zero), so every newly created widget
+            # would demand a buffer clear. That is not theoretical: VirtualMatrix lays out freshly
+            # created cells on the frames a scroll reveals them.
+            return if @last_rendered_layer_position.nil?
+            if l = containing_layer_for_repair
+                # Layers that own a geometry-repair mechanism opt out — a viewport cache recenters and
+                # skips per slot, an overlay repaints wholesale. Same exemption assess_rebuild_staleness
+                # applies for the same reason; clearing them here would throw away a pending blit-shift.
+                l.mark_needs_clear_and_render unless l.skip_rebuild_clear || l.viewport_cache
+            end
+        end
+
+        # The layer whose BUFFER holds this widget's pixels — strictly an ancestor's, never its own.
+        # This deliberately differs from propagate_to_layer, which answers a different question ("who do
+        # I mark dirty?"): for a widget that OWNS a layer, moving means the whole LAYER moved, which the
+        # compositor already handles by blitting it elsewhere. Its buffer is not stale; the container it
+        # moved WITHIN is the one holding the vacated pixels.
+        protected def containing_layer_for_repair : Layer?
+            current = @parent
+            while current
+                if l = current.layer
+                    return l
+                end
+                current = current.parent
+            end
+            nil
+        end
+
         # Layout widget and children at given position
         # Template method: handles skip check, then delegates to perform_layout
         def layout(constraints : BoxConstraints, position : Vec2)
@@ -989,20 +1107,18 @@ module CrymbleUI
                 old_pos = @bounds.position
                 @bounds = Rect.new(position, @bounds.size)
                 # Position changed → background_backend holds content from old location
-                if old_pos.x != position.x || old_pos.y != position.y
-                    self.background_backend = nil
-                    mark_needs_render
-                    # Pull-based: layer bounds auto-update via compute_bounds_for_layer
-                end
+                # (Pull-based: layer bounds auto-update via compute_bounds_for_layer.)
+                note_position_change if old_pos.x != position.x || old_pos.y != position.y
                 return
             end
 
             # Set state to Clean first (before perform_layout)
             @state = WidgetState::Clean
 
-            # Remember old size for change detection
+            # Remember old geometry for change detection
             old_width = @bounds.width
             old_height = @bounds.height
+            old_pos = @bounds.position
 
             # Delegate to subclass implementation
             perform_layout(constraints, position)
@@ -1013,6 +1129,10 @@ module CrymbleUI
             if old_width != @bounds.width || old_height != @bounds.height
                 mark_needs_render
             end
+
+            # …and when it merely MOVED. Compare the resulting bounds, not the `position` argument —
+            # self-positioning widgets (WindowPanel::Content) ignore it.
+            note_position_change if old_pos.x != @bounds.x || old_pos.y != @bounds.y
 
             # Verify bounds satisfaction: widget size must respect constraints.
             # Found by Z3 verification: Image, Expanded, TextInput violated this.
@@ -1029,11 +1149,26 @@ module CrymbleUI
               if @bounds.height < constraints.min_height - 0.5
                 STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} height #{@bounds.height.round(1)} < min #{constraints.min_height.round(1)}"
               end
+              # Containment, the dual of the sibling no-overlap check. Stacks size themselves from
+              # `measure` but advance their cursor by each child's post-layout bounds, so a child whose
+              # laid-out extent exceeds its measured one no longer overlaps its sibling — it escapes the
+              # PARENT instead, where a siblings-only check cannot see it.
+              @children.each do |child|
+                if child.bounds.right > @bounds.width + 0.5 || child.bounds.bottom > @bounds.height + 0.5
+                  STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} child " \
+                              "#{child.class.name.split("::").last}##{child.path_id} #{child.bounds} " \
+                              "overflows parent #{@bounds.size}"
+                end
+              end
             {% end %}
 
             # Save constraints and zoom epoch for next skip check
             @last_constraints = constraints
             @last_zoom_epoch = FontSizing.zoom_epoch
+
+            # Re-close the available-space dependency over the subtree, now that perform_layout has
+            # refreshed every child's own flag. Only on this path: a skipped subtree cannot have changed.
+            refresh_subtree_layout_dependency
         end
 
         # Coherent reposition for a blit-shift: translate this widget's bounds by (dx, dy) WITHOUT
@@ -1288,6 +1423,14 @@ module CrymbleUI
             end
         end
 
+        # The pull node backing get_primitives (nil before first render / after dispose). Exposed for
+        # tests asserting node IDENTITY survives a rebuild — a wrongfully-disposed live widget would
+        # recreate a DIFFERENT node, a regression the disposition oracle can't see (a disposed node
+        # self-heals on the next render, so widget_disposition stays non-nil).
+        def primitives_node : Cached(Array(DrawPrimitive))?
+            @primitives_node
+        end
+
         # === END PRIMITIVE-BASED RENDERING ===
 
         # === PER-WIDGET TEXTURE BACKEND ===
@@ -1368,6 +1511,13 @@ module CrymbleUI
             self.background_backend = nil
             self.widget_backend = nil
             @ancestry_bounds_valid = nil
+            # A zeroed subtree is not laid out, so it cannot re-arrange against available space: clearing
+            # the closure is exact, not merely cheap. It also matters — a collapsed section is never
+            # re-laid-out, so a retained `true` here would latch forever and cost every ancestor its
+            # relaxation skip for the rest of the session. Safe because the recursion below invalidates
+            # every descendant's constraints (nothing inside can skip) and re-expanding marks the whole
+            # ancestor chain NeedsLayout, which recomputes the closure before anyone reads it.
+            @subtree_layout_depends_on_available_space = false
             # A vacated footprint releases the cached pixels of the WHOLE subtree, not just
             # this node. Otherwise a descendant keeps stale bounds + a cached widget_backend,
             # and a viewport_cache layer's visit-all-visible pass re-blits it next frame as a
@@ -1747,6 +1897,25 @@ module CrymbleUI
             @background_backend = nil
             @rendered_to_layer_at_current_bounds = false
             @children.each(&.reset_render_caches_recursive)
+        end
+
+        # Dispose the pull-cache node(s) this widget owns — unregistering them from the global Sources
+        # (theme/zoom) their recompute captured, and dropping the enqueue closure that held this widget.
+        # The OVERRIDE SEAM: the base owns @primitives_node (the sole pull node today); a subclass that
+        # owns another (e.g. a future KeyedCached buffer that reads zoom) overrides as `super` + disposes
+        # its own. Contract: every pull node a widget owns is released here. Does NOT touch
+        # @background_backend (carried into the new tree by copy_state_from) or focus/parent.
+        def dispose_pull_nodes
+            @primitives_node.try(&.dispose)
+            @primitives_node = nil
+        end
+
+        # Release a whole DISCARDED subtree's pull nodes. Called on old_root after a rebuild and on a
+        # dropped overlay, so the immortal global Sources stop pinning the dead generation. Same
+        # children-walk shape as reset_render_caches_recursive.
+        def dispose_subtree
+            dispose_pull_nodes
+            @children.each(&.dispose_subtree)
         end
 
         # Debug: print widget tree

@@ -2,6 +2,8 @@ require "../csfml3/wrapper"
 require "../core/types"
 require "./render_backend"
 require "./opengl_bindings"
+require "./pixel_snap"
+require "./fbo_math"
 
 module CrymbleUI
   # SFML render backend wrapper
@@ -134,9 +136,10 @@ module CrymbleUI
       # Without this, text may render to wrong texture when multiple RenderTextures exist
       @texture.active = true
       sf_text = SF::Text.new(text, @font, size.round.to_u32)
-      # Round to integers to avoid GPU bilinear interpolation blur on glyph atlas
-      # (fractional coords from zoom centering arithmetic cause washed-out text — commit 20a683b)
-      sf_text.position = SF.vector2f(position.x.round.to_f32, position.y.round.to_f32)
+      # Snap to whole pixels to avoid GPU bilinear blur on the glyph atlas (20a683b).
+      # PixelSnap (not Float#round): its translation invariance keeps the widget-local
+      # (texture) and layer-local (direct) render paths on the same device pixel.
+      sf_text.position = SF.vector2f(PixelSnap.snap(position.x).to_f32, PixelSnap.snap(position.y).to_f32)
       sf_text.fill_color = to_sf_color(color)
       @texture.draw(sf_text)
     end
@@ -214,8 +217,11 @@ module CrymbleUI
         # → old widget content remains visible when restoring transparent background → double rendering!
         @texture.draw(sprite, SF::RenderStates.new(SF::BlendNone))
       else
-        # Graceful degradation: skip if incompatible backend type
-        return
+        # No-Fallbacks: a mismatched backend type is a broken invariant, not a
+        # degradable condition. One renderer pass is backend-homogeneous (single
+        # per-renderer backend factory), so this branch is unreachable in a correct
+        # build — make it loud, mirroring TestRenderBackend's raise.
+        raise "blit between mismatched backend types (#{source.class}) — one renderer pass is backend-homogeneous"
       end
     end
 
@@ -229,19 +235,19 @@ module CrymbleUI
         {% end %}
         # Create sprite with texture rectangle to sample just the region
         sprite = SF::Sprite.new(source.texture)
-        # RenderTexture.texture is Y-flipped (FBO), so invert Y coordinate for texture_rect
-        # If source texture height is H and we want row Y, in flipped texture it's at H-Y-height
-        source_height = source.texture.size.y.to_i
-        flipped_src_y = source_height - src_y - height
-        sprite.texture_rect = SF.int_rect(src_x, flipped_src_y, width, height)
-        # Flip sprite vertically since we're sampling from flipped coords
-        sprite.scale = SF.vector2f(1.0_f32, -1.0_f32)
-        sprite.position = SF.vector2f(dest_x.to_f32, (dest_y + height).to_f32)
+        # RenderTexture.texture is Y-flipped (FBO): FboMath computes the texture_rect
+        # Y invert, the scale sign that re-flips the sampled band back to top-down,
+        # and the draw Y. See the convention table in fbo_math.cr.
+        flip = FboMath.blit_region_flip(source.texture.size.y.to_i, src_y, height, dest_y)
+        sprite.texture_rect = SF.int_rect(src_x, flip.texture_rect_y, width, height)
+        sprite.scale = SF.vector2f(1.0_f32, flip.scale_y)
+        sprite.position = SF.vector2f(dest_x.to_f32, flip.draw_y.to_f32)
         # CRITICAL: Use BlendNone to REPLACE pixels (same reason as regular blit)
         @texture.draw(sprite, SF::RenderStates.new(SF::BlendNone))
       else
-        # Graceful degradation: skip if incompatible backend type
-        return
+        # No-Fallbacks: a mismatched backend type is a broken invariant, not a
+        # degradable condition (see #blit). Make it loud.
+        raise "blit between mismatched backend types (#{source.class}) — one renderer pass is backend-homogeneous"
       end
     end
 
@@ -303,11 +309,10 @@ module CrymbleUI
       display = ENV["DISPLAY"]?
       return if display.nil? || display.empty?
 
-      begin
-        LibGL.disable(LibGL::GL_SCISSOR_TEST)
-      rescue
-        # Silently ignore OpenGL errors
-      end
+      # No-Fallbacks: GL rescue deleted — LibGL.disable is pure FFI and cannot raise
+      # a catchable Crystal exception; the rescue only ever masked real invariant
+      # breaks. The DISPLAY guard (headless skip) is retained.
+      LibGL.disable(LibGL::GL_SCISSOR_TEST)
     end
 
     # Resume scissor clipping after suspend_clip
@@ -316,12 +321,10 @@ module CrymbleUI
       display = ENV["DISPLAY"]?
       return if display.nil? || display.empty?
 
-      begin
-        if @clip_stack.last?
-          LibGL.enable(LibGL::GL_SCISSOR_TEST)
-        end
-      rescue
-        # Silently ignore OpenGL errors
+      # No-Fallbacks: GL rescue deleted — LibGL.enable is pure FFI and cannot raise
+      # a catchable Crystal exception. The DISPLAY guard (headless skip) is retained.
+      if @clip_stack.last?
+        LibGL.enable(LibGL::GL_SCISSOR_TEST)
       end
     end
 
@@ -332,27 +335,29 @@ module CrymbleUI
       display = ENV["DISPLAY"]?
       return if display.nil? || display.empty?
 
-      begin
-        if clip = @clip_stack.last?
-          # Enable scissor test
-          LibGL.enable(LibGL::GL_SCISSOR_TEST)
+      # No-Fallbacks: the GL rescue is deleted (silent-swallow -> loud-raise). GL's
+      # real "no active context" failure was never a catchable Crystal exception, so
+      # the rescue only ever masked genuine invariant breaks. The one surviving
+      # RAISABLE statement is the UInt32 -> Int32 conversion of @texture.size.y at the
+      # scissor_gl_y call site below: a texture height overflowing Int32 is a broken
+      # invariant that SHOULD be loud. The DISPLAY guard above is retained (headless
+      # never executes this body).
+      if clip = @clip_stack.last?
+        # Enable scissor test
+        LibGL.enable(LibGL::GL_SCISSOR_TEST)
 
-          # Convert clip rect to OpenGL coordinates
-          # OpenGL Y axis is bottom-to-top, our system is top-to-bottom
-          # For RenderTexture (FBO), Y is already flipped, so we need to flip again
-          texture_height = @texture.size.y
-          gl_x = clip.left
-          gl_y = (texture_height - (clip.top + clip.height)).to_i32 # Flip Y axis
-          gl_width = clip.width
-          gl_height = clip.height
+        # Convert clip rect to OpenGL coordinates. GL's origin is bottom-left, our
+        # clip band is top-down; FboMath.scissor_gl_y performs the flip. The UInt32
+        # texture height converts to Int32 here, at the call site.
+        gl_x = clip.left
+        gl_y = FboMath.scissor_gl_y(@texture.size.y.to_i32, clip.top, clip.height)
+        gl_width = clip.width
+        gl_height = clip.height
 
-          LibGL.scissor(gl_x, gl_y, gl_width, gl_height)
-        else
-          # No clip region - disable scissor test
-          LibGL.disable(LibGL::GL_SCISSOR_TEST)
-        end
-      rescue
-        # Silently ignore OpenGL errors (e.g., no active context)
+        LibGL.scissor(gl_x, gl_y, gl_width, gl_height)
+      else
+        # No clip region - disable scissor test
+        LibGL.disable(LibGL::GL_SCISSOR_TEST)
       end
     end
 

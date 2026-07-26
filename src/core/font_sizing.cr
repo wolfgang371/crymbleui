@@ -79,6 +79,12 @@ module CrymbleUI
       @@zoom_index_source.get
     end
 
+    # Observability: how many pull nodes currently depend on the zoom Source (see Theme's twin). A leak
+    # shows as this growing per rebuild; the dispose-on-rebuild fix keeps it steady.
+    def self.zoom_source_dependent_count : Int32
+      @@zoom_index_source.dependent_count
+    end
+
     # Get current zoom epoch (increments on every zoom change)
     def self.zoom_epoch : UInt64
       @@zoom_epoch

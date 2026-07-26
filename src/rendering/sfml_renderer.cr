@@ -10,6 +10,7 @@ require "../input/shortcut_manager"
 require "../input/focus_manager"
 require "../widgets/window_panel"
 require "./sfml_paint_context"
+require "./pixel_snap"
 require "./sfml_font"
 require "./sfml_clipboard"
 require "./draw_primitive"
@@ -36,7 +37,11 @@ module CrymbleUI
     # Track window title to avoid setting every frame
     @current_title : String = ""
 
-    # Texture cache for DrawImage primitives (keyed by file path)
+    # Texture cache for DrawImage primitives (keyed by file path).
+    # BLESSED (instrument_tripwires_spec, guard (d)): this is a file-path->image
+    # texture cache, NOT a glyph/font cache. The (d) tripwire only forbids a
+    # class-var FONT map (the @@font_cache stale-glyph-atlas incident, fix 4a7b4a5);
+    # this instance-var image cache is legitimate — do not "fix" it away.
     @texture_cache = Hash(String, SF::Texture).new
 
     # Track last mouse move time for event coalescing
@@ -236,8 +241,8 @@ module CrymbleUI
         if owner = layer.owner_widget
           next if owner.skip_render?
         end
-        clip_w = layer.bounds.width.ceil.to_i
-        clip_h = layer.bounds.height.ceil.to_i
+        clip_w = PixelSnap.cover(layer.bounds.width)
+        clip_h = PixelSnap.cover(layer.bounds.height)
         sfml_backend = backend.as(CrSFMLBackend)
         sprite = SF::Sprite.new(sfml_backend.texture)
         # Viewport-cache layers paint at +cache-margin inside their
@@ -246,7 +251,9 @@ module CrymbleUI
         # content by the cache margin.
         src_x, src_y = layer.viewport_cache ? layer.viewport_sample_origin(sfml_backend.width, sfml_backend.height, clip_w, clip_h) : {0, 0}
         sprite.texture_rect = SF.int_rect(src_x, src_y, clip_w, clip_h)
-        sprite.position = SF.vector2f(layer.bounds.x.round(:ties_away).to_f32, layer.bounds.y.round(:ties_away).to_f32)
+        # PixelSnap.snap == round(:ties_away) for v >= 0 and, unlike it, stays
+        # translation-invariant across zero (panels are draggable to negative x).
+        sprite.position = SF.vector2f(PixelSnap.snap(layer.bounds.x).to_f32, PixelSnap.snap(layer.bounds.y).to_f32)
         rt.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
       end
       rt.display
@@ -267,19 +274,19 @@ module CrymbleUI
       LayerRenderer.frame_composite_count += 1 # Instrumentation
 
       # Clip sprite to visible layer bounds (texture may be larger due to buffer expansion)
-      # Use ceil() to avoid clipping bottom/right edge when bounds are fractional
-      clip_width = layer.bounds.width.ceil.to_i
-      clip_height = layer.bounds.height.ceil.to_i
+      # Conservative extents (PixelSnap.cover) avoid clipping the bottom/right edge at fractional bounds
+      clip_width = PixelSnap.cover(layer.bounds.width)
+      clip_height = PixelSnap.cover(layer.bounds.height)
 
       # Clip to ancestor panel bounds — layers must not extend beyond their panel
       if clip_bounds = find_descendant_clip_bounds(layer)
         clip_right = clip_bounds.x + clip_bounds.width
         clip_bottom = clip_bounds.y + clip_bounds.height
         if layer.bounds.x + clip_width > clip_right
-          clip_width = Math.max(0, (clip_right - layer.bounds.x).ceil.to_i)
+          clip_width = Math.max(0, PixelSnap.cover(clip_right - layer.bounds.x))
         end
         if layer.bounds.y + clip_height > clip_bottom
-          clip_height = Math.max(0, (clip_bottom - layer.bounds.y).ceil.to_i)
+          clip_height = Math.max(0, PixelSnap.cover(clip_bottom - layer.bounds.y))
         end
       end
 
@@ -297,7 +304,7 @@ module CrymbleUI
         # Standard compositing: simple sprite blit
         sprite = SF::Sprite.new(backend.texture)
         sprite.texture_rect = SF.int_rect(0, 0, clip_width, clip_height)
-        sprite.position = SF.vector2f(layer.bounds.x.round(:ties_away).to_f32, layer.bounds.y.round(:ties_away).to_f32)
+        sprite.position = SF.vector2f(PixelSnap.snap(layer.bounds.x).to_f32, PixelSnap.snap(layer.bounds.y).to_f32)
 
         # Apply layer opacity (0.0-1.0) during compositing
         if layer.opacity < 1.0
@@ -362,18 +369,18 @@ module CrymbleUI
     private def composite_viewport_cache_layer(window : SF::RenderWindow, layer : Layer, backend : CrSFMLBackend, viewport_width : Int32, viewport_height : Int32)
       LayerRenderer.frame_viewport_cache_count += 1 # Instrumentation
 
-      dest_x = layer.bounds.x.round(:ties_away).to_f32
-      dest_y = layer.bounds.y.round(:ties_away).to_f32
+      dest_x = PixelSnap.snap(layer.bounds.x).to_f32
+      dest_y = PixelSnap.snap(layer.bounds.y).to_f32
 
       # Clip to ancestor panel bounds — layers must not extend beyond their panel
       if clip_bounds = find_descendant_clip_bounds(layer)
         clip_right = clip_bounds.x + clip_bounds.width
         clip_bottom = clip_bounds.y + clip_bounds.height
         if dest_x + viewport_width > clip_right
-          viewport_width = Math.max(0, (clip_right - dest_x).ceil.to_i)
+          viewport_width = Math.max(0, PixelSnap.cover(clip_right - dest_x))
         end
         if dest_y + viewport_height > clip_bottom
-          viewport_height = Math.max(0, (clip_bottom - dest_y).ceil.to_i)
+          viewport_height = Math.max(0, PixelSnap.cover(clip_bottom - dest_y))
         end
       end
 
@@ -1057,9 +1064,10 @@ module CrymbleUI
       when DrawText
         # Draw text at position
         text = SF::Text.new(primitive.text, @default_font, primitive.size.round.to_u32)
-        # Round to integers to avoid GPU bilinear interpolation blur on glyph atlas
-        # (see commit 20a683b — fractional coords cause washed-out text)
-        text.position = SF.vector2f(primitive.position.x.round.to_f32, primitive.position.y.round.to_f32)
+        # Snap to whole pixels (glyph-atlas blur guard) via PixelSnap — translation-
+        # invariant, unlike the ties-even Float#round this previously used (the same
+        # parity class as the cursor-cell text jitter).
+        text.position = SF.vector2f(PixelSnap.snap(primitive.position.x).to_f32, PixelSnap.snap(primitive.position.y).to_f32)
         text.fill_color = to_sf_color(primitive.color)
         target.draw(text)
       when DrawLine

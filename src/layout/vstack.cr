@@ -111,9 +111,11 @@ module CrymbleUI
             y_offset = padding
             @children.each do |child|
                 child_constraints = BoxConstraints.loose(Size.new(inner_width, Float64::INFINITY))
-                child_size = child.measure(child_constraints)
                 child.layout(child_constraints, Vec2.new(padding, y_offset))
-                y_offset += child_size.height + spacing
+                # Advance by what the child ACTUALLY occupies, not a second measure of it. A skipped
+                # child keeps its previous size, and a fresh measure can disagree with it — that gap is
+                # what let a stale subtree be overrun by the sibling below it. Also one measure fewer.
+                y_offset += child.bounds.height + spacing
             end
         end
 
@@ -161,9 +163,8 @@ module CrymbleUI
                 else
                     # Use INFINITY for intrinsic-sized widgets (buttons, labels, etc.)
                     child_constraints = BoxConstraints.loose(Size.new(inner_width, Float64::INFINITY))
-                    child_size = child.measure(child_constraints)
                     child.layout(child_constraints, Vec2.new(padding, y_offset))
-                    y_offset += child_size.height + spacing
+                    y_offset += child.bounds.height + spacing # actual extent, see perform_layout_simple
                 end
             end
         end

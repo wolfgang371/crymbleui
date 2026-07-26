@@ -173,7 +173,10 @@ module CrymbleUI
       FRAME_HEIGHT_BASE * FontSizing.zoom_factor
     end
 
-    private def grid_spacing : Int32
+    # Inter-cell gap in device pixels. Public (like the sibling ruler_*/sticky_* geometry
+    # helpers) because the cursor overlay must subtract it to size the cell-flash to the
+    # cell — cells are laid out at pitch MINUS grid_spacing (update_visible_cells).
+    def grid_spacing : Int32
       (GRID_SPACING_BASE * FontSizing.zoom_factor).round.to_i32
     end
 
@@ -349,6 +352,8 @@ module CrymbleUI
 
     # Shorthand for the lib's O(1) shifted-membership value (cached inverse permutation).
     alias ShiftedSet = Widgets::VirtualMatrix::StickyMath::ShiftedSet
+    # Shorthand for the per-axis compound-disposition context (see StickyMath.compound_axis).
+    alias AxisView = Widgets::VirtualMatrix::StickyMath::AxisView
 
     # -- Group 3: Viewport sticky results (keyed on {num_shifted, index_beyond}) --
     @last_col_sticky_key : Tuple(Int32, Int32?)? = nil
@@ -1189,8 +1194,8 @@ module CrymbleUI
       # sticky_col_layer + the sticky-row corner strip) untouched, so re-generating them each drag frame
       # is wasted font work AND (with reposition_sticky_cells' per-layer clear) would needlessly wake
       # their layer. The corner column/row labels only reposition when a STICKY line is resized. Both
-      # callers are the resize path, so resize_axis is set; scroll auto-invalidates via the scroll_offset
-      # Source, never through here — the else is a defensive full invalidate.
+      # callers are the resize path, so resize_axis is always Col/Row (scroll auto-invalidates via the
+      # scroll_offset Source, never through here) — the else asserts that (see the proof there).
       case resize_axis
       when ResizeAxis::Col
         @col_ruler_widget.try &.invalidate_primitive_cache
@@ -1199,10 +1204,11 @@ module CrymbleUI
         @row_ruler_widget.try &.invalidate_primitive_cache
         @corner_row_strip_widget.try &.invalidate_primitive_cache if resize_index < sticky_row_count
       else
-        @col_ruler_widget.try &.invalidate_primitive_cache
-        @row_ruler_widget.try &.invalidate_primitive_cache
-        @corner_ruler_widget.try &.invalidate_primitive_cache
-        @corner_row_strip_widget.try &.invalidate_primitive_cache
+        # Unreachable: the flush gate @pending_resize_update is set ONLY inside on_mouse_move's
+        # `resize_axis != None` guard and is cleared before drag-end resets resize_axis; the drag-end
+        # direct call also runs before that reset. So resize_axis is always Col/Row here — a None means
+        # a future caller invoked this off the resize path, which must surface, not silently over-invalidate.
+        raise "mark_ruler_widgets_dirty reached with resize_axis=#{resize_axis} (expected Col or Row)"
       end
     end
 
@@ -1352,12 +1358,21 @@ module CrymbleUI
       end
       @active_cells.clear
 
-      # Clear every VM layer to erase stale pixels from the pre-invalidate state.
-      # The cursor overlay in particular had "cursor overlay NOT cleared — it has
-      # CachePolicy::Never and regenerates fresh" — but the widget only paints its
-      # CURRENT highlight region; everything outside stays untouched. Old pixels
-      # from a wider (pre-invalidate) band persist → visible ghost row / column
-      # cursor extending past the new data extent.
+      clear_all_vm_layers_for_invalidate
+
+      @force_cell_update = true
+    end
+
+    # Clear every VM-owned layer to erase pixels painted under a superseded adapter
+    # state. ONE owner of the layer list — used by flush_invalidate_all (announced
+    # structural changes) and by the reconcile adapter-swap rule in copy_state_from.
+    # The cursor overlay is easy to overlook (CachePolicy::Never, "regenerates fresh")
+    # — but the widget only paints its CURRENT highlight region; everything outside
+    # stays untouched, so old pixels from a wider band persist as a ghost cursor
+    # extending past the new data extent unless cleared here.
+    # (handle_zoom_change still keeps its own near-copy of this list — without the
+    # cursor overlay; routing it through here is a flagged follow-up.)
+    private def clear_all_vm_layers_for_invalidate
       @content_layer.try(&.mark_needs_clear_and_render)
       @cursor_overlay_layer.try(&.mark_needs_clear_and_render)
       if sv = @content_scroll_view
@@ -1366,8 +1381,6 @@ module CrymbleUI
         sv.sticky_corner_layer.try(&.mark_needs_clear_and_render)
       end
       @layer_widgets_need_sync = true
-
-      @force_cell_update = true
     end
 
     # Cell-level invalidation: destroy only the invalidated cells from @active_cells
@@ -1460,10 +1473,10 @@ module CrymbleUI
       # (no ruler), but scroll_offset is in content-space (includes ruler width/height).
       ruler_x = ruler_col_width_pixels.to_i32
       ruler_y = ruler_row_height_pixels.to_i32
-      min_x = {(scroll_offset.x.floor.to_i32 - ruler_x), 0_i32}.max
-      max_x = {((scroll_offset.x + viewport_width).ceil.to_i32 - ruler_x), 0_i32}.max
-      min_y = {(scroll_offset.y.floor.to_i32 - ruler_y), 0_i32}.max
-      max_y = {((scroll_offset.y + viewport_height).ceil.to_i32 - ruler_y), 0_i32}.max
+      min_x = {(scroll_offset.x.floor.to_i32 - ruler_x), 0_i32}.max # snap-exempt: content-space visible-range
+      max_x = {((scroll_offset.x + viewport_width).ceil.to_i32 - ruler_x), 0_i32}.max # snap-exempt: content-space visible-range
+      min_y = {(scroll_offset.y.floor.to_i32 - ruler_y), 0_i32}.max # snap-exempt: content-space visible-range
+      max_y = {((scroll_offset.y + viewport_height).ceil.to_i32 - ruler_y), 0_i32}.max # snap-exempt: content-space visible-range
 
       # O(log n) bsearch to determine boundary key
       col_num_shifted = col_cumulative.bsearch_index { |p| p >= min_x } || col_scroll_order.size
@@ -1942,6 +1955,12 @@ module CrymbleUI
         _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
         File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(full): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size} new=#{new_cells_count || 0} destroyed=#{cells_to_remove.try(&.size) || 0}" }
       {% end %}
+      # Cells enter and leave @children here, not via add_child/remove_child, and this runs from
+      # pre_render_flush as well as from perform_layout — so the bottom-up recompute in Widget#layout
+      # can miss a cell that appeared after this matrix was laid out. Re-close the dependency over the
+      # current cell set: cell_paint is app-supplied, so the library cannot assume a cell never holds a
+      # wrapping layout.
+      refresh_subtree_layout_dependency
     end
 
     # Repopulate all layer widget lists from @active_cells, assigning each cell
@@ -2292,7 +2311,8 @@ module CrymbleUI
     # Invalidated on rebuild:
     #   - All dimension caches (sizes, cumulative arrays, sticky results)
     #   - Active cells (force_cell_update triggers fresh creation)
-    #   - Content layer buffer (cleared if grid dimensions changed)
+    #   - VM layer buffers: cleared on an adapter-instance swap, or via the pending
+    #     flush on an announced (or contract-violating) structural change
     def copy_state_from(old_widget : Widget)
       auto_copy_reconcile_properties(old_widget)
       super
@@ -2313,16 +2333,52 @@ module CrymbleUI
         # transition (new instance defaults @last_zoom_factor = 1.0)
         @last_zoom_factor = old.@last_zoom_factor
 
-        # Preserve col/row size arrays if grid dimensions match (drag resize survives rebuild).
-        # If dimensions changed (adapter reconfigured), keep the fresh sizes from get_sizes.
+        # Transfer pending invalidation FIRST (e.g. an announce that fired on the old
+        # widget before reconciliation rebound the adapter callbacks) — the contract
+        # check below must see it. Without the transfer, flush_invalidate_all never
+        # runs → layers keep stale pixels.
+        @pending_invalidate_all = true if old.@pending_invalidate_all
+        @pending_cell_invalidations.concat(old.@pending_cell_invalidations)
+
+        # SIZE-CARRY (UX state, not the clear invariant): user drag-resize survives a
+        # rebuild only while the grid dimensions still match — identity-INDEPENDENT, so
+        # fresh-adapter-per-build apps keep their resize state too. On a dims drift keep
+        # the constructor's fresh get_sizes arrays instead: a carried short array would
+        # raise IndexError in the scroll clamp below (see fit_custom_sizes' history note).
         if old.rows == @rows && old.cols == @cols
           @col_widths = old.col_widths
           @row_heights = old.row_heights
-        else
-          # Grid dimensions changed — clear content layer to erase stale pixels from old layout.
-          # Without this, the reconciled buffer retains old cell content (e.g. header columns)
-          # that "shines through" where new cells don't cover the same positions.
-          @content_layer.try(&.mark_needs_clear_and_render)
+        end
+
+        # CLEAR (the invariant: no retained buffer pixel outlives its painter).
+        if !old.adapter.same?(@adapter)
+          # A swapped-in adapter instance has no announce history — deliberate heuristic
+          # default: clear everything painted under the old adapter. The sizes carried
+          # above survive (no flush runs, so no get_sizes overwrite).
+          clear_all_vm_layers_for_invalidate
+        elsif (old.rows != @rows || old.cols != @cols) && !@pending_invalidate_all
+          # Same instance, dims drifted, nothing announced: MatrixAdapter contract
+          # violation. Structural changes (dims, sizes, merges, scroll order) must be
+          # announced via invalidate_all! at mutation time, before requesting the
+          # rebuild that shows them. NOTE: this canary sees DIMS-drifting violations
+          # only — a same-dims structural change is invisible at reconcile time.
+          msg = "MatrixAdapter contract violation: #{@adapter.class} changed structure " \
+                "(#{old.rows}x#{old.cols} -> #{@rows}x#{@cols}) behind matrix " \
+                "'#{id || "unnamed"}' without invalidate_all! — announce structural " \
+                "changes before requesting the rebuild; see VIRTUAL_MATRIX_ARCHITECTURE.md " \
+                "\"Push-Based Adapter Invalidation\""
+          {% if flag?(:verify_bounds) %}
+            raise msg
+          {% else %}
+            # Release: degrade = late announce, routed through the ONE owner — the
+            # pending flush clears every VM layer and re-reads dims + sizes. Pair the
+            # flag with mark_needs_layout exactly like the announce callback (on_all):
+            # the flush only runs when the content layer renders, and this rebuild has
+            # nothing else that reliably wakes it.
+            STDERR.puts "[MATRIX_ADAPTER_CONTRACT] #{msg}"
+            @pending_invalidate_all = true
+            mark_needs_layout
+          {% end %}
         end
         @cached_total_width = nil
         @cached_total_height = nil
@@ -2340,12 +2396,6 @@ module CrymbleUI
           scroll_offset.x.clamp(0.0, max_content_scroll_x),
           scroll_offset.y.clamp(0.0, max_content_scroll_y)
         ))
-
-        # Transfer pending invalidation (e.g. from a cross-owner data change that
-        # fired on the old widget before reconciliation rebound the adapter callbacks).
-        # Without this, flush_invalidate_all never runs → layers keep stale pixels.
-        @pending_invalidate_all = true if old.@pending_invalidate_all
-        @pending_cell_invalidations.concat(old.@pending_cell_invalidations)
 
         # Rebind adapter callbacks to this (new) widget instance
         if adapter = @adapter

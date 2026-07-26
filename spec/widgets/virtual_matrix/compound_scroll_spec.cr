@@ -1151,4 +1151,57 @@ describe CrymbleUI::VirtualMatrix do
         failures.first(5).join("\n")
     end
   end
+
+  describe "Compound park predicate quantization basis" do
+    # The park decision ("all constituent columns scrolled behind the sticky
+    # boundary") and the per-constituent visibility gate are the same
+    # content-space expression on the QUANTIZED scroll (whole content px), in
+    # BOTH computation paths (reposition_sticky_cells and the blit-plan mirror).
+    # Pin: the park disposition may only change when floor(scroll.x) changes.
+    # If any of the four predicate sites drifts to a different basis (e.g. raw
+    # scroll), the disposition flips WITHIN an integer scroll cell at the
+    # fractional boundary this fixture constructs, and the scan below goes red.
+    it "park disposition is constant within each whole-scroll cell at a fractional boundary" do
+      merges = [{ {0, 1}, {0, 4} }]
+      adapter = CompoundScrollAdapter.new(5, 20,
+        col_scroll_order: ((1..19).to_a + [0]),
+        row_scroll_order: [1, 2, 3, 4, 0],
+        merges: merges)
+      # Give the STICKY column (col 0) a fractional pixel width: 4.975 units =
+      # 102.5px pitch — the park boundary inherits this fraction.
+      adapter.custom_col_widths =
+        Array.new(20, CrymbleUI::VirtualMatrix::DEFAULT_COLUMN_WIDTH).tap { |a| a[0] = 4.975 }
+      matrix, _, constraints = setup_compound_matrix(adapter, 800.0, 300.0, show_rulers: false)
+
+      # Discriminating precondition: the sticky boundary must be FRACTIONAL.
+      # Constituent cumulative widths are whole (Int32 size cache), so the park
+      # boundary inherits exactly the sticky width's fraction — with a whole
+      # boundary every basis agrees and this pin would be vacuous.
+      sticky_w = matrix.sticky_col_width_pixels
+      sticky_w.should_not eq(sticky_w.floor)
+
+      parked = ->(s : Float64) do
+        matrix.scroll_offset = CrymbleUI::Vec2.new(s, 0.0)
+        matrix.layout(constraints, CrymbleUI::Vec2.zero)
+        cell = (1..4).each.compact_map { |c| matrix.active_cells[{0, c}]? }.first?
+        cell.nil? || cell.bounds.width <= 1.0 || cell.bounds.x < -100.0
+      end
+
+      # Scan a band that provably contains the park boundary (~411–414 for this
+      # geometry). (a) every fractional scroll must agree with its whole part;
+      # (b) the transition must actually occur inside the band, or the scan
+      # proved nothing (validate the instrument).
+      whole_dispositions = (400..425).map do |whole|
+        at_whole = parked.call(whole.to_f64)
+        [0.3, 0.7].each do |frac|
+          parked.call(whole + frac).should eq(at_whole),
+            "park disposition flipped between scroll #{whole} and #{whole + frac} — " \
+            "a predicate site is not on the shared whole-scroll quantization basis"
+        end
+        at_whole
+      end
+      whole_dispositions.uniq.size.should eq(2),
+        "scan band never crossed the park boundary — fixture geometry no longer straddles it"
+    end
+  end
 end

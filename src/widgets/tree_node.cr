@@ -255,7 +255,12 @@ module CrymbleUI
           ))
           child.layout(child_constraints, Vec2.new(INDENT, y_offset))
           child_size = child.measure(child_constraints)
-          y_offset += child_size.height
+          # Position advances by what the child ACTUALLY occupies (a skipped child keeps its previous
+          # size, which a fresh measure can contradict — that gap is how a stale subtree ends up
+          # overrun). The remaining-height BUDGET stays measure-derived: it becomes the next child's
+          # max_height, and `measure` is bounded by it while `bounds` is not, so feeding bounds back in
+          # would let one oversized child clamp the budget to zero and starve every later sibling.
+          y_offset += child.bounds.height
           remaining_height = (remaining_height - child_size.height).clamp(0.0, Float64::MAX)
         end
       else

@@ -43,7 +43,6 @@ module CrymbleUI
     # Layout constants
     BORDER_WIDTH = 1.0
     PADDING      = 4.0
-    MIN_WIDTH = 80.0
     FONT_SCALE = 0  # Default font scale (uses FontSizing)
 
     # Items in the dropdown
@@ -90,6 +89,17 @@ module CrymbleUI
     # Selection callback
     @on_select : Proc(Int32, String, Nil)?
 
+    # Lazy-items mode (for large dropdowns, e.g. reference cells): a provider produces the item list +
+    # per-item colors + selected index + per-item payloads only on FIRST expand, so the collapsed cell
+    # stays O(1). @collapsed_text is the pre-expand display; @lazy_payloads is the caller's payload per
+    # item (e.g. a reference rank), which select_and_close delivers AS the block's first arg (in place
+    # of the index) and which is CARRIED through reconcile — so a pick after a rebuild-while-open still
+    # resolves the item the (carried) popup shows to the correct payload.
+    alias LazyItems = NamedTuple(items: Array(String), colors: Array(Color)?, selected: Int32, payloads: Array(Int32))
+    @lazy_provider : (-> LazyItems)? = nil
+    @collapsed_text : String? = nil
+    @lazy_payloads : Array(Int32)? = nil
+
     # Collapsed state (inverse of popup_open for clarity)
     def collapsed? : Bool
       !popup_open
@@ -115,6 +125,8 @@ module CrymbleUI
     def selected_value : String?
       if item_index?(selected_index)
         @items[selected_index]
+      elsif @items.empty? && (ct = @collapsed_text)
+        ct # lazy mode, pre-expand: the caller-supplied display (no item list built yet)
       else
         custom_text # editable free-typed value committed out of @items range, or nil
       end
@@ -206,6 +218,29 @@ module CrymbleUI
       @editable = editable
       @on_select = on_select
       # NO TextInput child - it's in the popup when expanded
+    end
+
+    # Lazy-items constructor. The collapsed cell shows `selected_text` (O(1)); the item list,
+    # per-item colors, selected index, and per-item payloads are produced by `items_provider` only on
+    # FIRST expand. `block` receives (payload, value) of the picked item — the payload rides reconcile,
+    # so a pick after a rebuild-while-open still resolves to the item the carried popup showed.
+    def initialize(
+      selected_text : String,
+      items_provider : -> LazyItems,
+      background_color : Color? = nil,
+      id : String? = nil,
+      &block : Int32, String -> Nil
+    )
+      @text_background_color = Source(Color?).new(nil)
+      @text_background_colors = Source(Array(Color)?).new(nil)
+      @background_color = Source(Color?).new(background_color)
+      super(id: id)
+      @items = [] of String # filled on first expand()
+      @collapsed_text = selected_text
+      @lazy_provider = items_provider
+      @selected_index = Source(Int32).new(0)
+      @_build_selected_index = 0
+      @on_select = block
     end
 
     # Override label for path_id generation
@@ -310,6 +345,20 @@ module CrymbleUI
       return unless enabled? # disabled combos don't open
       return if popup_open
 
+      # Lazy mode: build the (potentially large) item list, colors, selection, and payloads NOW —
+      # once, on first open — so the collapsed cell never paid for it. Idempotent via @items.empty?.
+      if (provider = @lazy_provider) && @items.empty?
+        r = provider.call
+        # One payload per item — select_and_close indexes payloads by the picked item's index, so a
+        # mismatch would deliver the wrong payload (or none). Assert the contract loudly rather than
+        # fall back to a bare index (which reads as a valid payload). Same for per-item colors.
+        raise ArgumentError.new("ComboBox lazy provider: payloads.size must equal items.size") if r[:payloads].size != r[:items].size
+        raise ArgumentError.new("ComboBox lazy provider: colors.size must equal items.size") if (c = r[:colors]) && c.size != r[:items].size
+        @items = r[:items]
+        self.text_background_colors = r[:colors]
+        self.selected_index = r[:selected]
+        @lazy_payloads = r[:payloads]
+      end
 
       popup = ComboBoxPopup.new(
         items: @items,
@@ -391,33 +440,16 @@ module CrymbleUI
       # An out-of-@items index marks a free-typed (editable) value: keep it for
       # the collapsed display since it isn't a list item. A normal pick clears it.
       self.custom_text = item_index?(index) ? nil : value
-      @on_select.try(&.call(index, value))
-      collapse
-    end
-
-    # Position popup below ComboBox, flip above if near window bottom
-    private def position_popup
-      if popup = @current_popup
-        abs = absolute_bounds
-        min_width = @explicit_width || abs.width
-        natural_size = popup.measure(BoxConstraints.loose(Size.new(Float64::INFINITY, 200.0)))
-        popup_width = {min_width, natural_size.width}.max
-        popup_constraints = BoxConstraints.loose(Size.new(popup_width, 200.0))
-        popup_size = popup.measure(popup_constraints)
-
-        popup_y = abs.y + abs.height
-        if window = find_window
-          if popup_y + popup_size.height > window.bounds.height
-            popup_y = abs.y - popup_size.height
-          end
-        end
-        popup.layout(popup_constraints, Vec2.new(abs.x, popup_y))
+      # Lazy mode delivers the item's PAYLOAD (e.g. a reference rank) rather than its list index — the
+      # payloads ride reconcile alongside the popup, so this stays correct after a rebuild-while-open.
+      # payloads is item-aligned (asserted in expand) and lazy mode is non-editable, so a real item
+      # index is always in range; a CUSTOM_INDEX only reaches here in editable (non-lazy) mode.
+      if (payloads = @lazy_payloads) && item_index?(index)
+        @on_select.try(&.call(payloads[index], value))
+      else
+        @on_select.try(&.call(index, value))
       end
-    end
-
-    # Handle item selection from popup
-    private def handle_item_selected(index : Int32, value : String)
-      select_and_close(index, value)
+      collapse
     end
 
     # State preservation for DSL reconciliation
@@ -437,6 +469,13 @@ module CrymbleUI
       # (Can't be automated - closures capture specific object references)
       if popup_open && (popup = old.@current_popup)
         @current_popup = popup
+        # Lazy mode: carry the OLD provider run's items + payloads so the still-open popup stays
+        # consistent — the new instance's provider hasn't run (expand is guarded while open), and a
+        # pick must map the shown item to the payload from the run that BUILT that popup.
+        if old.@lazy_provider
+          @items = old.@items
+          @lazy_payloads = old.@lazy_payloads
+        end
         # Re-wire callbacks (closures capture old widget instance)
         popup.on_select = ->(idx : Int32, val : String) {
           select_and_close(idx, val)

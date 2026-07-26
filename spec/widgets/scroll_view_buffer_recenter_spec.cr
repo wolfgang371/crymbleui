@@ -44,7 +44,7 @@ describe "ScrollView buffer recenter" do
       app.root_widget = window
 
       renderer.render_frame(app)
-      sample_x = 25
+      sample_x = 12  # button BG left of the centered label — robust to text-ink snapping (re-baselined: headless draw_text now snaps like SFML)
       sample_y = 20
 
       # Verify initial state: RED
@@ -112,7 +112,7 @@ describe "ScrollView buffer recenter" do
       renderer.render_frame(app)
 
       # Sample point near top of content area (same as working test)
-      sample_x = 25
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
       sample_y = 20
 
       # Verify initial state shows RED
@@ -169,7 +169,7 @@ describe "ScrollView buffer recenter" do
       renderer.render_frame(app)
 
       # Find spacing pixels (not button color) before scroll
-      sample_x = 25
+      sample_x = 12  # button BG, off the label ink (see first re-baseline note)
       spacing_y_positions = [] of Int32
 
       (10..280).each do |y|

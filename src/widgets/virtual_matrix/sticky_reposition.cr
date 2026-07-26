@@ -26,6 +26,29 @@ module CrymbleUI
       col_cum = @cached_col_physical_cum
       row_cum = @cached_row_physical_cum
 
+      # ONE content-space scroll quantization per axis for the whole pass. The park
+      # predicates and the per-constituent visibility gates below are the same
+      # expression on this value — sharing the local (here and in the blit-plan
+      # mirror) makes a mixed quantization basis, where reposition and the blit
+      # plan disagree about whether a header is parked, structurally impossible.
+      scroll_x_i = scroll_offset.x.to_i.to_f64
+      scroll_y_i = scroll_offset.y.to_i.to_f64
+
+      # Per-axis compound-disposition context, built ONCE per pass — the same
+      # StickyMath.compound_axis serves the blit-plan fast path, so the two
+      # passes cannot disagree on a compound header's extent or park state.
+      # Y passes shifted: nil (physical-only) — pending its own arc.
+      col_view = AxisView.new(
+        sizes: col_sizes, cum: col_cum, ruler_offset: ruler_col_width_pixels,
+        sticky_extent: sticky_col_width_pixels + ruler_col_width_pixels,
+        viewport_extent: bounds.width, scroll_q: scroll_x_i,
+        shifted: @cached_col_shifted, park: OFFSCREEN_PARK)
+      row_view = AxisView.new(
+        sizes: row_sizes, cum: row_cum, ruler_offset: ruler_row_height_pixels,
+        sticky_extent: sticky_row_height_pixels + ruler_row_height_pixels,
+        viewport_extent: bounds.height, scroll_q: scroll_y_i,
+        shifted: nil, park: OFFSCREEN_PARK)
+
       any_changed = false
 
       @active_cells.each do |key, widget|
@@ -44,81 +67,17 @@ module CrymbleUI
         bounding = get_bounding_box(key)
         is_compound = bounding[0] != bounding[1]
 
-        # For compound cells, compute BOTH screen-space position AND visible width
-        # from constituent columns' viewport positions. This ensures:
+        # Compound cells derive BOTH screen-space position AND visible extent per
+        # axis from StickyMath.compound_axis (shared with the blit-plan fast path):
         # (a) correct screen-space position (not content-space)
-        # (b) width shrinks as constituent columns shift out (prevents sibling overlap)
+        # (b) extent shrinks as constituents shift out (prevents sibling overlap)
         compound_w = 0.0
         compound_h = 0.0
 
         if !is_sticky_col
           if is_compound
-            # Compute screen-space bounding box using physical cumulative positions.
-            # Pin compound left edge at sticky_col_w (the boundary), matching the
-            # reference painters_algo where pos_compound = pos_clipped = sticky
-            # boundary position. Columns fully behind the boundary are skipped.
-            # viewport_col_positions.has_key? ensures shifted-out columns are excluded.
-            # BUG FIX: Also include columns NOT in viewport_col_positions if they are
-            # physically visible and not shifted out. This catches right-edge columns
-            # that the cached viewport_col_positions misses (max_x changed but sticky_key didn't).
-            bb_c1 = bounding[0][1]
-            bb_c2 = bounding[1][1]
-            min_screen_x = Float64::MAX
-            max_screen_x = -Float64::MAX
-            sticky_col_w = sticky_col_width_pixels + ruler_col_width_pixels
-            viewport_right = self.bounds.width
-            visible_col_count = 0
-            single_col_x = 0.0
-            single_col_size = 0.0
-            col_shifted = @cached_col_shifted
-            (bb_c1..bb_c2).each do |ci|
-              # Primary check: column is in the cached visible set (handles shift-out correctly)
-              unless @viewport_col_positions.has_key?(ci)
-                # Fallback for right-edge columns: include if NOT shifted out and
-                # physically within viewport bounds. The cache misses these because
-                # max_x changed (scroll) but the sticky cache key didn't update.
-                if shifted = col_shifted
-                  next if shifted.includes?(ci)  # Column is shifted out — skip
-                end
-                # Not shifted (or no shift data) — check physical screen visibility below
-              end
-              true_ci_x = ruler_x_offset + (col_cum ? col_cum[ci].to_f64 : (0...ci).sum { |c| col_sizes[c] }.to_f64)
-              unclamped_scr_x = true_ci_x - scroll_offset.x.to_i.to_f64
-              col_right = unclamped_scr_x + col_sizes[ci].to_f64
-              next if col_right <= sticky_col_w        # fully behind sticky header
-              next if unclamped_scr_x >= viewport_right # right of viewport
-              visible_col_count += 1
-              single_col_x = unclamped_scr_x
-              single_col_size = col_sizes[ci].to_f64
-              scr_x = {unclamped_scr_x, sticky_col_w}.max  # PIN at boundary
-              capped_right = {col_right, viewport_right}.min
-              min_screen_x = {min_screen_x, scr_x}.min
-              max_screen_x = {max_screen_x, capped_right}.max
-            end
-
-            if min_screen_x < Float64::MAX
-              if visible_col_count > 1
-                new_x = min_screen_x        # pinned compound position
-                compound_w = max_screen_x - min_screen_x
-              else
-                new_x = single_col_x        # unclamped — scroll off naturally
-                compound_w = single_col_size # regular cell size
-              end
-            else
-              # All constituent columns outside viewport. Distinguish scrolled-past
-              # (behind sticky header) from not-yet-visible (right of viewport).
-              sticky_col_w = sticky_col_width_pixels + ruler_col_width_pixels
-              last_col_right = ruler_x_offset + (col_cum ? col_cum[bb_c2 + 1].to_f64 : (0..bb_c2).sum { |c| col_sizes[c] }.to_f64)
-              if last_col_right - scroll_offset.x <= sticky_col_w
-                # Scrolled past sticky header — park off-screen with zero size
-                new_x = OFFSCREEN_PARK
-                compound_w = 0.0
-              else
-                # Not yet visible — keep full width at content position
-                new_x = true_x
-                compound_w = (bb_c1..bb_c2).sum { |ci| col_sizes[ci] }.to_f64
-              end
-            end
+            new_x, compound_w = Widgets::VirtualMatrix::StickyMath.compound_axis(
+              col_view, bounding[0][1], bounding[1][1], true_x)
           else
             # Non-compound: screen-space position = content position − live scroll. Sticky layers
             # are NOT viewport_cache (see this file's header), so the cell bounds must carry the
@@ -126,7 +85,7 @@ module CrymbleUI
             # StickyMath positions are recomputed only when a whole column crosses the boundary, so
             # they dropped the sub-column scroll and froze the cells whenever scroll < one column.
             content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-            new_x = ruler_x_offset + content_x - scroll_offset.x.to_i.to_f64
+            new_x = ruler_x_offset + content_x - scroll_x_i
           end
         else
           new_x = true_x
@@ -134,61 +93,13 @@ module CrymbleUI
 
         if !is_sticky_row
           if is_compound
-            # Compute screen-space bounding box from all constituent rows.
-            # For sticky-col compound cells, use direct content positions (not
-            # viewport_row_positions which are for the content layer), and clamp
-            # to sticky header bottom so the cell doesn't slide behind the header.
-            bb_r1 = bounding[0][0]
-            bb_r2 = bounding[1][0]
-            min_screen_y = Float64::MAX
-            max_screen_y = -Float64::MAX
-            sticky_row_h = sticky_row_height_pixels + ruler_row_height_pixels
-            viewport_bottom = self.bounds.height
-            visible_row_count = 0
-            single_row_y = 0.0
-            single_row_size = 0.0
-            (bb_r1..bb_r2).each do |ri|
-              true_ri_y = ruler_y_offset + (row_cum ? row_cum[ri].to_f64 : (0...ri).sum { |r| row_sizes[r] }.to_f64)
-              unclamped_scr_y = true_ri_y - scroll_offset.y.to_i.to_f64
-              row_bottom = unclamped_scr_y + row_sizes[ri].to_f64
-              # Skip rows entirely behind the sticky header
-              next if row_bottom <= sticky_row_h
-              # Skip rows below viewport
-              next if unclamped_scr_y >= viewport_bottom
-              visible_row_count += 1
-              single_row_y = unclamped_scr_y
-              single_row_size = row_sizes[ri].to_f64
-              scr_y = {unclamped_scr_y, sticky_row_h}.max
-              capped_bottom = {row_bottom, viewport_bottom}.min
-              min_screen_y = {min_screen_y, scr_y}.min
-              max_screen_y = {max_screen_y, capped_bottom}.max
-            end
-
-            if min_screen_y < Float64::MAX
-              if visible_row_count > 1
-                new_y = min_screen_y        # pinned compound position
-                compound_h = max_screen_y - min_screen_y
-              else
-                new_y = single_row_y        # unclamped — scroll off naturally
-                compound_h = single_row_size # regular cell size
-              end
-            else
-              # All constituent rows outside viewport. Distinguish scrolled-past
-              # (behind sticky header) from not-yet-visible (below viewport).
-              last_row_bottom = ruler_y_offset + (row_cum ? row_cum[bb_r2 + 1].to_f64 : (0..bb_r2).sum { |r| row_sizes[r] }.to_f64)
-              if last_row_bottom - scroll_offset.y.to_i.to_f64 <= sticky_row_h
-                new_y = OFFSCREEN_PARK
-                compound_h = 0.0
-              else
-                new_y = true_y
-                compound_h = (bb_r1..bb_r2).sum { |ri| row_sizes[ri].to_f64 }
-              end
-            end
+            new_y, compound_h = Widgets::VirtualMatrix::StickyMath.compound_axis(
+              row_view, bounding[0][0], bounding[1][0], true_y)
           else
             # Non-compound: screen-space position = content position − live scroll (see the X path
             # above for why the cached @viewport_row_positions branch was a freeze bug).
             content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-            new_y = ruler_y_offset + content_y - scroll_offset.y.to_i.to_f64
+            new_y = ruler_y_offset + content_y - scroll_y_i
           end
         else
           new_y = true_y

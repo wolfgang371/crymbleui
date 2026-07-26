@@ -1,6 +1,7 @@
 require "./types"
 require "./widget"
 require "../rendering/render_backend"
+require "../rendering/pixel_snap"
 
 module CrymbleUI
   # Entry in a blit-plan: describes one cached widget texture to blit onto a layer
@@ -247,8 +248,9 @@ module CrymbleUI
     # writer), which is the only caller of this backstop besides the test seam below.
     private def write_buffer_origin(value : Vec2)
       {% if flag?(:verify_bounds) %}
-        if @viewport_cache && (value.x != value.x.round || value.y != value.y.round)
-          raise "buffer_origin must be whole-valued for viewport_cache layer '#{@id}' (got #{value})"
+        if @viewport_cache
+          PixelSnap.whole(value.x, "buffer_origin.x of viewport_cache layer '#{@id}'")
+          PixelSnap.whole(value.y, "buffer_origin.y of viewport_cache layer '#{@id}'")
         end
       {% end %}
       @buffer_origin = value
@@ -268,8 +270,8 @@ module CrymbleUI
     def assert_composite_fits!(sample_x : Int32, sample_y : Int32) : Nil
       {% if flag?(:verify_bounds) %}
         if @viewport_cache &&
-           (sample_x != (@scroll_offset.x - @buffer_origin.x).to_i ||
-           sample_y != (@scroll_offset.y - @buffer_origin.y).to_i)
+           (sample_x != PixelSnap.origin(@scroll_offset.x - @buffer_origin.x) ||
+           sample_y != PixelSnap.origin(@scroll_offset.y - @buffer_origin.y))
           raise "composite clamped viewport_cache layer '#{@id}' — buffer_origin invariant broken " \
                 "(scroll=#{@scroll_offset} origin=#{@buffer_origin})"
         end
@@ -294,14 +296,14 @@ module CrymbleUI
       # it is also the fit PROBE (`viewport_fits_buffer?` derives from it), so it must be able to observe a
       # clamp without failing. The invariant "a viewport_cache composite never clamps" is asserted at the
       # WRITER (`recenter_origin!`) and at the composite seam (both renderers) under -Dverify_bounds.
-      x = (@scroll_offset.x - @buffer_origin.x).to_i.clamp(0, {buffer_width - viewport_width, 0}.max)
-      y = (@scroll_offset.y - @buffer_origin.y).to_i.clamp(0, {buffer_height - viewport_height, 0}.max)
+      x = PixelSnap.origin(@scroll_offset.x - @buffer_origin.x).clamp(0, {buffer_width - viewport_width, 0}.max)
+      y = PixelSnap.origin(@scroll_offset.y - @buffer_origin.y).clamp(0, {buffer_height - viewport_height, 0}.max)
       {x, y}
     end
 
     # The sole writer of buffer_origin for a viewport_cache layer. Returns an ALWAYS-WHOLE origin,
-    # positioned so the viewport fits the buffer at it — per axis `(scroll - origin).to_i ∈ [0, buffer -
-    # ceil(viewport)]` — so `viewport_sample_origin` (the one reader) never clamps and render/composite,
+    # positioned so the viewport fits the buffer at it — per axis `PixelSnap.origin(scroll - origin) ∈ [0,
+    # buffer - PixelSnap.cover(viewport)]` — so `viewport_sample_origin` (the one reader) never clamps and render/composite,
     # which truncate the origin differently, agree. Preserves the cache_extent quantization grid away from
     # capacity (the scroll round-trip "19px shift" guard); clamps to whole bounds near capacity; and at zero
     # margin (empty integer range) uses floor(scroll) — the sub-pixel-best whole origin, tear-free.
@@ -316,7 +318,7 @@ module CrymbleUI
       ce = @cache_extent
       return scroll.floor if ce <= 0.0
       q = (((scroll - ce) / ce).round * ce).round # quantized ideal, whole even for a fractional cache_extent
-      vw = viewport.ceil.to_i
+      vw = PixelSnap.cover(viewport)
       lo = (scroll - (buffer - vw)).ceil # smallest whole origin with (scroll-origin) <= buffer-vw
       hi = scroll.floor                  # largest whole origin with (scroll-origin) >= 0
       lo <= hi ? q.clamp(lo, hi) : hi    # empty range (zero margin) -> floor(scroll)
@@ -328,10 +330,10 @@ module CrymbleUI
     # viewport, which only relaxes the clamp, so a `true` here never yields a shift (a `false` in the
     # clipped band is at worst a harmless extra recenter).
     def viewport_fits_buffer?(buffer_width : Int32, buffer_height : Int32) : Bool
-      vw = bounds.width.ceil.to_i
-      vh = bounds.height.ceil.to_i
+      vw = PixelSnap.cover(bounds.width)
+      vh = PixelSnap.cover(bounds.height)
       sample = viewport_sample_origin(buffer_width, buffer_height, vw, vh)
-      unclamped = { (@scroll_offset.x - @buffer_origin.x).to_i, (@scroll_offset.y - @buffer_origin.y).to_i }
+      unclamped = { PixelSnap.origin(@scroll_offset.x - @buffer_origin.x), PixelSnap.origin(@scroll_offset.y - @buffer_origin.y) }
       sample == unclamped
     end
 
@@ -642,7 +644,7 @@ module CrymbleUI
     # Check if current backend is large enough for current bounds
     def backend_fits_bounds? : Bool
       return false unless b = @backend
-      b.width >= bounds.width.ceil.to_i && b.height >= bounds.height.ceil.to_i
+      b.width >= PixelSnap.cover(bounds.width) && b.height >= PixelSnap.cover(bounds.height)
     end
 
     # Get last rendered bounds (for debugging)

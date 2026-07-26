@@ -21,18 +21,11 @@ module CrymbleUI
 
         @timers : Array(Timer)
         @next_id : Int32
-        @redraw_callback : Proc(Nil)?
         @cancelled_ids : Set(Int32) = Set(Int32).new
 
         def initialize
             @timers = [] of Timer
             @next_id = 0
-        end
-
-        # Set callback to trigger redraw when timers fire
-        # This allows animated widgets to automatically trigger redraws
-        def on_timer_fired(&block : -> Nil)
-            @redraw_callback = block
         end
 
         # Schedule a timer
@@ -128,11 +121,6 @@ module CrymbleUI
 
             # Re-sort if we rescheduled any timers
             @timers.sort_by! &.wake_time unless expired.select(&.repeating?).empty?
-
-            # Trigger redraw if any timers fired
-            if fired_count > 0
-                @redraw_callback.try(&.call)
-            end
 
             fired_count
         end

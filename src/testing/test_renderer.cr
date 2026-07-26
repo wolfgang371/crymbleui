@@ -5,6 +5,7 @@ require "../rendering/draw_primitive"
 require "../rendering/layer_renderer"
 require "../rendering/render_trigger"
 require "./test_render_backend"
+require "../rendering/pixel_snap"
 require "./test_shortcut_manager"
 
 module CrymbleUI
@@ -309,9 +310,9 @@ module CrymbleUI
 
         # Blit only the visible portion of layer buffer (clip to layer.bounds size)
         # Layer backend may be larger due to buffer expansion, but we only composite the visible area
-        # Use ceil() to avoid clipping bottom/right edge when bounds are fractional
-        clip_width = layer.bounds.width.ceil.to_i
-        clip_height = layer.bounds.height.ceil.to_i
+        # Conservative extents (PixelSnap.cover) avoid clipping the bottom/right edge at fractional bounds
+        clip_width = PixelSnap.cover(layer.bounds.width)
+        clip_height = PixelSnap.cover(layer.bounds.height)
 
         # Clip to the ancestor panel INTERIOR so a descendant layer can't paint over
         # the panel border (MUST match SFML — the interior inset lives in the shared
@@ -321,10 +322,10 @@ module CrymbleUI
           clip_right = clip_bounds.x + clip_bounds.width
           clip_bottom = clip_bounds.y + clip_bounds.height
           if layer.bounds.x + clip_width > clip_right
-            clip_width = Math.max(0, (clip_right - layer.bounds.x).ceil.to_i)
+            clip_width = Math.max(0, PixelSnap.cover(clip_right - layer.bounds.x))
           end
           if layer.bounds.y + clip_height > clip_bottom
-            clip_height = Math.max(0, (clip_bottom - layer.bounds.y).ceil.to_i)
+            clip_height = Math.max(0, PixelSnap.cover(clip_bottom - layer.bounds.y))
           end
         end
 
@@ -333,7 +334,8 @@ module CrymbleUI
           composite_viewport_cache_layer(layer, backend, clip_width, clip_height)
         else
           # Standard compositing: blit layer to window at layer position
-          backend.blit_to(@backend, layer.bounds.x.to_i, layer.bounds.y.to_i, clip_width, clip_height,
+          # Same snap as the SFML compositor — headless composite parity by construction.
+          backend.blit_to(@backend, PixelSnap.snap(layer.bounds.x).to_i, PixelSnap.snap(layer.bounds.y).to_i, clip_width, clip_height,
                           use_alpha_blend: true, opacity: layer.opacity, blend_mode: layer.blend_mode)
           @backend_blit_count += 1
         end
@@ -357,8 +359,8 @@ module CrymbleUI
       # Routes through Layer#viewport_sample_origin — the ONE composite reader (matches SFML exactly, no
       # hand-mirrored copy that can drift).
       private def composite_viewport_cache_layer(layer : Layer, backend : TestRenderBackend, viewport_width : Int32, viewport_height : Int32)
-        dest_x = layer.bounds.x.to_i
-        dest_y = layer.bounds.y.to_i
+        dest_x = PixelSnap.snap(layer.bounds.x).to_i
+        dest_y = PixelSnap.snap(layer.bounds.y).to_i
 
         viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_width, viewport_height)
 

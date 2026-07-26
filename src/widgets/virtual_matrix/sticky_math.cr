@@ -36,6 +36,78 @@ module CrymbleUI::Widgets::VirtualMatrix
       end
     end
 
+    # Everything pass-constant a compound-cell axis disposition needs: built once
+    # per axis per pass, so the four call sites (X/Y in the layout pass and the
+    # blit-plan fast path) cannot transpose axis inputs. `scroll_q` is the
+    # caller's CONTENT-SPACE-QUANTIZED scroll (its hoisted per-pass local) —
+    # compound_axis is pure and cannot introduce a second quantization basis.
+    # `park` is the caller's off-screen sentinel (the widget-layer constant is
+    # not this module's concern). `shifted: nil` = physical-only scanning.
+    record AxisView,
+      sizes : Array(Int32),
+      cum : Array(Int32)?,
+      ruler_offset : Float64,
+      sticky_extent : Float64,
+      viewport_extent : Float64,
+      scroll_q : Float64,
+      shifted : ShiftedSet?,
+      park : Float64
+
+    # ONE disposition for a compound (merged) cell's scrolling axis — THE shared
+    # implementation for the layout pass (reposition_sticky_cells) and the
+    # blit-plan fast path (reposition_compound_in_blit_plan). The two passes run
+    # either/or per frame, so any divergence is a user-visible header width/pin
+    # JUMP when the frame type flips (they were born divergent: the fast path
+    # scanned purely physically and counted shifted-out, compacted-away
+    # constituents — one full column pitch too wide on every grouped pivot).
+    #
+    # Scans constituents bb_lo..bb_hi: skips shifted-out ones (once the grid
+    # compacts, their raw physical positions are meaningless) and physically
+    # invisible ones (behind the sticky boundary / past the viewport). A
+    # multi-constituent extent pins at the sticky boundary; a single remaining
+    # constituent scrolls off unclamped at its regular size; with none visible,
+    # scrolled-past parks (extent 0) while not-yet-visible keeps the full extent
+    # at the content position. Returns {position, extent}.
+    def self.compound_axis(view : AxisView, bb_lo : Int32, bb_hi : Int32,
+                           true_pos : Float64) : {Float64, Float64}
+      min_screen = Float64::MAX
+      max_screen = -Float64::MAX
+      visible_count = 0
+      single_pos = 0.0
+      single_size = 0.0
+      cum = view.cum
+      (bb_lo..bb_hi).each do |i|
+        if s = view.shifted
+          next if s.includes?(i)
+        end
+        true_i = view.ruler_offset + (cum ? cum[i].to_f64 : (0...i).sum { |j| view.sizes[j] }.to_f64)
+        unclamped = true_i - view.scroll_q
+        far_edge = unclamped + view.sizes[i].to_f64
+        next if far_edge <= view.sticky_extent    # fully behind the sticky header
+        next if unclamped >= view.viewport_extent # past the viewport
+        visible_count += 1
+        single_pos = unclamped
+        single_size = view.sizes[i].to_f64
+        min_screen = { {unclamped, view.sticky_extent}.max, min_screen }.min # pin at boundary
+        max_screen = { {far_edge, view.viewport_extent}.min, max_screen }.max
+      end
+
+      if min_screen < Float64::MAX
+        if visible_count > 1
+          {min_screen, max_screen - min_screen} # pinned compound extent
+        else
+          {single_pos, single_size} # single constituent scrolls off unclamped
+        end
+      else
+        last_edge = view.ruler_offset + (cum ? cum[bb_hi + 1].to_f64 : (0..bb_hi).sum { |j| view.sizes[j] }.to_f64)
+        if last_edge - view.scroll_q <= view.sticky_extent
+          {view.park, 0.0} # scrolled past the sticky header
+        else
+          {true_pos, (bb_lo..bb_hi).sum { |j| view.sizes[j].to_f64 }} # not yet visible
+        end
+      end
+    end
+
     # Returns the min scroll position (in pixels) such that element `index` is barely fully visible.
     # The left/upper border of the element is on the left/upper side of the window.
     def self.visibility_range_min(index : Int32, sizes_pixel : Array(Int32), scroll_order : Array(Int32)) : Int32

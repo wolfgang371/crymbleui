@@ -147,20 +147,38 @@ module CrymbleUI
     end
 
     # Convert absolute coordinates to layer-local pixels with proper rounding
-    # Round the FINAL layer-local position (not intermediate absolute position)
-    # This ensures consistent pixel placement regardless of layer offset
-    # (inspired by React Native's "round at the end" strategy)
-    private def round_to_layer_pixels(
+    # Convert the FINAL layer-local position (not intermediate absolute positions) —
+    # one conversion at the end ensures consistent pixel placement regardless of
+    # layer offset (the "round at the end" strategy, now floor via PixelSnap.origin).
+    # Public like device_pixel_span: the composition contract-pin spec asserts this
+    # stamp-side arithmetic stays equal to slot_axis (the blit-shift side) forever.
+    def round_to_layer_pixels(
       absolute_x : Float64,
       absolute_y : Float64,
       layer_offset_x : Float64,
       layer_offset_y : Float64,
     ) : Tuple(Int32, Int32)
-      # Calculate layer-local position in float, THEN round once
-      # Using .to_i (truncate) for consistency - all widgets truncate same direction
-      layer_local_x = (absolute_x - layer_offset_x).to_i
-      layer_local_y = (absolute_y - layer_offset_y).to_i
+      # Calculate layer-local position in float, THEN convert once — DIFFERENCE-FIRST
+      # (floor(a - b) != floor(a) - floor(b)); PixelSnap.origin floors, which equals
+      # the old truncation for non-negative coords and is translation-invariant at
+      # negative-fractional ones (top/left-clipped content at fractional zoom).
+      layer_local_x = PixelSnap.origin(absolute_x - layer_offset_x)
+      layer_local_y = PixelSnap.origin(absolute_y - layer_offset_y)
       {layer_local_x, layer_local_y}
+    end
+
+    # THE slot-key arithmetic for viewport_cache layers, ONE owner for both sides:
+    # the render path stamps slots at origin(abs - layer_bound) - buffer_origin (see
+    # round_to_layer_pixels + the buffer rebind in render_single_widget), and the
+    # blit-shift bookkeeping re-derives the SAME key here. DIFFERENCE-FIRST:
+    # floor(coord - layer_bound), never floor(coord) - floor(layer_bound) — term-wise
+    # diverges even at positive coords (floor(10.7)-floor(0.8)=10 vs floor(9.9)=9).
+    # Blit-shift frames run with drag_offset == 0 (a panel drag is composite-only and
+    # never triggers a resize/scroll blit-shift), so callers pass raw absolute coords.
+    # buffer_origin is whole by construction (writer-guarded) — the cast is exact.
+    # Public like device_pixel_span: pinned by the composition contract spec.
+    def slot_axis(coord : Float64, layer_bound : Float64, buf_origin_axis : Float64) : Int32
+      PixelSnap.origin(coord - layer_bound) - buf_origin_axis.to_i # snap-exempt: whole-by-construction (writer-guarded)
     end
 
     # Layer collection cache: avoids O(widget_tree) traversal on every frame.
@@ -521,34 +539,12 @@ module CrymbleUI
       # Viewport_cache layers DON'T clear every frame - they keep cached content
       # and shift viewport during composite
       if full_render
-        backend.clear(layer.background_color)
-        # CRITICAL: Mark buffer as cleared so widgets capture clean background, not stale pixels
-        # Without this, SFML RenderTexture contains pre-clear content until display() is called
-        layer.buffer_just_cleared = true
-        # For viewport_cache layers, initialize buffer_origin on first render
-        if layer.viewport_cache
-          layer.recenter_origin!(backend.width, backend.height)
-        end
-        {% if flag?(:DEBUG_RENDER) %}
-          puts "  [CLEARED BUFFER to bg=#{layer.background_color}]"
-        {% end %}
-      elsif layer.needs_clear
-        # Buffer clear requested without NeedsLayout (e.g., cursor overlay ghost band prevention).
-        # Clear buffer and force full widget collection, but keep NeedsRender semantics
-        # (no sibling validation, viewport culling stays active).
-        backend.clear(layer.background_color)
-        layer.buffer_just_cleared = true
-        layer.needs_clear = false
+        perform_clear(layer, backend)
+      elsif consume_needs_clear(layer, backend)
+        # Buffer clear requested without NeedsLayout (e.g., cursor overlay ghost band prevention, or a
+        # widget that MOVED and left pixels nobody else repaints). Full widget collection, but keep
+        # NeedsRender semantics (no sibling validation, viewport culling stays active).
         full_render = true
-        # For viewport_cache layers, recenter buffer_origin to match current scroll position.
-        # Without this, an explicit buffer_origin reset (e.g., grid reconfiguration or zoom)
-        # leaves buffer_origin at zero while scroll_offset is large → wrong viewport composite.
-        if layer.viewport_cache
-          layer.recenter_origin!(backend.width, backend.height)
-        end
-        {% if flag?(:DEBUG_RENDER) %}
-          puts "  [NEEDS_CLEAR → CLEARED BUFFER to bg=#{layer.background_color}]"
-        {% end %}
       elsif layer.viewport_cache
         # Handle viewport_cache scroll: check if viewport moved beyond cache extent
         # Returns true if buffer was recentered (needs full render of visible widgets)
@@ -566,6 +562,16 @@ module CrymbleUI
       if owner = layer.owner_widget
         owner.pre_render_flush
       end
+
+      # Re-ask, because the flush is where a coalesced re-layout actually happens: WindowPanel defers its
+      # resize layout to pre_render_flush, and VirtualMatrix defers cell updates there. A clear those
+      # requested would otherwise be raised AFTER the decision above and then destroyed by
+      # clear_render_state at the end of this very frame — requested, never honoured, no next-frame
+      # repair. Assigned in two steps on purpose: `full_render ||= consume_…` would SHORT-CIRCUIT and
+      # skip the clear exactly when full_render is already true (the viewport blit-shift path), leaving
+      # the flag to be wiped unconsumed.
+      cleared_after_flush = consume_needs_clear(layer, backend)
+      full_render ||= cleared_after_flush
 
       # A resize flush (VirtualMatrix#pre_render_flush → update_visible_cells) may have requested a
       # content-layer blit-shift: translate the buffer region past the resize boundary instead of
@@ -588,8 +594,8 @@ module CrymbleUI
       {% if flag?(:immediate_mode_only) %}
         # IMMEDIATE-MODE ONLY: bypass all per-widget caching, re-render from scratch every frame
         # using painter's algorithm via to_primitives(). Slow but correct ground truth.
-        viewport_w = layer.bounds.width.ceil.to_i
-        viewport_h = layer.bounds.height.ceil.to_i
+        viewport_w = PixelSnap.cover(layer.bounds.width)
+        viewport_h = PixelSnap.cover(layer.bounds.height)
         if viewport_w > 0 && viewport_h > 0
           fresh = render_layer_immediate(layer, layer_offset_x, layer_offset_y, viewport_w, viewport_h)
           if layer.viewport_cache
@@ -631,11 +637,11 @@ module CrymbleUI
               f.puts "  widgets_to_render.size=#{widgets_to_render.size}"
               # Log widgets with Y near the buffer boundary (content_y 830-900)
               # Find buffer overlap boundary (buffer_origin_y + buffer extent where blit-shift clears)
-              lo_y = layer.bounds.y.to_i
+              lo_y = layer.bounds.y.to_i # snap-exempt: diagnostic dump
               f.puts "--- Widgets near buffer boundary (buf_y 815..845) ---"
               widgets_to_render.each do |w|
                 ab = w.absolute_bounds
-                buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i
+                buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i # snap-exempt: diagnostic dump
                 next unless buf_y >= 815 && buf_y <= 845
                 has_wb = !w.widget_backend.nil?
                 f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} abs_y=#{ab.y} buf_y=#{buf_y} " \
@@ -648,7 +654,7 @@ module CrymbleUI
                 root_w.children.each { |c| all_w << c }
                 all_w.each do |w|
                   ab = w.absolute_bounds
-                  buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i
+                  buf_y = (ab.y - lo_y).to_i - layer.buffer_origin.y.to_i # snap-exempt: diagnostic dump
                   next unless buf_y >= 815 && buf_y <= 845
                   collected = widgets_to_render.includes?(w)
                   f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} abs_y=#{ab.y} buf_y=#{buf_y} " \
@@ -660,15 +666,24 @@ module CrymbleUI
         {% end %}
 
         # Validate that siblings don't overlap (invariant check).
-        # OPTIMIZATION: only on first_render? — re-validating every frame is wasted
-        # O(n²) work and scroll doesn't change structure.
-        # KNOWN GAP: this does NOT re-validate after a NeedsLayout re-render,
-        # so an overlap introduced by a later layout change is not caught (the guardrail
-        # is weaker than the docs once claimed). Re-enabling on layout is a perf tradeoff,
-        # deferred.
+        # OPTIMIZATION: only on first_render? in release — re-validating every frame is wasted
+        # O(n²) work and scroll doesn't change structure. This raises, so the release scope stays
+        # exactly as it was.
         if layer.first_render?
           validate_sibling_bounds(widgets_to_render)
         end
+        # The gap that used to be here: an overlap introduced by a LATER layout change was never
+        # re-checked, which is how a stale-skip overlap reached a beta tester. Under -Dverify_bounds
+        # every re-LAYOUT re-checks it, as a warn + counter rather than a raise (matching the
+        # constraint-satisfaction guard in Widget#layout, and leaving room for false positives to be
+        # triaged rather than exploding the suite). Deliberately keyed on NeedsLayout, NOT on
+        # full_render: mark_needs_clear_and_render sets NeedsRender, and several call sites choose it
+        # precisely because it does NOT imply sibling validation.
+        {% if flag?(:verify_bounds) %}
+          if !layer.first_render? && layer.state == WidgetState::NeedsLayout
+            warn_sibling_overlaps(widgets_to_render)
+          end
+        {% end %}
 
         # Push scissor clip for layer bounds to clip widgets at layer edges
         # This allows smooth clipping of partially-visible widgets (e.g., ScrollView content)
@@ -759,8 +774,8 @@ module CrymbleUI
                                            layer_offset_x : Float64, layer_offset_y : Float64)
         # 1. Capture cached viewport region from the buffer — via the one reader (aligns the cv sampler
         #    with what SFML actually composites; no hand-mirrored copy in the gating instrument).
-        viewport_w = layer.bounds.width.ceil.to_i
-        viewport_h = layer.bounds.height.ceil.to_i
+        viewport_w = PixelSnap.cover(layer.bounds.width)
+        viewport_h = PixelSnap.cover(layer.bounds.height)
         viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_w, viewport_h)
 
         return if viewport_w <= 0 || viewport_h <= 0
@@ -799,8 +814,8 @@ module CrymbleUI
           fm_buffer_x = fm_vx + viewport_x
           fm_buffer_y = fm_vy + viewport_y
           # Correct absolute Y: buffer_y + buffer_origin_y + layer_offset_y
-          fm_abs_y = fm_buffer_y + layer.buffer_origin.y.to_i + layer.bounds.y.to_i
-          layer_off_y = layer.bounds.y.to_i
+          fm_abs_y = fm_buffer_y + layer.buffer_origin.y.to_i + layer.bounds.y.to_i # snap-exempt: diagnostic dump
+          layer_off_y = layer.bounds.y.to_i # snap-exempt: diagnostic dump
           File.open("/tmp/cv_diag_#{layer.id}_f#{frame}.log", "w") do |f|
             f.puts "=== CV DIAGNOSTIC: #{layer.id} frame=#{frame} ==="
             f.puts "  mismatch_count=#{mismatch_count}/#{total}"
@@ -818,7 +833,7 @@ module CrymbleUI
               root_w.children.each { |c| all_w << c }
               all_w.each do |w|
                 ab = w.absolute_bounds
-                buf_y = (ab.y - layer_off_y).to_i - layer.buffer_origin.y.to_i
+                buf_y = (ab.y - layer_off_y).to_i - layer.buffer_origin.y.to_i # snap-exempt: diagnostic dump
                 # Show widgets whose buffer_y range includes or is near fm_buffer_y
                 next unless buf_y <= fm_buffer_y + 5 && buf_y + ab.height.to_i >= fm_buffer_y - 25
                 f.puts "  #{w.class.name.split("::").last}##{w.id || "?"} bounds=#{w.bounds} abs=#{ab}"
@@ -940,9 +955,11 @@ module CrymbleUI
           widget_height = device_pixel_span(widget_abs.y - layer_offset_y, widget_abs.height)
           next if widget_width <= 0 || widget_height <= 0
 
-          # Viewport-relative position
-          local_x = (widget_abs.x - layer_offset_x).to_i - layer.scroll_offset.x.to_i
-          local_y = (widget_abs.y - layer_offset_y).to_i - layer.scroll_offset.y.to_i
+          # Viewport-relative position: origin of the DIFFERENCE (matches production
+          # round_to_layer_pixels); the scroll term is content-space quantization and
+          # stays raw (clamped >= 0, floor == trunc).
+          local_x = PixelSnap.origin(widget_abs.x - layer_offset_x) - layer.scroll_offset.x.to_i
+          local_y = PixelSnap.origin(widget_abs.y - layer_offset_y) - layer.scroll_offset.y.to_i
 
           # Skip widgets completely outside viewport
           next if local_x + widget_width <= 0 || local_y + widget_height <= 0
@@ -977,8 +994,8 @@ module CrymbleUI
         all_widgets.each do |widget|
           if widget.responds_to?(:has_foreground?) && widget.has_foreground?
             widget_abs = widget.absolute_bounds
-            local_x = (widget_abs.x - layer_offset_x).to_i - layer.scroll_offset.x.to_i
-            local_y = (widget_abs.y - layer_offset_y).to_i - layer.scroll_offset.y.to_i
+            local_x = PixelSnap.origin(widget_abs.x - layer_offset_x) - layer.scroll_offset.x.to_i
+            local_y = PixelSnap.origin(widget_abs.y - layer_offset_y) - layer.scroll_offset.y.to_i
 
             widget.foreground_primitives.each do |prim|
               execute_primitive_with_offset(prim, fresh_backend, local_x.to_f64, local_y.to_f64)
@@ -1035,7 +1052,7 @@ module CrymbleUI
     # fill_background (it ceils; ceil(length) >= device_pixel_span(_, length) always), NEVER a
     # logical-width fill_rect, or a 1px transparent edge strip appears at fractional positions.
     def device_pixel_span(start : Float64, length : Float64) : Int32
-      (start + length).to_i - start.to_i
+      PixelSnap.span(start, length)
     end
 
     # Render a single dirty widget (selective rendering optimization)
@@ -1082,16 +1099,18 @@ module CrymbleUI
       # Round absolute coords relative to root BEFORE subtracting layer offset
       # This prevents accumulating rounding errors through nested widgets
       layer_local_x, layer_local_y = round_to_layer_pixels(adjusted_x, adjusted_y, offset_x, offset_y)
-      layer_width = layer.bounds.width.ceil.to_i
-      layer_height = layer.bounds.height.ceil.to_i
+      layer_width = PixelSnap.cover(layer.bounds.width)
+      layer_height = PixelSnap.cover(layer.bounds.height)
 
       # Viewport_cache layers: use buffer-relative positioning
       # Widget position in buffer = content position - buffer_origin
       # Buffer origin shifts as we scroll (maintains cache window around viewport)
       if layer.viewport_cache
-        # Calculate position in buffer coordinates
-        buffer_x = layer_local_x - layer.buffer_origin.x.to_i
-        buffer_y = layer_local_y - layer.buffer_origin.y.to_i
+        # Calculate position in buffer coordinates. buffer_origin is whole by
+        # construction (asserted at its single writer, write_buffer_origin) — the
+        # cast is exact; a reader assert would be redundant.
+        buffer_x = layer_local_x - layer.buffer_origin.x.to_i # snap-exempt: whole-by-construction (writer-guarded)
+        buffer_y = layer_local_y - layer.buffer_origin.y.to_i # snap-exempt: whole-by-construction (writer-guarded)
 
         # Get actual buffer dimensions
         buffer_width = backend.width
@@ -1241,8 +1260,8 @@ module CrymbleUI
         # fill spans from 0. Flag-gated: zero cost in normal builds.
         primitives.each do |prim|
           next unless prim.is_a?(FillRect) && prim.bounds.x == 0.0 && prim.bounds.y == 0.0
-          cov_w = (prim.bounds.width - 0.5).ceil.to_i
-          cov_h = (prim.bounds.height - 0.5).ceil.to_i
+          cov_w = (prim.bounds.width - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
+          cov_h = (prim.bounds.height - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
           # Only the 1-2px ROUNDING-gap signature (a near-full bg fill that falls 1px short of the
           # snapped backend), never a deliberately-partial fill (progress bar, etc. — far shorter).
           if (cov_w < widget_width && cov_w >= widget_width - 2) ||
@@ -1628,8 +1647,8 @@ module CrymbleUI
 
       # Calculate widget position in layer-local coordinates
       widget_abs = widget.absolute_bounds
-      layer_local_x = (widget_abs.x - layer_offset_x).to_i
-      layer_local_y = (widget_abs.y - layer_offset_y).to_i
+      layer_local_x = PixelSnap.origin(widget_abs.x - layer_offset_x)
+      layer_local_y = PixelSnap.origin(widget_abs.y - layer_offset_y)
 
       # Execute primitives with offset (primitives are widget-local, layer expects layer-local)
       prims.each do |primitive|
@@ -2073,10 +2092,14 @@ module CrymbleUI
                      next false unless w.widget_backend.nil?
                      # Skip widgets with overflow bounds
                      next false if w.bounds.width > 16384.0 || w.bounds.height > 16384.0
-                     # Check if widget is within buffer bounds
-                     bx = w.bounds.x.to_i - buf_origin.x.to_i
-                     by = w.bounds.y.to_i - buf_origin.y.to_i
-                     bx + w.bounds.width.to_i > 0 && by + w.bounds.height.to_i > 0 &&
+                     # Check if widget is within buffer bounds — CONSERVATIVE: origin (floor)
+                     # for position, cover (ceil) for extent, so a fractional edge that
+                     # covers a pixel can never be dropped (trunc under-included before).
+                     # NOTE basis: uses w.bounds where the slot path uses absolute_bounds —
+                     # pre-existing, flagged, deliberately unchanged here.
+                     bx = PixelSnap.origin(w.bounds.x) - buf_origin.x.to_i # snap-exempt: whole-by-construction (writer-guarded)
+                     by = PixelSnap.origin(w.bounds.y) - buf_origin.y.to_i # snap-exempt: whole-by-construction (writer-guarded)
+                     bx + PixelSnap.cover(w.bounds.width) > 0 && by + PixelSnap.cover(w.bounds.height) > 0 &&
                        bx < buf_w && by < buf_h
                    }
                  else
@@ -2102,6 +2125,29 @@ module CrymbleUI
       end
     end
 
+    # Clear a layer's buffer to its background and record that the buffer is clean, so widgets capture a
+    # clean background rather than stale pixels (SFML keeps pre-clear content until display()).
+    private def perform_clear(layer : Layer, backend : RenderBackend) : Nil
+      backend.clear(layer.background_color)
+      layer.buffer_just_cleared = true
+      # viewport_cache: initialise/recenter buffer_origin, or an origin left at zero while scroll_offset
+      # is large composites the wrong viewport. Idempotent, so the second call site is harmless.
+      layer.recenter_origin!(backend.width, backend.height) if layer.viewport_cache
+      {% if flag?(:DEBUG_RENDER) %}
+        puts "  [CLEARED BUFFER to bg=#{layer.background_color}]"
+      {% end %}
+    end
+
+    # Consume a pending buffer-clear request. Returns whether it cleared, so the caller can widen the
+    # render to the whole layer. Called twice per frame — once with the other render-mode decisions, once
+    # after pre_render_flush (see there).
+    private def consume_needs_clear(layer : Layer, backend : RenderBackend) : Bool
+      return false unless layer.needs_clear
+      layer.needs_clear = false
+      perform_clear(layer, backend)
+      true
+    end
+
     # Validate sibling bounds don't overlap (invariant check)
     # INVARIANT (siblings no-overlap): Sibling widgets (same parent) must not have overlapping bounds
     # This simplifies per-widget background memorization (no z-ordering conflicts)
@@ -2114,6 +2160,35 @@ module CrymbleUI
     # OPTIMIZATION: VStack/HStack are ordered containers - only adjacent siblings can overlap.
     # For these, we use O(n) instead of O(n²).
     private def validate_sibling_bounds(widgets : Array(Widget))
+      each_overlapping_sibling_pair(widgets) do |message|
+        assert(false, message)
+      end
+    end
+
+    # The same walk, reported instead of raised — see the -Dverify_bounds call site in render_layer.
+    # A retro-fitted invariant gets a triage period before it is allowed to abort a run.
+    # The counter is the assertion mechanism; the printing is capped so one bad layout in a big
+    # non-stack parent cannot bury the run in O(n²) lines.
+    WARN_OVERLAP_PRINT_CAP = 20
+
+    private def warn_sibling_overlaps(widgets : Array(Widget))
+      printed = 0
+      each_overlapping_sibling_pair(widgets) do |message|
+        Widget.increment_sibling_overlap_warnings
+        printed += 1
+        if printed <= WARN_OVERLAP_PRINT_CAP
+          STDERR.puts "WARNING #{message}"
+        elsif printed == WARN_OVERLAP_PRINT_CAP + 1
+          STDERR.puts "WARNING (siblings no-overlap): …further overlaps this render suppressed " \
+                      "(see Widget.sibling_overlap_warnings for the total)"
+        end
+      end
+    end
+
+    # Yield a describing message for each overlapping sibling pair among `widgets`.
+    # OPTIMIZATION: VStack/HStack are ordered containers - only adjacent siblings can overlap.
+    # For these, we use O(n) instead of O(n²).
+    private def each_overlapping_sibling_pair(widgets : Array(Widget), &block : String ->)
       # Group widgets by parent
       widgets_by_parent = {} of Widget? => Array(Widget)
       widgets.each do |widget|
@@ -2126,27 +2201,31 @@ module CrymbleUI
       widgets_by_parent.each do |parent, siblings|
         next if siblings.size < 2 # Need at least 2 siblings to overlap
 
+        # absolute_bounds is an UNCACHED walk up the parent chain, so resolve it ONCE per widget:
+        # the general branch below is O(n²) in pairs, and every VirtualMatrix cell shares one
+        # (non-stack) parent — paying the walk per pair would be n² chain walks per checked render.
+        abs = {} of Widget => Rect
+        siblings.each { |w| abs[w] = w.absolute_bounds }
+
         if parent.is_a?(VStack) || parent.is_a?(HStack)
           # O(n): Ordered containers - only check adjacent siblings
           siblings.each_cons(2) do |(widget_a, widget_b)|
-            check_sibling_overlap(widget_a, widget_b, parent)
+            report_sibling_overlap(widget_a, abs[widget_a], widget_b, abs[widget_b], parent, &block)
           end
         else
           # O(n²): General case - check all pairs
           siblings.each_with_index do |widget_a, i|
             siblings[(i + 1)..-1].each do |widget_b|
-              check_sibling_overlap(widget_a, widget_b, parent)
+              report_sibling_overlap(widget_a, abs[widget_a], widget_b, abs[widget_b], parent, &block)
             end
           end
         end
       end
     end
 
-    # Check if two sibling widgets overlap (helper for validate_sibling_bounds)
-    private def check_sibling_overlap(widget_a : Widget, widget_b : Widget, parent : Widget?)
-      bounds_a = widget_a.absolute_bounds
-      bounds_b = widget_b.absolute_bounds
-
+    # Yield a message iff two sibling widgets share interior pixels.
+    private def report_sibling_overlap(widget_a : Widget, bounds_a : Rect, widget_b : Widget, bounds_b : Rect,
+                                       parent : Widget?, &block : String ->)
       # Check for overlap (sharing interior pixels, not just touching)
       # Touching at boundaries is OK - we only fail if they share interior pixels
       # Use epsilon tolerance for floating point comparisons (scrollbar drag can cause tiny FP errors)
@@ -2155,8 +2234,9 @@ module CrymbleUI
                  bounds_b.right - bounds_a.left > epsilon &&
                  bounds_a.bottom - bounds_b.top > epsilon &&
                  bounds_b.bottom - bounds_a.top > epsilon
+      return unless overlaps
 
-      assert(!overlaps,
+      block.call(
         "(siblings no-overlap): #{widget_a.class.name.split("::").last}##{widget_a.path_id} at #{bounds_a} overlaps " +
         "#{widget_b.class.name.split("::").last}##{widget_b.path_id} at #{bounds_b} " +
         "(parent: #{parent ? parent.class.name.split("::").last + "#" + parent.path_id : "nil"})")
@@ -2203,7 +2283,7 @@ module CrymbleUI
       # Convert the NEW boundary (layer-local) to buffer coords via the one reader (buffer_origin). The
       # buffer still holds the PRE-resize pixels, so the shifted block sits at boundary - delta there
       # (buffer_origin is unchanged during a resize).
-      new_boundary_buf = rs.boundary_local_px - (horizontal ? origin.x.to_i : origin.y.to_i)
+      new_boundary_buf = rs.boundary_local_px - (horizontal ? origin.x.to_i : origin.y.to_i) # snap-exempt: whole-by-construction (writer-guarded)
       old_boundary_buf = new_boundary_buf - delta
 
       # Extract the buffer block PAST the (old) boundary and paint it back shifted by delta. For a widen
@@ -2246,15 +2326,15 @@ module CrymbleUI
       # copied → dispose so it re-renders fresh. The resized line's cells were already disposed by the VM
       # (nil backend). Cells before the boundary did not move → untouched. buffer_origin is unchanged, so
       # a shifted slot needs only the axis translation (contrast scroll, which also moves buffer_origin).
-      lo = horizontal ? layer.bounds.x.round.to_i : layer.bounds.y.round.to_i
-      axis_origin = horizontal ? origin.x.to_i : origin.y.to_i
       # Process ALL cells (texture-backed AND backendless direct cells): the slot is the validity key. A
-      # cell with no stamped slot no-ops (shift_slot/invalidate_slot are nil-safe).
+      # cell with no stamped slot no-ops (shift_slot/invalidate_slot are nil-safe). Slot keys via
+      # slot_axis — the SAME arithmetic the render stamp uses (was term-wise ties-even rounds, which
+      # diverge from the stamp at fractional coords → mis-classified boundary cells).
       layer.widgets.each do |widget|
         wabs = widget.absolute_bounds
-        new_pos = (horizontal ? wabs.x.round.to_i : wabs.y.round.to_i) - lo - axis_origin
+        new_pos = horizontal ? slot_axis(wabs.x, layer.bounds.x, origin.x) : slot_axis(wabs.y, layer.bounds.y, origin.y)
         next if new_pos < new_boundary_buf # before the boundary → not shifted
-        extent = (horizontal ? wabs.width : wabs.height).ceil.to_i
+        extent = PixelSnap.cover(horizontal ? wabs.width : wabs.height)
         old_pos = new_pos - delta # the cell was repositioned by shift_bounds; its pixels were at old_pos
         # Faithful iff the cell's NOW-VISIBLE destination pixels were all sourced from the copied block
         # [src, axis_extent). A WIDEN slides toward the far edge, so a right-clipped cell's visible part
@@ -2349,10 +2429,10 @@ module CrymbleUI
 
       # Blit-shift: copy overlap to temp, clear, restore at new position
       # This preserves cached content for overlap cells → only edge cells need rendering
-      src_x = (overlap_left - old_origin.x).to_i
-      src_y = (overlap_top - old_origin.y).to_i
-      dest_x = (overlap_left - new_origin.x).to_i
-      dest_y = (overlap_top - new_origin.y).to_i
+      src_x = (overlap_left - old_origin.x).to_i # snap-exempt: whole-by-construction (origins + overlap whole)
+      src_y = (overlap_top - old_origin.y).to_i # snap-exempt: whole-by-construction (origins + overlap whole)
+      dest_x = (overlap_left - new_origin.x).to_i # snap-exempt: whole-by-construction (origins + overlap whole)
+      dest_y = (overlap_top - new_origin.y).to_i # snap-exempt: whole-by-construction (origins + overlap whole)
 
       {% if flag?(:DEBUG_RENDER) %}
         puts "  [VIEWPORT_CACHE BLIT-SHIFT] overlap=#{overlap_w}x#{overlap_h}"
@@ -2414,18 +2494,18 @@ module CrymbleUI
       # re-renders fresh (also fixes the boundary background seam — see comment above).
       shift_dx = dest_x - src_x
       shift_dy = dest_y - src_y
-      lo_x = layer.bounds.x.round.to_i
-      lo_y = layer.bounds.y.round.to_i
       # Process ALL cells (texture-backed AND backendless direct cells): the slot, not the texture, is
       # the validity key. A backendless cell whose slot has never been stamped (never rendered / off-
       # buffer) no-ops in every branch (shift_slot/invalidate_slot are nil-safe), so this is safe over the
-      # whole widget list.
+      # whole widget list. Slot keys via slot_axis at the OLD origin (pre-recenter — the buffer still
+      # holds pre-shift pixels); the render stamp next frame uses the recentered origin, related by
+      # exactly the (dest - src) shift applied below.
       layer.widgets.each do |widget|
         wabs = widget.absolute_bounds
-        ob_x = (wabs.x.round.to_i - lo_x) - old_origin.x.to_i
-        ob_y = (wabs.y.round.to_i - lo_y) - old_origin.y.to_i
-        w_w = wabs.width.ceil.to_i
-        w_h = wabs.height.ceil.to_i
+        ob_x = slot_axis(wabs.x, layer.bounds.x, old_origin.x)
+        ob_y = slot_axis(wabs.y, layer.bounds.y, old_origin.y)
+        w_w = PixelSnap.cover(wabs.width)
+        w_h = PixelSnap.cover(wabs.height)
         fully_in_overlap = ob_x >= src_x && ob_y >= src_y &&
                            ob_x + w_w <= src_x + overlap_w && ob_y + w_h <= src_y + overlap_h
         fully_in_old_buffer = ob_x >= 0 && ob_y >= 0 && ob_x + w_w <= buf_w && ob_y + w_h <= buf_h

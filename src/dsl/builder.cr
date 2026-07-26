@@ -1225,13 +1225,10 @@ module CrymbleUI
             private def register_shortcut(shortcut_str : String?, &block : -> Nil)
                 return unless shortcut_str
 
-                # Check if ShortcutManager is initialized (it won't be during first build)
-                # Shortcuts will be registered on the first rebuild after renderer starts
-                begin
-                    manager = Widget.shortcut_manager
-                rescue
-                    return  # ShortcutManager not initialized yet, skip registration
-                end
+                # Not yet initialized during the first build (before the renderer starts) — skip;
+                # shortcuts register on the first rebuild after. Predicate, not a blanket rescue, so a
+                # real error in register() below still surfaces.
+                return unless manager = Widget.shortcut_manager?
 
                 # Determine context: Panel (inside a WindowPanel) or Global (root-level)
                 if panel = find_current_panel

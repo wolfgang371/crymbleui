@@ -152,5 +152,24 @@ describe CrymbleUI::FlowLayout do
             f.children.map(&.bounds.y).uniq.size.should eq(1)
             f.bounds.height.should be < narrow_height
         end
+
+        # The guard above only proves the flow re-flows when it is CALLED — and it never was. The
+        # opt-out is OWN-only, so an ANCESTOR whose own size is sub-max takes the relaxation branch,
+        # returns early, and the flow's layout() is never reached. Reported by a beta tester as a
+        # filter chip list that stops re-arranging once the panel is widened.
+        it "re-flows when an ANCESTOR is re-laid-out at a grown width (the ancestor must not skip)" do
+            flow = CrymbleUI::FlowLayout.new(hspacing: 5.0, vspacing: 4.0)
+            3.times { flow.add_child(TestWidget.new(measured_size: CrymbleUI::Size.new(40.0, 20.0))) }
+            outer = CrymbleUI::VStack.new
+            outer.add_child(flow)
+
+            outer.layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(100.0, 999.0)), CrymbleUI::Vec2.zero)
+            flow.children.map(&.bounds.y).uniq.size.should eq(2)
+            narrow_height = outer.bounds.height
+
+            outer.layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(300.0, 999.0)), CrymbleUI::Vec2.zero)
+            flow.children.map(&.bounds.y).uniq.size.should eq(1)
+            outer.bounds.height.should be < narrow_height
+        end
     end
 end

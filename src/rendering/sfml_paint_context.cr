@@ -2,6 +2,7 @@ require "../csfml3/wrapper"
 require "../core/types"
 require "../core/widget"
 require "./opengl_bindings"
+require "./pixel_snap"
 
 module CrymbleUI
     # SFML-based paint context for clipping and direct rendering
@@ -41,9 +42,10 @@ module CrymbleUI
             return unless font = @default_font
 
             sf_text = SF::Text.new(text, font, size.round.to_u32)
-            # Round to integers to avoid GPU bilinear interpolation blur on glyph atlas
-            # (see commit 20a683b — fractional coords cause washed-out text)
-            sf_text.position = SF.vector2f(position.x.round.to_f32, position.y.round.to_f32)
+            # Snap to whole pixels to avoid GPU bilinear blur on the glyph atlas (20a683b).
+            # PixelSnap (not Float#round): translation-invariant, so all render paths
+            # snap a glyph to the same device pixel (see PixelSnap docs).
+            sf_text.position = SF.vector2f(PixelSnap.snap(position.x).to_f32, PixelSnap.snap(position.y).to_f32)
             sf_text.fill_color = to_sf_color(color)
 
             @render_target.draw(sf_text)

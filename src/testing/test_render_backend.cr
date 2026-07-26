@@ -1,6 +1,7 @@
 require "../core/types"
 require "../rendering/draw_primitive"
 require "../rendering/render_backend"
+require "../rendering/pixel_snap"
 
 module CrymbleUI
   module Testing
@@ -361,8 +362,9 @@ module CrymbleUI
 
         char_width = (size * 0.6).to_i.clamp(4, 20)  # ~60% of height
         char_height = size.to_i.clamp(6, 30)
-        x = position.x.to_i
-        y = position.y.to_i
+        # Same snap as the SFML text path — headless ink lands on production's pixel.
+        x = PixelSnap.snap(position.x).to_i
+        y = PixelSnap.snap(position.y).to_i
 
         text.each_char do |char|
           code = char.ord

@@ -651,14 +651,11 @@ describe "VirtualMatrix scrollbar sync" do
 
       # The scrollbar layer should be marked dirty so the thumb repaints
       # set_scroll_offset_for_sync must call mark_scrollbar_needs_render
+      # A MISSING scrollbar layer is a worse bug than the thumb not repainting — assert it exists (the
+      # old graceful-skip passed when the layer was absent entirely), then that the scroll marked it dirty.
       scrollbar_layer = scroll_view.scrollbar_layer
-      if sl = scrollbar_layer
-        sl.needs_render?.should be_true, "Scrollbar layer not marked dirty after wheel scroll"
-      else
-        # If no scrollbar layer, the scrollbar won't render at all - still a problem
-        # but not the bug we're testing here. Skip gracefully.
-        true.should be_true
-      end
+      scrollbar_layer.should_not be_nil
+      scrollbar_layer.not_nil!.needs_render?.should be_true, "Scrollbar layer not marked dirty after wheel scroll"
     end
   end
 

@@ -95,3 +95,41 @@ A test asserting "content compound cell width == calculate_merged_width regardle
 **Rule**: Size-change detection should live in the base `Widget.layout()`, not in individual subclasses. Button had already called `mark_needs_render` on size change; HStack/VStack had not. Moving this to the framework prevents the same class of bug from recurring.
 
 **Why this check remains necessary after the reactive arc**: After the reactive migration, text-rendering widgets auto-capture the zoom source (`FontSizing.zoom_index_source`, a `Source(Int32)`) inside `to_primitives`, so a zoom change automatically invalidates their primitive cache. However, widget bounds are passed as a plain `Rect` to `to_primitives` — they are not reactive, so a size change never triggers pull-node invalidation. For layout containers like `VStack`, whose `to_primitives` only conditionally draws a background fill and does not read zoom at all, there is no reactive zoom-capture either. The base `Widget.layout()` size-change guard is therefore still the sole mechanism that forces a re-render when layout produces new dimensions.
+
+# The instrument fleet (what proves what)
+
+Four durable instruments replace the old ad-hoc SFML autotest pile (which violated the
+temporary-instrumentation rule above). When hunting a rendering bug, reach for them in this order:
+
+| Instrument | Command | Proves |
+|---|---|---|
+| Headless suite | `crystal spec spec/widgets` + the rest | All logic, layout, disposition, and pixel behavior the TestRenderer models — including text inking, compositor snapping, and blit arithmetic parity with SFML (the rounding/flip algebra is spec'd in `spec/rendering/pixel_snap_spec.cr` / `fbo_math_spec.cr`) |
+| cv-coherency | `tools/cv-coherency.sh` | Cached-vs-immediate CONTENT-layer coherency headless, under `-Dcache_validation -Dverify_bounds` — the verify_bounds asserts (buffer-origin whole+fitting, sticky position invariants) and the sibling no-overlap RE-LAYOUT check (warn + `Widget.sibling_overlap_warnings`, self-tested by `spec/rendering/sibling_overlap_guard_spec.cr`) are ACTIVE only here, so this run is load-bearing, not optional. Blind spots: sticky layers (excluded by design) and uniform buffer-origin drift (cache and reference share the origin) |
+| SFML parity sweep | `tools/sfml-parity.sh` | The axioms headless cannot model: real FBO orientation, GL scissor, glyph atlas, full-stack compositing — 3 configs × scroll patterns with per-phase non-vacuity counters, sticky GAP (black-pixel) + GARBLE (content-color) probes. CAVEAT: the two proven historical fault classes (blit_region recenter, buffer-origin drift) manifest as a DETERMINISTIC GLX crash on the current driver, so exit 2 ("no verdict") must be investigated as a possible regression, never waved through |
+| Real-loop smoke | `spec/autotest/timer_rebuild_autotest.cr` | The SFML wait-event idle path (timer-driven rebuilds without input) |
+
+Perf attribution stays with the dedicated tools (`spec/autotest/grow_perf_autotest.cr`,
+`spec/autotest/vmatrix_resize_perf_autotest.cr`) — measurements, not tests.
+
+Reusable capture tooling for NEW hunts lives in `src/testing/layer_capture.cr` (per-layer/region
+capture, the sticky-inclusive software window compositor, PNG dumps, black-pixel + tolerance
+signatures) — extracted from the retired harnesses; build on it instead of re-copying.
+
+# Past SFML incidents (symptom → fix → guard)
+
+Grep fodder: each retired debugging harness's institutional memory. "Guard" = what goes red today
+if the fix regresses.
+
+| Symptom | Fix | Guard today |
+|---|---|---|
+| Scroll past cache extent → cells snap to row-0 content (blit_region FBO Y-flip put the recenter overlap at the wrong dest; ~48% corruption) | 7e79842 (recenter copy → full blit) | `spec/rendering/instrument_tripwires_spec.cr` (containment: production must never regain a blit_region caller); `virtual_matrix_blit_shift_spec`; parity sweep (crash-class on current driver) |
+| Small scroll down+up leaves garbling (stale background restore through viewport-cache recenter) | 3ee048f | `scroll_view_buffer_recenter_spec`; sweep CONFIG C sub-recenter |
+| ScrollView content floats outside panel during resize-expand | 685adef | `window_panel_resize_content_bounds_spec`, `window_panel_scrollview_resize_spec` |
+| Ruler row ~39 garbled across sticky+content after deep vscroll (compound/sticky positioning cluster) | b25fe3e, ef5a3de, 027571c | `tutorial22_bugs_spec`, `virtual_matrix_sticky_ghosting_spec`, `virtual_matrix_black_rows_spec`, cv-coherency; sweep deep-scroll GARBLE probe |
+| Overlapping panels: drag-reveal ghost / scrollbar bleed-through / thumb frozen during resize | 685adef + 3ee048f | `panel_drag_reveal_ghost_spec` (NEW), `window_panel_scrollview_zindex_spec`, `scroll_view_resize_scrollbar_spec`, `panel_drag_live_rendering_spec` |
+| Slow resize stops mid-drag (Content skip-path reset bounds to (0,0)) | 685adef (`Content#can_skip_layout? → false`) | `window_panel_resize_skip_path_spec` (NEW) |
+| Horizontal sticky-scroll round-trip leaves black unrendered bands (buffer_origin drift) | 3e5904f (origin whole+fitting by construction) | `-Dverify_bounds` asserts via cv-coherency; sweep CONFIG B hops + black-pixel probe |
+| Vertical compound+sticky scroll: wrong data snaps in / blank rows on return | 3e5904f, 7e79842, b25fe3e, 899046d | cv-coherency; `virtual_matrix_fractional_bounds_spec`; sweep pure-V multi-recenter |
+| "Watery"/greyish button text after zoom (text-position rounding + headless truncation hid it) | 20a683b; structurally d2c1bcc; instrument parity 2de7f7e | `button_zoom_pixel_spec`, `composite_snap_spec`, `headless_text_snap_spec` |
+| Garbled text on 2nd zoom cycle (stale SF::Font glyph atlas in a zoom-keyed cache) | 4a7b4a5 (cache deleted) | `instrument_tripwires_spec` guard (d) — cause-level; the atlas class is headless-invisible by nature |
+| VirtualMatrix corruption after 2 zoom cycles (reconciled layer kept stale owner; zoom baseline lost on rebuild) | 4a7b4a5 | `reconcile_layer_registry_spec`, `virtual_matrix_zoom_spec`, `virtual_matrix_zoom_reconcile_spec` (NEW) |

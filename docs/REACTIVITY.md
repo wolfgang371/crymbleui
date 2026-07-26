@@ -59,6 +59,35 @@ frame **iff the aggregate moved**. No change → same number → 0% idle
 CPU, no diffing, no dirty-walk. This is the same
 idea as Salsa / incremental-computation frameworks: identity by version, not by deep comparison.
 
+## Node lifecycle: registration ↔ **dispose**
+
+Auto-capture is one-directional: a node's `get` adds it to each source's `@dependents`, and a source
+clears those only on its own next `set`. That is fine for a source that is set often, but the **global**
+sources (`Theme.@@current_source`, `FontSizing.@@zoom_index_source`) are set only on a rare theme/zoom
+toggle. Every widget's `@primitives_node` reads them while painting, so without an explicit release a
+*discarded* widget generation would stay pinned forever via `Source.@dependents → node → on_dirty → widget`
+— an unbounded per-rebuild leak.
+
+So a node has an end-of-life: **`CacheNode#dispose`** unregisters it from every source/node it captured
+(`dep.remove_dependent(self)`) and drops its `on_dirty` hook. It runs on the trees that are actually thrown
+away:
+
+- **`App#rebuild`** calls `old_root.dispose_subtree` after reconcile — the new tree is built fresh and never
+  inherits a `@primitives_node`, so the old and new node sets are disjoint and disposing the old ones is safe.
+- **`Window#remove_overlay`** / the orphan branch of `cleanup_orphaned_overlays` dispose a dropped popup/menu
+  (overlays live outside `@children`, migrated live across rebuilds, so they're released on their own drop
+  path, not by the `old_root` walk).
+
+Disposing is node-only: it never touches `@background_backend` (carried into the new tree by
+`copy_state_from`) or focus/parent. It's terminal by construction — a disposed node's widget is unreachable
+from `@root`, so it never paints again; and if one somehow did, `get_primitives` lazily mints a fresh node
+(self-healing, no corruption).
+
+**`Widget#dispose_pull_nodes` is the override seam.** The base releases `@primitives_node` (the only pull
+node today). A widget that owns another pull node (e.g. a future `KeyedCached` buffer that reads zoom) MUST
+override it as `super` + dispose its own — the contract is *every pull node a widget owns is released here*,
+so the leak fix stays complete as new node-backed widgets are added.
+
 ## Two orthogonal axes (the thing to keep straight)
 
 `cached.cr` tracks **what** a node depends on. That is *not* the same question as **where** its cached pixels

@@ -20,6 +20,11 @@
 # always-fitting, one reader / one writer) is a raise at the writer and both composite seams. This is the
 # permanent gate for that invariant on the ScrollView/VMatrix specs — one build carries both flags.
 #
+# The list also carries the LAYOUT and panel-resize specs. -Dverify_bounds now re-checks the sibling
+# no-overlap invariant on every re-LAYOUT (as a warn + counter, see layer_renderer#warn_sibling_overlaps),
+# and this is the only build that compiles that flag — without these entries the widened check would
+# never run over the stacks and panels it exists to watch.
+#
 # Usage: source setup.sh && ./tools/cv-coherency.sh
 set -euo pipefail
 
@@ -39,6 +44,7 @@ crystal spec -Dcache_validation -Dverify_bounds \
   spec/widgets/virtual_matrix_ruler_scroll_spec.cr \
   spec/widgets/virtual_matrix_content_offset_spec.cr \
   spec/widgets/virtual_matrix_row_gap_spec.cr \
+  spec/widgets/virtual_matrix_reconcile_adapter_contract_spec.cr \
   spec/widgets/virtual_matrix_sticky_row_hscroll_spec.cr \
   spec/widgets/virtual_matrix_tab_roundrobin_spec.cr \
   spec/widgets/virtual_matrix_text_input_spec.cr \
@@ -47,4 +53,11 @@ crystal spec -Dcache_validation -Dverify_bounds \
   spec/widgets/virtual_matrix/cursor_overlay_spec.cr \
   spec/widgets/virtual_matrix/sticky_snap_spec.cr \
   spec/widgets/virtual_matrix/tutorial22_bugs_spec.cr \
-  spec/widgets/virtual_matrix/tab_wraparound_ghost_spec.cr
+  spec/widgets/virtual_matrix/tab_wraparound_ghost_spec.cr \
+  spec/rendering/sibling_overlap_guard_spec.cr \
+  spec/rendering/panel_resize_reflow_spec.cr \
+  spec/rendering/panel_resize_ghost_spec.cr \
+  spec/layout/subtree_relaxation_skip_spec.cr \
+  spec/layout/vstack_spec.cr \
+  spec/layout/hstack_spec.cr \
+  spec/layout/flow_spec.cr

@@ -145,8 +145,8 @@ module CrymbleUI
 
         # Our chrome backend spans the full strip and is BlendNone-blitted over its whole area —
         # including where our Menu children sit (separate same-layer widgets rendered ON TOP of the
-        # strip). The renderer's O(1) chrome/content NON-OVERLAP invariant (widget.cr:550) does not
-        # hold for us: our content overlaps our chrome. So whenever WE re-render, our menus must
+        # strip). The renderer's O(1) chrome/content NON-OVERLAP invariant (chrome and content have
+        # non-overlapping bounds) does not hold for us: our content overlaps our chrome. So whenever WE re-render, our menus must
         # re-render too, else the strip's re-blit erases their text mid-resize. Declared local
         # exception — cheap (a handful of menus); the general selective-render path stays O(1).
         def mark_needs_render

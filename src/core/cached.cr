@@ -12,6 +12,13 @@ module CrymbleUI
   # Anything exposing a monotonic version. A raw counter (Rev / Source) OR a derived node (CacheNode).
   module VersionSource
     abstract def version : UInt64
+
+    # Unregister `node` as a dependent of self. Called only from CacheNode#dispose, over the node's
+    # captured deps (a Set(VersionSource)) — so every VersionSource must answer it. NO-OP default: a
+    # bare Rev tracks no dependents (and is never captured as a dep anyway). Source and CacheNode
+    # override. This is off Source#get's hot path (dispose runs only on a discarded tree/overlay).
+    def remove_dependent(node : CacheNode) : Nil
+    end
   end
 
   # A bare monotonic counter — a leaf input rev not carrying a value (e.g. a layer's position_rev).
@@ -58,6 +65,18 @@ module CrymbleUI
       stale = @dependents
       @dependents = Set(CacheNode).new
       stale.each(&.mark_dirty)
+    end
+
+    # Drop a disposed dependent (from CacheNode#dispose). Between `set`s this is the ONLY thing that
+    # shrinks @dependents — the fix for immortal global Sources (theme/zoom) that would otherwise pin
+    # every rebuilt widget's node forever (they're `set` only on a theme/zoom toggle).
+    def remove_dependent(node : CacheNode) : Nil
+      @dependents.delete(node)
+    end
+
+    # Observability: the leak shows as @dependents growing per rebuild; the fix keeps it steady.
+    def dependent_count : Int32
+      @dependents.size
     end
 
     def version : UInt64
@@ -207,6 +226,27 @@ module CrymbleUI
     # after any touch / dep change, until the next get recomputes.
     def valid? : Bool
       !@value_stale
+    end
+
+    # Drop a disposed dependent node (node→node back-edge; mirrors Source#remove_dependent).
+    def remove_dependent(node : CacheNode) : Nil
+      @dependents.delete(node)
+    end
+
+    def dependent_count : Int32
+      @dependents.size
+    end
+
+    # Sever this node from the reactive graph: unregister it from every source/node it read (so an
+    # immortal global Source stops pinning it) and drop the enqueue hook (releasing its captured
+    # widget). Called on the DISCARDED widget tree in App#rebuild and on a dropped overlay. Terminal
+    # by the external invariant that a disposed node's widget is unreachable from @root (never rendered
+    # again). If one WERE rendered, get_primitives lazily mints a FRESH node — self-healing, no
+    # corruption. Idempotent: a second call finds @deps already empty.
+    def dispose : Nil
+      @deps.each(&.remove_dependent(self))
+      @deps.clear
+      @on_dirty = nil
     end
 
     # Register me with the node reading me (nested fold), if any.

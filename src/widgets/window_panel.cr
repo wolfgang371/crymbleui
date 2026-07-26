@@ -1332,15 +1332,6 @@ module CrymbleUI
             z_index == max_z
         end
 
-        # Propagate render invalidation up to root (so renderer knows to redraw)
-        private def propagate_render_invalidation
-            current : Widget? = self
-            while current
-                current.mark_needs_render
-                current = current.parent
-            end
-        end
-
         # Concise inspect for readable spec output (prevents 80MB dumps)
         def inspect(io : IO)
             io << "WindowPanel(id=#{@id.inspect}, \"#{title}\", x=#{x}, y=#{y}, w=#{width}, h=#{height}, z=#{z_index})"

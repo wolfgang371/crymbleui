@@ -3,6 +3,13 @@ require "../spec_helper"
 # Visual regression tests based on reported rendering failures
 # These test VISIBLE behavior from a user perspective, not internal implementation
 
+# The text strings a widget's primitives would DRAW. A widget that emits a background FillRect but
+# DROPS its text (the "renders white/blank" bug class these tests exist for) still has size > 0 — so
+# assert the actual text, not just "some primitive".
+private def drawn_texts(prims)
+  prims.select(&.is_a?(CrymbleUI::DrawText)).map(&.as(CrymbleUI::DrawText).text)
+end
+
 describe "Visual Rendering - User Perspective" do
   describe "Content visibility in panels" do
     it "renders button text visible inside panel (not white)" do
@@ -43,10 +50,10 @@ describe "Visual Rendering - User Perspective" do
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
       window.layout(constraints, CrymbleUI::Vec2.zero)
 
-      # Each widget should generate visible primitives
-      button1.get_primitives(button1.bounds).size.should be > 0
-      button2.get_primitives(button2.bounds).size.should be > 0
-      text.get_primitives(text.bounds).size.should be > 0
+      # Each widget should render its ACTUAL text (not just "some primitive")
+      drawn_texts(button1.get_primitives(button1.bounds)).should contain("Button 1")
+      drawn_texts(button2.get_primitives(button2.bounds)).should contain("Button 2")
+      drawn_texts(text.get_primitives(text.bounds)).should contain("Hello World")
     end
 
     it "renders content in window root layer (not white)" do
@@ -60,9 +67,9 @@ describe "Visual Rendering - User Perspective" do
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
       window.layout(constraints, CrymbleUI::Vec2.zero)
 
-      # Content widgets in root should be visible
-      button.get_primitives(button.bounds).size.should be > 0
-      text.get_primitives(text.bounds).size.should be > 0
+      # Content widgets in root should render their actual text
+      drawn_texts(button.get_primitives(button.bounds)).should contain("Root Button")
+      drawn_texts(text.get_primitives(text.bounds)).should contain("Root Text")
     end
   end
 
