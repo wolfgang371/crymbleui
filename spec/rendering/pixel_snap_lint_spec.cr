@@ -110,8 +110,8 @@ LINT_EXPECTED = {
 
 describe "PixelSnap lint tripwire" do
   it "covers exactly the globbed render-path files (a rename cannot disarm the guard)" do
-    globbed = Dir.glob("src/rendering/*.cr").to_set
-    globbed.concat(Dir.glob("src/widgets/virtual_matrix/*.cr"))
+    globbed = src_glob("src/rendering/*.cr").to_set
+    globbed.concat(src_glob("src/widgets/virtual_matrix/*.cr"))
     globbed << "src/testing/test_render_backend.cr"
     globbed << "src/testing/test_renderer.cr"
     globbed << "src/widgets/virtual_matrix.cr"

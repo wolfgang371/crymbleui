@@ -272,9 +272,10 @@ describe "relaxation-skip perf budget" do
     # DecoratedContainer) adopting it would keep every Button-only fixture green while every real panel
     # loses its O(1) grow — invisible to the budget above.
     it "FlowLayout is the sole layout_depends_on_available_space? override" do
-        src = Dir.glob(File.join(__DIR__, "..", "..", "src", "**", "*.cr"))
+        src = src_glob("src/**/*.cr")
+        src.should_not be_empty # the guard is worthless if the scan found no sources at all
         overrides = src.select do |f|
-            next false if f.ends_with?("core/widget.cr") # the base definition itself
+            next false if f.ends_with?("src/core/widget.cr") # the base definition itself
             File.read(f).includes?("def layout_depends_on_available_space?")
         end
         overrides.map { |f| File.basename(f) }.should eq(["flow.cr"])

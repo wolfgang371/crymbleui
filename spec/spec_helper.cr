@@ -62,6 +62,17 @@ end
   end
 {% end %}
 
+# Source-scanning specs (lint tripwires, containment guards, "is this still the sole override?")
+# compare paths against "src/..." literals. Dir.glob hands back PLATFORM separators, so on Windows the
+# results come back as "src\\rendering\\layer_renderer.cr" and every such comparison fails; worse, a
+# pattern built with File.join contains backslashes, which Dir.glob reads as ESCAPES, so it silently
+# matches nothing and the guard passes vacuously (that is how three of these reached Windows CI green
+# on Linux). Glob with forward slashes and normalise what comes back - one owner, so the next
+# path-scanning spec cannot re-learn this the hard way.
+def src_glob(pattern : String) : Array(String)
+  Dir.glob(pattern).map(&.gsub('\\', '/')).sort
+end
+
 # Concrete widget implementation for testing.
 # NOTE: Use only as LEAF widget (for controlled sizing). For testing container
 # nesting behavior, use real widgets (HStack, VStack, etc.) instead.

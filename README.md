@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.0.7**
+**Version 1.0.8**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -22,7 +22,7 @@ Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
 - src/: ~33761 LOC
-- spec/: ~63473 LOC
+- spec/: ~63474 LOC
 
 ## Features
 

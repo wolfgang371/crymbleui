@@ -27,7 +27,7 @@ private record BlitRegionSite, path : String, lineno : Int32, text : String
 
 private def blit_region_call_sites : Array(BlitRegionSite)
   sites = [] of BlitRegionSite
-  Dir.glob("src/**/*.cr").sort.each do |path|
+  src_glob("src/**/*.cr").each do |path|
     File.read_lines(path).each_with_index do |raw, i|
       code = tripwire_strip(raw)
       # `\.blit_region\(` = dot + name + open-paren: excludes `def blit_region`,
