@@ -34,7 +34,7 @@ module CrymbleUI
         when "alt"
           alt = true
         when "shift"
-          shift = false
+          shift = true
         when "cmd", "command", "super", "win"
           system = true
         else

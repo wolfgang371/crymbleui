@@ -430,6 +430,37 @@ module CrymbleUI
       @@all_layers.clear
     end
 
+    # Drop and RELEASE every widget on `layer` that `root` can no longer reach.
+    #
+    # Both orphan sweeps below need exactly this, because it is one rule: a widget whose parent
+    # chain no longer reaches the root can never be rendered again (the renderer walks from the
+    # root and from this list, and this removes it from the list), so its surfaces are dead — and
+    # under SFML a surface is a driver texture the collector cannot see, which makes releasing it
+    # the only thing that frees the memory. Everything under it via @children is unreachable for
+    # the same reason, which is what makes dispose_subtree the right instrument.
+    #
+    # Reachability is asked per widget rather than inferred from the layer's own state: a layer
+    # holds widgets it does not own, so "this layer is dying" does not by itself mean "this widget
+    # is dead".
+    private def self.release_unreachable_widgets(layer : Layer, root : Widget) : Nil
+      layer.widgets.reject! do |widget|
+        orphaned = !reachable_from?(widget, root)
+        widget.dispose_subtree if orphaned
+        orphaned
+      end
+    end
+
+    # Is `widget` still part of the live tree? Walks the parent chain to `root`. A layer holds
+    # widgets it does not own, so both orphan sweeps ask this before discarding anything.
+    private def self.reachable_from?(widget : Widget, root : Widget) : Bool
+      current : Widget? = widget
+      while current
+        return true if current == root
+        current = current.parent
+      end
+      false
+    end
+
     # Clean up orphaned layers from the registry
     # Called during app rebuild to prevent memory accumulation
     # An orphaned layer is one whose owner_widget is not in the active widget tree
@@ -444,6 +475,14 @@ module CrymbleUI
           backend.dispose # Release GPU memory
           layer.backend = nil
         end
+        # ALSO release the widgets STANDING on the layer. They fall through both teardown nets:
+        # dispose_subtree only recurses @children, and a layer-hosted widget (VirtualMatrix cells
+        # live in layer.widgets, not in any parent's @children) is not in it — so until now only
+        # the layer's own surface was freed while every per-widget surface on it was stranded.
+        # That is the bulk of a discarded panel's GPU memory: one widget_backend plus one
+        # background_backend per cell.
+        release_unreachable_widgets(layer, root)
+        layer.widgets.clear
         @@all_layers.delete(layer)
 
         {% if flag?(:DEBUG_RENDER) %}
@@ -469,20 +508,15 @@ module CrymbleUI
     # New widgets get appended, old ones accumulate → stale rendering.
     def self.cleanup_orphaned_widgets(root : Widget)
       active_layers(root).each do |layer|
-        original_size = layer.widgets.size
-        layer.widgets.reject! do |widget|
-          # Walk up parent chain — widget must be reachable from root
-          current : Widget? = widget
-          in_tree = false
-          while current
-            if current == root
-              in_tree = true
-              break
-            end
-            current = current.parent
-          end
-          !in_tree
-        end
+        {% if flag?(:DEBUG_RENDER) %}
+          original_size = layer.widgets.size
+        {% end %}
+        # Releases, not merely drops. Stranding a surface HERE is worse than on an orphaned layer:
+        # this layer stays ALIVE, so nothing else ever comes back for it. Until this was fixed the
+        # release happened only INCIDENTALLY, via App#rebuild's discarded-generation walk reaching
+        # the same widgets through the old root's @children — remove that walk and a WindowPanel's
+        # Chrome (580x30) was left unreleased on a surviving layer.
+        release_unreachable_widgets(layer, root)
         {% if flag?(:DEBUG_RENDER) %}
           removed = original_size - layer.widgets.size
           if removed > 0

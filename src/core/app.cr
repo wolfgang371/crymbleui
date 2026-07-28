@@ -371,7 +371,13 @@ module CrymbleUI
       # built new_root fresh and never copies @primitives_node, so old and new node sets are disjoint;
       # runs after all old→new ref repointing above. (Overlays are migrated-LIVE out of old_root and
       # disposed on their own drop paths — see Window#remove_overlay / cleanup_orphaned_overlays.)
-      old_root.try(&.dispose_subtree)
+      # NEVER on the LIVE tree. A build() that MEMOIZES its root — TestApp#build after
+      # root_widget=, and any consumer that caches the widget it returns — makes old_root and
+      # new_root the SAME object. dispose_subtree severs @children and drops backend references,
+      # and an imperatively-assembled tree cannot rebuild itself from build(), so that would gut
+      # the live tree unrecoverably. Window#copy_state_from guards the identical case at its own
+      # seam (`return if old_window.same?(self)`, window.cr).
+      old_root.try { |r| r.dispose_subtree unless r.same?(new_root) }
 
       # Validate reconciliation integrity (debug mode only).
       # Catches orphaned references that would cause rendering bugs.

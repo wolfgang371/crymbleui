@@ -1012,6 +1012,26 @@ module SF
       @handle
     end
 
+    # Explicit native release. The Boehm GC is NOT a resource manager for this: it sees a
+    # ~100-byte wrapper and cannot feel the multi-megabyte driver allocation behind it, so a
+    # finalizer-driven destroy is both unbounded in time AND the documented X_GLXMakeCurrent
+    # BadAccess class (it fires from whatever context the collector happens to be in). The owner
+    # releases explicitly; finalize below stays as the last-resort net and short-circuits after.
+    def destroy! : Nil
+      return if @handle.null?
+      LibCSFML.sfRenderTexture_destroy(@handle)
+      @handle = Pointer(Void).null.as(LibCSFML::RenderTexture)
+      # sfRenderTexture_getTexture returns a pointer OWNED BY the render-texture, wrapped here
+      # with owns=false and MEMOIZED. After the destroy that pointer is freed memory, so the memo
+      # must go too — otherwise #texture keeps handing out a dangling view (a SILENT
+      # use-after-free, strictly worse than a null deref).
+      @texture_wrapper = nil
+    end
+
+    def destroyed? : Bool
+      @handle.null?
+    end
+
     def finalize
       LibCSFML.sfRenderTexture_destroy(@handle) unless @handle.null?
     end

@@ -1295,10 +1295,17 @@ module CrymbleUI
             # Copy background_backend from old widget (if it exists)
             # Note: We can't check size here because layout hasn't happened yet
             # Size validation happens during rendering (invariant g will catch mismatches)
+            # TRANSFER, not copy: the old widget releases its pointer as we take it. While both
+            # sides held the same object, a discarded widget's background could never be released
+            # (disposing it would have destroyed the live widget's background). After the transfer,
+            # a background still present on a discarded widget is provably UNSHARED, which is what
+            # lets dispose_subtree release it. Uses the direct seam so it cannot be mistaken for a
+            # release of the object itself.
             if old_bg = old_widget.background_backend
                 @background_backend = old_bg
+                old_widget.relinquish_background_backend
                 {% if flag?(:DEBUG_RENDER) %}
-                    puts "[COPY_STATE] #{self.class.name.split("::").last}##{path_id} <- copied background (backend=#{old_bg.object_id}, size=#{old_bg.width}x#{old_bg.height})"
+                    puts "[COPY_STATE] #{self.class.name.split("::").last}##{path_id} <- adopted background (backend=#{old_bg.object_id}, size=#{old_bg.width}x#{old_bg.height})"
                 {% end %}
             end
 
@@ -1899,6 +1906,12 @@ module CrymbleUI
             @children.each(&.reset_render_caches_recursive)
         end
 
+        # Give up the pointer to a background handed to a reconciled twin. Drops the REFERENCE
+        # only — the adopting widget now owns the object. Protected so only reconcile can call it.
+        protected def relinquish_background_backend : Nil
+            @background_backend = nil
+        end
+
         # Dispose the pull-cache node(s) this widget owns — unregistering them from the global Sources
         # (theme/zoom) their recompute captured, and dropping the enqueue closure that held this widget.
         # The OVERRIDE SEAM: the base owns @primitives_node (the sole pull node today); a subclass that
@@ -1910,12 +1923,48 @@ module CrymbleUI
             @primitives_node = nil
         end
 
-        # Release a whole DISCARDED subtree's pull nodes. Called on old_root after a rebuild and on a
-        # dropped overlay, so the immortal global Sources stop pinning the dead generation. Same
-        # children-walk shape as reset_render_caches_recursive.
+        # Release a whole DISCARDED subtree: its pull nodes, its backend REFERENCES, and its own
+        # parent/child links. Called on old_root after a rebuild and on a dropped overlay.
+        #
+        # Two distinct reasons, both load-bearing:
+        #  (1) pull nodes — the immortal global Sources (theme/zoom) stop pinning the dead generation;
+        #  (2) links + backend refs — Boehm scans CONSERVATIVELY, so one stale word that merely looks
+        #      like a pointer pins one node; and because a generation is a densely-linked graph in
+        #      which every rendered widget holds a multi-megabyte backend, that single false positive
+        #      would otherwise keep the WHOLE generation resident. Severing the graph makes a false
+        #      positive cost ONE node instead of the entire tree. (Measured on embrace, THIS variant:
+        #      live backends after closing 16 shapes 1737 -> 331, orphaned-but-alive 1573 -> 167,
+        #      per-cycle heap floor climb ~240 MB -> ~150 MB. It is a large term, NOT the whole
+        #      report: the remaining climb is a separate defect — see the backlog.)
+        #
+        # REFERENCES ONLY — this never destroys a backend. `copy_state_from` hands the reconciled
+        # widget the old widget's @background_backend (ONE shared object), so dropping the old side's
+        # pointer is safe by construction, while destroying it would corrupt the LIVE tree.
+        # Recurse BEFORE clearing @children, or the walk loses its own subtree.
+        #
+        # @parent is deliberately KEPT. Clearing the DOWNWARD links is what breaks the cascade (a
+        # retained node would otherwise pin every descendant and every descendant's backend); an
+        # upward chain pins only a bounded ancestor path. Severing it is also actively wrong, but
+        # via THIS call site, not the rebuild one: Window#cleanup_orphaned_overlays calls
+        # dispose_subtree on a dropped overlay while deliberately KEEPING its parent, because focus
+        # and find_window walk that chain. (The rebuild walk at App#rebuild can never reach an
+        # overlay at all — overlays live in Window@overlays, never in @children, and
+        # Window#copy_state_from re-points a migrated overlay's parent to the NEW window.)
+        # Guarded by spec/widgets/combo_box_reconcile_focus_spec.cr.
         def dispose_subtree
             dispose_pull_nodes
             @children.each(&.dispose_subtree)
+            @children.clear
+            # RELEASE, don't just unlink: under SFML the payload is a driver texture the collector
+            # cannot see, so dropping the pointer frees nothing at all.
+            # Both are unshared by construction, which is what makes releasing them safe:
+            # copy_state_from deliberately never carries @widget_backend, and it TRANSFERS
+            # @background_backend (adopt + relinquish) rather than copying it — so anything still
+            # held here was never adopted and this widget is its only owner.
+            @widget_backend.try(&.dispose)
+            @widget_backend = nil
+            @background_backend.try(&.dispose)
+            @background_backend = nil
         end
 
         # Debug: print widget tree

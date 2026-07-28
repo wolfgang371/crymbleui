@@ -1,6 +1,13 @@
 require "../core/types"
 
 module CrymbleUI
+  # Raised when a backend is used after release. DISTINGUISHED on purpose: the frame loops rescue
+  # broadly and recover by resetting caches, which would swallow this at 60 Hz into exactly the
+  # abandonment it exists to report — a post-release use is a defect, not a transient hiccup, so
+  # both renderers let this one through.
+  class DisposedBackendError < Exception
+  end
+
   # Abstract render backend interface
   # Provides SFML-like drawing operations that can be implemented by:
   # - CrSFMLBackend (wraps SF::RenderTexture)
@@ -79,12 +86,56 @@ module CrymbleUI
     # Returns row-major array of width*height packed pixel values
     abstract def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
 
-    # Explicitly release GPU resources (textures, framebuffers)
-    # Called when backend is being replaced due to size change
-    # Without explicit disposal, old backends are orphaned and rely on GC
-    # which can cause GPU memory accumulation under rapid size changes
-    def dispose
-      # Default: no-op (subclasses implement actual resource cleanup)
+    # Release this backend. FINAL — implementors provide `release_payload`, not their own
+    # `dispose`, so idempotence, the flag and their ordering are structural rather than discipline
+    # repeated (and eventually forgotten) in every backend. Idempotent by contract: teardown paths
+    # legitimately reach the same backend twice, and a double-release raise would turn that into a
+    # crash. After this, the backend must not be drawn to or read from — see `assert_live`.
+    def dispose : Nil
+      return if @disposed
+      @disposed = true
+      release_payload
+    end
+
+    # What this backend actually frees. Called exactly once, by `dispose`.
+    #
+    # ABSTRACT ON PURPOSE: releasing used to be a no-op DEFAULT on this interface, and an inherited
+    # no-op is invisible — the renderer called dispose diligently at every replace site, each with
+    # a "release GPU memory" comment, and nothing was ever freed. That is how an SFML-only leak
+    # survived four headless fix attempts. Every implementor must now state its policy explicitly.
+    #
+    # The payload is NOT reclaimable by the collector on the SFML side: it is a driver-side
+    # RenderTexture behind a ~100-byte Crystal wrapper, so the GC sees nothing worth collecting
+    # while multiple MB stay resident. Release is the owner's job, not the collector's.
+    protected abstract def release_payload : Nil
+
+    # Has dispose already run? ALWAYS legal, including after release — a teardown path asks this to
+    # stay idempotent and specs assert release directly instead of inferring it from a memory
+    # measurement.
+    def disposed? : Bool
+      @disposed
+    end
+
+    @disposed = false
+
+    # Guard for every operation that touches the payload. Post-release use is a real defect —
+    # under SFML it reads a destroyed driver texture — so it fails loudly rather than silently
+    # drawing nothing. Anything answerable from Crystal-side state alone (width, height, disposed?,
+    # counters, inspect) stays legal, because the harness aggregates those over registries that
+    # deliberately outlive the backends in them.
+    protected def assert_live(op : String) : Nil
+      return unless @disposed
+      raise DisposedBackendError.new(
+        "#{self.class.name.split("::").last}##{op} on a DISPOSED backend (#{width}x#{height})")
+    end
+
+    # The dangerous shape is a LIVE receiver reading a DEAD source (or writing a dead target): the
+    # receiver's own flag says nothing about it, so the blit family checks the other side too.
+    protected def assert_live_other(other : RenderBackend, op : String, role : String) : Nil
+      return unless other.disposed?
+      raise DisposedBackendError.new(
+        "#{self.class.name.split("::").last}##{op} with a DISPOSED #{role} backend " \
+        "(#{other.width}x#{other.height})")
     end
   end
 end

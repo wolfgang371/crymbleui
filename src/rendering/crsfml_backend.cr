@@ -13,6 +13,8 @@ module CrymbleUI
     include RenderBackend
 
     @texture : SF::RenderTexture
+    @width : Int32
+    @height : Int32
     @font : SF::Font
     @clip_stack : Array(SF::IntRect) # Stack of scissor clip rectangles
 
@@ -26,6 +28,12 @@ module CrymbleUI
       @texture = SF::RenderTexture.new(width.to_u32, height.to_u32)
       @font = font
       @clip_stack = [] of SF::IntRect
+      # Cached because they must remain answerable AFTER dispose (blit-plan bookkeeping and the
+      # size-compare in render_single_widget both read them). Querying the destroyed texture would
+      # be sfRenderTexture_getSize(NULL) — a hard SEGFAULT that no raise-on-use contract can catch.
+      # Equivalent by construction: sfRenderTexture_create takes exactly this size.
+      @width = width
+      @height = height
 
       # CRITICAL: Clear GPU texture immediately to prevent garbage from previous allocations
       # Without this, newly created backends inherit GPU memory from freed backends → contamination!
@@ -33,24 +41,29 @@ module CrymbleUI
       @texture.clear(SF::Color::Transparent)
     end
 
-    # Get underlying SFML texture (for sprite creation)
+    # Get underlying SFML texture (for sprite creation).
+    # Guarded: after dispose the underlying pointer is freed memory, and handing it to a sprite or
+    # copy_to_image would be a silent use-after-free rather than a clean failure.
     def texture : SF::Texture
+      assert_live("texture")
       @texture.texture
     end
 
     def width : Int32
-      @texture.size.x.to_i
+      @width
     end
 
     def height : Int32
-      @texture.size.y.to_i
+      @height
     end
 
     def clear(color : Color)
+      assert_live("clear")
       @texture.clear(to_sf_color(color))
     end
 
     def fill_rect(bounds : Rect, color : Color)
+      assert_live("fill_rect")
       rect = SF::RectangleShape.new(SF.vector2f(bounds.width, bounds.height))
       rect.position = SF.vector2f(bounds.x, bounds.y)
       rect.fill_color = to_sf_color(color)
@@ -58,6 +71,7 @@ module CrymbleUI
     end
 
     def draw_rect(bounds : Rect, color : Color, width : Float64 = 1.0)
+      assert_live("draw_rect")
       # Draw border as 4 filled rectangles instead of SFML outline_thickness
       # SFML's outline_thickness centers on edges, causing sub-pixel artifacts at fractional zoom levels
       sf_color = to_sf_color(color)
@@ -93,6 +107,7 @@ module CrymbleUI
     end
 
     def draw_line(x1 : Float64, y1 : Float64, x2 : Float64, y2 : Float64, color : Color, width : Float64 = 1.0)
+      assert_live("draw_line")
       # Draw line as thin rotated rectangle (SFML doesn't have line primitive)
       dx = x2 - x1
       dy = y2 - y1
@@ -108,6 +123,7 @@ module CrymbleUI
     end
 
     def draw_circle(center_x : Float64, center_y : Float64, radius : Float64, color : Color, fill : Bool = true)
+      assert_live("draw_circle")
       circle = SF::CircleShape.new(radius.to_f32)
       # SFML circles are positioned by top-left corner, so offset by radius
       circle.position = SF.vector2f((center_x - radius).to_f32, (center_y - radius).to_f32)
@@ -122,6 +138,7 @@ module CrymbleUI
     end
 
     def fill_triangle(p1 : Vec2, p2 : Vec2, p3 : Vec2, color : Color)
+      assert_live("fill_triangle")
       # SFML ConvexShape for triangle (3 points)
       shape = SF::ConvexShape.new(3)
       shape.set_point(0, SF.vector2f(p1.x.to_f32, p1.y.to_f32))
@@ -132,6 +149,7 @@ module CrymbleUI
     end
 
     def draw_text(text : String, position : Vec2, color : Color, size : Float64)
+      assert_live("draw_text")
       # Ensure this RenderTexture is the active OpenGL target before drawing
       # Without this, text may render to wrong texture when multiple RenderTextures exist
       @texture.active = true
@@ -148,6 +166,7 @@ module CrymbleUI
     @@image_cache = Hash(String, SF::Texture).new
 
     def draw_image(source : ImageSource, bounds : Rect, color : Color)
+      assert_live("draw_image")
       @texture.active = true
       texture = @@image_cache[source.key]? || begin
         # Cache miss. Embedded bytes (compile-time, CWD-independent) take priority;
@@ -178,6 +197,7 @@ module CrymbleUI
     end
 
     def display
+      assert_live("display")
       @texture.display
       # Release this RenderTexture's GL context back to SFML's shared context after each layer.
       # draw_text/draw_image do `@texture.active = true` (glXMakeCurrent) but never deactivate, so a
@@ -190,6 +210,7 @@ module CrymbleUI
 
     # Sample a pixel from the texture (for debugging)
     def debug_sample_pixel(x : Int32, y : Int32) : String
+      assert_live("debug_sample_pixel")
       img = @texture.texture.copy_to_image
       if x >= 0 && x < img.size.x.to_i && y >= 0 && y < img.size.y.to_i
         px = img.get_pixel(x, y)
@@ -208,6 +229,8 @@ module CrymbleUI
     # Adding Y-flip here breaks ALL rendering (everything appears upside-down).
     # See blit_region() for the case where Y-flip IS needed (partial texture sampling).
     def blit(source : RenderBackend, dest_x : Int32, dest_y : Int32)
+      assert_live("blit")
+      assert_live_other(source, "blit", "source")
       # Cast to CrSFMLBackend to access texture
       if source.is_a?(CrSFMLBackend)
         sprite = SF::Sprite.new(source.texture)
@@ -229,6 +252,8 @@ module CrymbleUI
     # Uses SFML texture rect to sample region (GPU→GPU copy, very fast)
     # IMPORTANT: RenderTexture.texture is Y-flipped, so texture_rect Y must be inverted
     def blit_region(source : RenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32)
+      assert_live("blit_region")
+      assert_live_other(source, "blit_region", "source")
       if source.is_a?(CrSFMLBackend)
         {% if flag?(:DEBUG_RENDER) %}
           puts "      [BLIT_REGION] backend#{source.object_id}[(#{src_x},#{src_y}) #{width}x#{height}] → backend#{self.object_id} at (#{dest_x}, #{dest_y})"
@@ -254,6 +279,7 @@ module CrymbleUI
     # Get pixels from rectangular region (for background memorization)
     # GPU→CPU transfer - slow but only happens once per widget on first render
     def get_pixels(x : Int32, y : Int32, width : Int32, height : Int32) : Array(Color)
+      assert_live("get_pixels")
       # Copy texture to image (GPU→CPU)
       image = @texture.texture.copy_to_image
       pixels = [] of Color
@@ -271,6 +297,7 @@ module CrymbleUI
     # Creates Image from pixel array, then draws to RenderTexture via sprite
     # Can't use texture.update() on RenderTexture - causes upside-down rendering
     def set_pixels(x : Int32, y : Int32, width : Int32, height : Int32, pixels : Array(Color))
+      assert_live("set_pixels")
       return if pixels.empty?
 
       # Create SFML Image and populate with pixels
@@ -292,12 +319,14 @@ module CrymbleUI
     # Use ceil for width/height to avoid off-by-one when bounds are fractional
     # (matches compositor which uses .ceil.to_i for texture_rect)
     def push_clip(rect : Rect)
+      assert_live("push_clip")
       @clip_stack << SF.int_rect(rect.x.to_i, rect.y.to_i, rect.width.ceil.to_i, rect.height.ceil.to_i)
       apply_clip
     end
 
     # Pop clipping region from stack
     def pop_clip
+      assert_live("pop_clip")
       @clip_stack.pop
       apply_clip
     end
@@ -306,6 +335,7 @@ module CrymbleUI
     # Used when drawing to OTHER backends while a clip is active on THIS backend
     # OpenGL scissor is global state, so we must disable it to avoid affecting other textures
     def suspend_clip
+      assert_live("suspend_clip")
       display = ENV["DISPLAY"]?
       return if display.nil? || display.empty?
 
@@ -318,6 +348,7 @@ module CrymbleUI
     # Resume scissor clipping after suspend_clip
     # Re-enables GL scissor test if there's an active clip on the stack
     def resume_clip
+      assert_live("resume_clip")
       display = ENV["DISPLAY"]?
       return if display.nil? || display.empty?
 
@@ -364,6 +395,7 @@ module CrymbleUI
     # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)
     # GPU→CPU transfer via copy_to_image — use sparingly (cache validation only)
     def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
+      assert_live("capture_region_pixels")
       image = @texture.texture.copy_to_image
       result = Array(UInt32).new(w * h, 0_u32)
       h.times do |dy|
@@ -379,10 +411,34 @@ module CrymbleUI
       result
     end
 
-    # No-op: let GC handle RenderTexture cleanup.
-    # Texture pooling was attempted but causes OpenGL FBO state corruption
-    # (garbled text, ghost backgrounds) with both SFML 2.5 and 3.0.
-    def dispose
+    # Release the native RenderTexture. NOT pooling — nothing here is ever reused; the earlier
+    # pooling attempt corrupted FBO state (garbled text, ghost backgrounds) because it REUSED
+    # textures, which is a different thing from freeing them. Freeing is what was missing: the GC
+    # cannot feel driver memory, so an empty dispose meant no texture allocated since startup was
+    # ever released (measured: 370 textures per create/drop cycle, RSS never returning).
+    #
+    # DEFERRED by design. Most dispose sites fire mid-render — while ANOTHER layer's RenderTexture
+    # is the active target — and destroying an FBO there disturbs the GL state SFML tracks, which
+    # is the corruption signature the pooling attempt produced. So dispose only ENQUEUES; the
+    # renderer drains the queue once per frame at a point where nothing is mid-render.
+    protected def release_payload : Nil
+      @@reaper << @texture
+    end
+
+    # Textures handed over by dispose, destroyed together at the frame boundary.
+    @@reaper = [] of SF::RenderTexture
+
+    def self.pending_reaper : Int32
+      @@reaper.size
+    end
+
+    # Destroy everything released during the frame. MUST be called with no RenderTexture active —
+    # SFMLRenderer calls it after window.display, i.e. outside any layer's render.
+    def self.drain_reaper : Int32
+      n = @@reaper.size
+      @@reaper.each(&.destroy!)
+      @@reaper.clear
+      n
     end
 
     # Convert CrymbleUI Color to SF::Color

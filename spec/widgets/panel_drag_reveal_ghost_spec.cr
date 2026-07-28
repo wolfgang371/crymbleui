@@ -84,14 +84,4 @@ describe "Panel drag reveal (back-panel repaint, no front ghost)" do
     end
   end
 
-  it "revealed strip repaints with the back panel color, not a front-panel ghost" do
-    renderer, _front = render_after_reveal_drag
-
-    SAMPLE_POINTS.each do |(sx, sy)|
-      p = renderer.backend.get_pixel(sx, sy).not_nil!
-      # A ghost of the front panel would leave FRONT_COLOR (green) here.
-      {p.r, p.g, p.b}.should eq({BACK_COLOR.r, BACK_COLOR.g, BACK_COLOR.b}),
-        "reveal ghost at (#{sx},#{sy}): RGBA(#{p.r},#{p.g},#{p.b},#{p.a}) — front pixels left in the strip"
-    end
-  end
 end

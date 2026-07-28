@@ -262,6 +262,11 @@ module CrymbleUI
           # This marks widgets as Clean so cache optimization works correctly
           app.clear_render_state unless did_layout
         rescue exception
+          # A post-release use is a DEFECT, never a transient frame hiccup, so it must not enter
+          # graceful degradation: that path recovers by nil-ing every widget and layer backend, i.e.
+          # it would abandon the whole GPU working set once per frame while hiding the very bug this
+          # error exists to report. Let it out.
+          raise exception if exception.is_a?(DisposedBackendError)
           handle_frame_exception(exception, app)
         end
       end

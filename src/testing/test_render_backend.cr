@@ -49,6 +49,28 @@ module CrymbleUI
           raise ArgumentError.new("TestRenderBackend: negative dimensions #{@width}x#{@height} — a layout bug produced a negative size")
         end
         @pixels = Array(Color).new(@width * @height, background)
+        @@census.try(&.<< self)
+      end
+
+      # CENSUS — an OPT-IN registry of every backend created while it is armed. Exists so a spec
+      # can ask the general question ("is any UNREACHABLE backend still unreleased?") instead of
+      # the fixture-specific one ("was this particular widget's backend released?"). The general
+      # form is what catches a NEW stranding site: it does not care whether a widget was held in
+      # @children, in layer.widgets, in an overlay list, or in some container invented later.
+      #
+      # Off by default and nil-checked on a cold path: an always-on registry would pin every
+      # backend the whole suite ever makes, and the suite makes a great many.
+      @@census : Array(TestRenderBackend)? = nil
+
+      def self.census_start : Nil
+        @@census = [] of TestRenderBackend
+      end
+
+      # Everything created since census_start. Stops recording.
+      def self.census_take : Array(TestRenderBackend)
+        taken = @@census || [] of TestRenderBackend
+        @@census = nil
+        taken
       end
 
       # Get current clip rect (intersection of all rects on stack)
@@ -95,14 +117,24 @@ module CrymbleUI
         @blit_region_count = 0
       end
 
+      # Headless mirror of the SFML release path. The pixel buffer is ordinary Crystal memory the
+      # collector could reclaim on its own, so this is not about freeing bytes — it is about making
+      # release OBSERVABLE and use-after-release LOUD. Headless can then witness the release defect
+      # class deterministically (`disposed?`), where SFML can only show it as drifting RSS.
+      protected def release_payload : Nil
+        @pixels = Array(Color).new(0)
+      end
+
       # Get pixel color at (x, y)
       def get_pixel(x : Int32, y : Int32) : Color?
+        assert_live("get_pixel")
         return nil if x < 0 || x >= @width || y < 0 || y >= @height
         @pixels[y * @width + x]
       end
 
       # Set pixel color at (x, y) - respects current clip region unless suspended
       def set_pixel(x : Int32, y : Int32, color : Color)
+        assert_live("set_pixel")
         return if x < 0 || x >= @width || y < 0 || y >= @height
         return unless @scissor_suspended || point_in_clip?(x, y)  # Clip check (bypassed when suspended)
         @pixels[y * @width + x] = color
@@ -111,6 +143,7 @@ module CrymbleUI
       # Get pixels from rectangular region (for background memorization)
       # Returns array in row-major order (top-to-bottom, left-to-right)
       def get_pixels(x : Int32, y : Int32, width : Int32, height : Int32) : Array(Color)
+        assert_live("get_pixels")
         pixels = [] of Color
         height.times do |dy|
           width.times do |dx|
@@ -124,6 +157,7 @@ module CrymbleUI
       # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)
       # Used by cache validation framework for pixel comparison
       def capture_region_pixels(x : Int32, y : Int32, w : Int32, h : Int32) : Array(UInt32)
+        assert_live("capture_region_pixels")
         result = Array(UInt32).new(w * h, 0_u32)
         h.times do |dy|
           w.times do |dx|
@@ -139,6 +173,7 @@ module CrymbleUI
 
       # Save buffer to PPM image file (no dependencies required)
       def save_ppm(path : String)
+        assert_live("save_ppm")
         File.open(path, "w") do |f|
           f.puts "P3"
           f.puts "#{@width} #{@height}"
@@ -156,6 +191,7 @@ module CrymbleUI
       # Set pixels in rectangular region (for background restoration)
       # Expects array in row-major order (top-to-bottom, left-to-right)
       def set_pixels(x : Int32, y : Int32, width : Int32, height : Int32, pixels : Array(Color))
+        assert_live("set_pixels")
         height.times do |dy|
           width.times do |dx|
             idx = dy * width + dx
@@ -167,6 +203,7 @@ module CrymbleUI
 
       # Clear entire buffer to color
       def clear(color : Color = Color.new(255, 255, 255, 255))
+        assert_live("clear")
         @clear_count += 1
         @pixels.fill(color)
       end
@@ -179,6 +216,7 @@ module CrymbleUI
       # and making headless pixel tests untrustworthy. Center-coverage: first covered pixel i has
       # i+0.5 >= left  → i = ceil(left - 0.5); past-the-end has i+0.5 >= right → i = ceil(right - 0.5).
       def fill_rect(bounds : Rect, color : Color)
+        assert_live("fill_rect")
         @primitive_count += 1  # Count all primitives
         @fill_rect_count += 1
         x1 = (bounds.x - 0.5).ceil.to_i.clamp(0, @width)
@@ -200,6 +238,7 @@ module CrymbleUI
       # This reproduces the clipping bug visible in checkbox_demo
       # Note: width parameter currently ignored in test backend (always draws 1px)
       def draw_rect(bounds : Rect, color : Color, width : Float64 = 1.0)
+        assert_live("draw_rect")
         @primitive_count += 1  # Count all primitives
         @draw_rect_count += 1
         x1 = bounds.x.to_i
@@ -241,6 +280,7 @@ module CrymbleUI
       # Note: width parameter accepted but simplified rendering (just draws center line)
       # For proper thick lines, would need to draw perpendicular pixels at each point
       def draw_line(x1 : Float64, y1 : Float64, x2 : Float64, y2 : Float64, color : Color, width : Float64 = 1.0)
+        assert_live("draw_line")
         @primitive_count += 1  # Count all primitives
         @draw_line_count += 1
         ix1 = x1.to_i
@@ -275,6 +315,7 @@ module CrymbleUI
 
       # Draw circle at center with radius (simplified rendering for tests)
       def draw_circle(center_x : Float64, center_y : Float64, radius : Float64, color : Color, fill : Bool = true)
+        assert_live("draw_circle")
         @primitive_count += 1
         # Simple filled circle using midpoint circle algorithm
         cx = center_x.to_i
@@ -320,6 +361,7 @@ module CrymbleUI
 
       # Fill triangle using scanline algorithm
       def fill_triangle(p1 : Vec2, p2 : Vec2, p3 : Vec2, color : Color)
+        assert_live("fill_triangle")
         @primitive_count += 1
         # Sort vertices by Y coordinate
         vertices = [p1, p2, p3].sort_by(&.y)
@@ -358,6 +400,7 @@ module CrymbleUI
       # Each character draws 2 vertical lines based on 2 LSBs of char code
       # This makes text visible and testable without real font support
       def draw_text(text : String, position : Vec2, color : Color, size : Float64)
+        assert_live("draw_text")
         @draw_text_count += 1
 
         char_width = (size * 0.6).to_i.clamp(4, 20)  # ~60% of height
@@ -394,11 +437,13 @@ module CrymbleUI
 
       # Finalize rendering (no-op for test backend)
       def display
+        assert_live("display")
         # No-op for test backend (SFML needs this to finalize texture)
       end
 
       # Execute a DrawPrimitive on this backend
       def execute_primitive(primitive : DrawPrimitive)
+        assert_live("execute_primitive")
         @primitive_count += 1
         case primitive
         when FillRect
@@ -419,11 +464,13 @@ module CrymbleUI
 
       # Execute multiple primitives
       def execute_primitives(primitives : Array(DrawPrimitive))
+        assert_live("execute_primitives")
         primitives.each { |p| execute_primitive(p) }
       end
 
       # Debug: print ASCII representation of buffer (for small buffers)
       def to_ascii(palette : Hash(Color, Char) = {} of Color => Char) : String
+        assert_live("to_ascii")
         lines = [] of String
         @height.times do |y|
           line = String.build do |str|
@@ -440,6 +487,7 @@ module CrymbleUI
       # Check for transparent pixels in a region (for debugging Inspector panel issue)
       # Returns count of transparent pixels found
       def check_transparent_pixels(x_start : Int32, y_start : Int32, width : Int32, height : Int32, context : String = "") : Int32
+        assert_live("check_transparent_pixels")
         transparent_count = 0
         height.times do |y|
           width.times do |x|
@@ -469,6 +517,8 @@ module CrymbleUI
       # clip_width/clip_height specify the visible portion to blit (defaults to full buffer)
       # opacity: Layer opacity multiplier (0.0-1.0), applied to source alpha during blending
       def blit_to(target : TestRenderBackend, offset_x : Int32, offset_y : Int32, clip_width : Int32 = @width, clip_height : Int32 = @height, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
+        assert_live("blit_to")
+        assert_live_other(target, "blit_to", "target")
         # FAST PATH: Row-level copy for opaque blits (most common case).
         # Skips per-pixel get/set/clip overhead — direct array slice copy.
         if !use_alpha_blend || (opacity >= 1.0 && blend_mode == BlendMode::Normal)
@@ -566,6 +616,8 @@ module CrymbleUI
       # Blit entire source backend to this backend at specified position
       # Uses COPY mode (matches SFML's BlendNone) for widget backend restoration
       def blit(source : RenderBackend, dest_x : Int32, dest_y : Int32)
+        assert_live("blit")
+        assert_live_other(source, "blit", "source")
         @blit_count += 1
         # Track negative blit destinations (indicates missing layer-level clipping)
         # SFML would render partial sprite; TestRenderBackend clips via set_pixel bounds check
@@ -585,6 +637,8 @@ module CrymbleUI
       # Copies pixels from (src_x, src_y, width, height) to target at (dest_x, dest_y)
       # Supports alpha blending and opacity (for viewport_cache layer compositing)
       def blit_region_to(target : TestRenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
+        assert_live("blit_region_to")
+        assert_live_other(target, "blit_region_to", "target")
         height.times do |dy|
           width.times do |dx|
             src_color = get_pixel(src_x + dx, src_y + dy)
@@ -643,6 +697,8 @@ module CrymbleUI
       # Blit rectangular region from source backend to this backend
       # Copies pixels from (src_x, src_y, width, height) to (dest_x, dest_y)
       def blit_region(source : RenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32)
+        assert_live("blit_region")
+        assert_live_other(source, "blit_region", "source")
         @blit_region_count += 1
         if source.is_a?(TestRenderBackend)
           # Copy pixel region
@@ -661,22 +717,26 @@ module CrymbleUI
 
       # Push clipping region onto stack (matches SFML scissor test behavior)
       def push_clip(rect : Rect)
+        assert_live("push_clip")
         @clip_stack << rect
       end
 
       # Pop clipping region from stack
       def pop_clip
+        assert_live("pop_clip")
         @clip_stack.pop if @clip_stack.any?
       end
 
       # Suspend scissor clipping (matches SFML's glDisable(GL_SCISSOR_TEST))
       # Used during background capture when drawing to OTHER backends
       def suspend_clip
+        assert_live("suspend_clip")
         @scissor_suspended = true
       end
 
       # Resume scissor clipping (matches SFML's glEnable(GL_SCISSOR_TEST))
       def resume_clip
+        assert_live("resume_clip")
         @scissor_suspended = false
       end
 

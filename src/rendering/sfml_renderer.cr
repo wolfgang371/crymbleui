@@ -988,6 +988,12 @@ module CrymbleUI
         window.display
         LayerRenderer.phase_display_ms = (Time.instant - display_start).total_milliseconds
 
+        # THE one drain point for released RenderTextures. Deliberately here and nowhere else:
+        # after display, no layer's RenderTexture is the active render target, so destroying FBOs
+        # cannot disturb the GL state SFML tracks mid-frame (the corruption mode the old pooling
+        # attempt hit). CrSFMLBackend#dispose only enqueues; this is what actually frees.
+        CrSFMLBackend.drain_reaper
+
         if ENV["CRYMBLE_PERF"]? == "1"
           total = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms + LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
           if total > 1.0  # Only log slow frames (>1ms)
@@ -1004,6 +1010,11 @@ module CrymbleUI
           LayerRenderer.record_profile("render_frame", (Time.instant - frame_start).total_milliseconds)
         end
       rescue exception
+        # A post-release use is a DEFECT, never a transient frame hiccup, so it must not enter
+        # graceful degradation: that path recovers by nil-ing every widget and layer backend, i.e.
+        # it would abandon the whole GPU working set once per frame while hiding the very bug this
+        # error exists to report. Let it out.
+        raise exception if exception.is_a?(DisposedBackendError)
         handle_frame_exception(exception, app, window)
       end
 
