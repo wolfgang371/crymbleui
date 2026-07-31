@@ -530,7 +530,22 @@ module CrymbleUI
     end
 
     def on_text_input(char : Char) : Bool
-      # Snap to cursor first — if cell was off-screen, this recreates it
+      # Service a pending invalidation BEFORE deciding where this character goes. A commit earlier in
+      # the SAME poll batch (cursor-down -> cell_assign -> the adapter's invalidate_all!) sets
+      # @pending_invalidate_all, and update_proxy_focus then refuses to attach to cells that are
+      # about to be destroyed — correct in itself, but it leaves NO proxy at all until the next
+      # frame flushes. The run loop drains every queued event before it rebuilds, so the characters
+      # queued behind that commit arrived here with nowhere to go and were silently discarded.
+      # Field-reported as "type, cursor down, repeat quickly — keys get lost"; a live trace showed
+      # 8 of 16 characters destroyed, every loss being a non-first member of its batch.
+      # Guarded by spec/widgets/virtual_matrix_batch_text_spec.cr.
+      #
+      # Attaching to a cell that a pending invalidation will destroy is SAFE: flush_invalidate_all
+      # commits the proxy edit (and deactivates it) before tearing any cell down, so a character
+      # typed into it reaches the adapter by the same route as any other. Flushing here instead was
+      # tried and is wrong — it destroys the cells and nothing recreates them until layout, leaving
+      # even less to type into.
+      # Snap to cursor — if cell was off-screen, this recreates it
       # and re-establishes proxy focus via update_visible_cells
       snap_to_cursor(for_edit: true)
 
@@ -541,12 +556,23 @@ module CrymbleUI
         return true
       end
 
+      # An invalidation queued earlier in this batch suppressed the normal re-derive; do it now,
+      # explicitly overriding that guard, so the character has its destination.
+      update_proxy_focus(force: true) if @proxy_focused_widget.nil?
+
       # Proxy focus forwarding: forward text to the proxy-focused cell widget
       if proxy = @proxy_focused_widget
         proxy.on_text_input(char)
         return true
       end
 
+      # NOT "unhandled input". A focused matrix with instantiated cells has a destination for a
+      # character by construction, so reaching here means a precondition was violated — and the bare
+      # `false` this replaces turned that into silently lost user keystrokes rather than a visible
+      # failure. An empty cell set (no rows/cols, zero-size viewport) is the one legitimate case.
+      assert(@active_cells.empty?,
+        "VirtualMatrix '#{id || "unnamed"}' received text at cursor #{cursor_rc} with " \
+        "#{@active_cells.size} active cells but no proxy target — the character would be discarded")
       false
     end
 

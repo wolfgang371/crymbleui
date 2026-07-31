@@ -438,6 +438,10 @@ module CrymbleUI
     # walk, kept until the aggregate's completeness is spec+interactively proven (removing it = final
     # flag deletion).
     @render_trigger = RenderTrigger.new
+    # Cost of the most recently rendered frame, so InputLog can correlate each keystroke with the
+    # load at the moment it arrived — the reporter's loss is load-dependent (clean when slow, clean
+    # with one Shape, lossy with ten).
+    @last_frame_total_ms : Float64 = 0.0
 
     private def any_layer_needs_render?(app : App) : Bool
       @render_trigger.should_render?(app)
@@ -604,6 +608,7 @@ module CrymbleUI
       end
 
       @work_log.close # flush + close the frame ledger on exit
+      InputLog.close  # ...and the keyboard trace, with its received-vs-accepted trailer
     end
 
     # Handle a single event
@@ -641,7 +646,12 @@ module CrymbleUI
         # Filter control characters (< 32) except for specific cases
         # Also filter DEL (127)
         if char.ord >= 32 && char.ord != 127
-          @focus_manager.handle_text_input(char)
+          InputLog.next_in_batch if InputLog.enabled?
+          _outcome = @focus_manager.handle_text_input(char)
+          if InputLog.enabled?
+            InputLog.record("text", char.to_s, _outcome.is_a?(Bool) ? _outcome : nil,
+              @focus_manager.focused_widget, app.needs_rebuild?, @last_frame_total_ms)
+          end
         end
         true # Redraw for text input
       when SF::Event::MouseWheelScrolled
@@ -677,6 +687,10 @@ module CrymbleUI
         true # Redraw after scroll
       when SF::Event::KeyPressed
         key = event.key
+        if InputLog.enabled?
+          InputLog.record("key", key.code.to_s, nil, @focus_manager.focused_widget,
+            app.needs_rebuild?, @last_frame_total_ms)
+        end
         # Global zoom shortcuts - numpad +/- and Ctrl+0 for reset
         # Note: Regular keyboard +/- is handled via TextEntered for keyboard layout compatibility
         if key.control
@@ -993,6 +1007,14 @@ module CrymbleUI
         # cannot disturb the GL state SFML tracks mid-frame (the corruption mode the old pooling
         # attempt hit). CrSFMLBackend#dispose only enqueues; this is what actually frees.
         CrSFMLBackend.drain_reaper
+
+        @last_frame_total_ms = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms +
+                               LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
+        if InputLog.enabled?
+          InputLog.record_frame(@last_frame_total_ms, did_layout, false,
+            LayerRenderer.rendered_layer_ids.any?(&.starts_with?("matrix_content")))
+          InputLog.batch_begin # events arriving after this frame form a new batch
+        end
 
         if ENV["CRYMBLE_PERF"]? == "1"
           total = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms + LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms

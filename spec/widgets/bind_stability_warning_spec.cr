@@ -57,6 +57,12 @@ private class UnboundApp < CrymbleUI::App
   end
 end
 
+# The guard is asserted through Widget.bind_stability_warnings — a counter deliberately independent
+# of the printing — so the STDERR text adds nothing here but noise in every full-suite run. Silenced
+# for this file only, so an UNEXPECTED warning somewhere else still announces itself.
+Spec.before_each { CrymbleUI::Widget.enable_warnings = false }
+Spec.after_each { CrymbleUI::Widget.enable_warnings = true }
+
 describe "bind: stability guard (fresh-Source-per-build)" do
   it "WARNS after a bound Source changes identity on 2 consecutive rebuilds" do
     CrymbleUI::Widget.reset_bind_stability_warnings

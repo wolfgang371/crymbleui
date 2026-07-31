@@ -112,9 +112,13 @@ module CrymbleUI
 
     # Update proxy focus to match the current cursor cell.
     # Called when cursor moves, when VirtualMatrix gains focus, or when cursor cell is created.
-    private def update_proxy_focus
+    # `force` is for the one caller that must not be refused: text arriving in the same poll batch as
+    # the commit that queued the invalidation. Skipping the re-derive there leaves no proxy at all,
+    # and on_text_input then discards the character (see its comment). Attaching to a doomed cell is
+    # safe because flush_invalidate_all commits the proxy edit before destroying it.
+    private def update_proxy_focus(force : Bool = false)
       # Don't establish proxy on cells that are about to be destroyed
-      return if @pending_invalidate_all
+      return if @pending_invalidate_all && !force
 
       cell_widget = @active_cells[cursor_rc]?
 

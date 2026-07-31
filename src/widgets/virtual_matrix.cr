@@ -2375,7 +2375,9 @@ module CrymbleUI
             # flag with mark_needs_layout exactly like the announce callback (on_all):
             # the flush only runs when the content layer renders, and this rebuild has
             # nothing else that reliably wakes it.
-            STDERR.puts "[MATRIX_ADAPTER_CONTRACT] #{msg}"
+            # Gated like every other diagnostic (Widget.enable_warnings): the self-heal below is
+            # unconditional, but a spec that provokes the violation on purpose should not print it.
+            STDERR.puts "[MATRIX_ADAPTER_CONTRACT] #{msg}" if Widget.enable_warnings
             @pending_invalidate_all = true
             mark_needs_layout
           {% end %}

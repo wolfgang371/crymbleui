@@ -81,6 +81,11 @@ private def content_backend(matrix : CrymbleUI::VirtualMatrix) : CrymbleUI::Test
   matrix.content_layer.not_nil!.backend.as(CrymbleUI::Testing::TestRenderBackend)
 end
 
+# This file provokes the contract violation on purpose and asserts the SELF-HEAL, not the message.
+# Silenced here only, so a genuine violation in another spec still shows up.
+Spec.before_each { CrymbleUI::Widget.enable_warnings = false }
+Spec.after_each { CrymbleUI::Widget.enable_warnings = true }
+
 describe "VirtualMatrix reconcile adapter contract", tags: "slow" do
   # (a) A swapped-in adapter has no announce history: the buffer's pixels were painted
   # under an adapter this instance knows nothing about — they must be cleared even when
