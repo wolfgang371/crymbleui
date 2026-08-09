@@ -619,29 +619,37 @@ module CrymbleUI
       clamp_indices_to_value # a bound value may have shrunk externally since the last op
 
       # === CLIPBOARD OPERATIONS ===
+      # The editor touches the clipboard ONLY while it is actually editing text.
+      # While PARKED in QuickEntry (focus armed pending_replace, nothing typed yet)
+      # this widget is a grid cell, not a text field — so EVERY clipboard key is
+      # declined and bubbles to the owner, which is where a cell/row/grid-level copy
+      # or paste belongs. Once typing starts (immediate editing clears
+      # pending_replace), or in FullEdit, they act on the text.
+      #
+      # This gates on the EDITOR'S MODE, deliberately not on which shortcuts the
+      # consumer happens to have registered. A generic widget cannot know that, and
+      # the earlier "decline only the keys that have a competing cell-op" rule
+      # silently swallowed Ctrl+C and Shift+Insert from any application that later
+      # grew a grid-level copy/paste — the key never reached the owner at all.
+      parked = edit_mode == TextInputMode::QuickEntry && pending_replace
+
       # Ctrl+C or Ctrl+Insert = Copy
       if (control && key == SF::Keyboard::Key::C) || (control && key == SF::Keyboard::Key::Insert)
+        return false if parked
         copy_selection
         return true
       end
 
       # Ctrl+X or Shift+Delete = Cut
       if (control && key == SF::Keyboard::Key::X) || (shift && key == SF::Keyboard::Key::Delete)
-        # PARKED QuickEntry (nothing typed yet): the cell owner cuts the whole cell —
-        # decline so Ctrl+X bubbles to its panel shortcut. Once you've started typing
-        # (immediate editing, pending_replace cleared) it's a TEXT cut. Shift+Delete
-        # (no control, no competing cell-op) always stays editor-handled.
-        return false if edit_mode == TextInputMode::QuickEntry && control && pending_replace
+        return false if parked
         cut_selection
         return true
       end
 
       # Ctrl+V or Shift+Insert = Paste
       if (control && key == SF::Keyboard::Key::V) || (shift && key == SF::Keyboard::Key::Insert)
-        # PARKED QuickEntry (nothing typed yet): the cell owner pastes the cell — decline
-        # so Ctrl+V bubbles. Once you've started typing (immediate editing) it's a TEXT
-        # paste. Shift+Insert (no control, no cell-op) always stays editor-handled.
-        return false if edit_mode == TextInputMode::QuickEntry && control && pending_replace
+        return false if parked
         paste_clipboard
         return true
       end
@@ -853,20 +861,65 @@ module CrymbleUI
     # Copy selected text to clipboard
     private def copy_selection
       return unless has_selection?
-      Widget.clipboard.string = selected_text
+      Widget.clipboard.text = selected_text
     end
 
     # Cut selected text to clipboard
     private def cut_selection
       return unless has_selection?
-      Widget.clipboard.string = selected_text
+      Widget.clipboard.text = selected_text
       delete_selection
       reset_cursor_blink
     end
 
+    # Reduce a clipboard payload to what a SINGLE-LINE input can hold.
+    #
+    # Separators become a space rather than being dropped: tab is the TSV field
+    # separator, so dropping it would silently weld "Mueller\t30" into "Mueller30",
+    # and the same argument holds for line breaks. What survives is filtered by the
+    # same rule the renderer applies to typed characters (`ord >= 32 && ord != 127`)
+    # — note this is a character filter only, not a claim that paste and typing are
+    # otherwise equivalent (SPACE, for one, is untypeable here yet manufactured
+    # below, and QuickEntry's first typed char replaces where paste inserts).
+    #
+    # The lone `gsub` collapses the CRLF *pair* so a Windows line break yields ONE
+    # space, not two; the loop then treats `\r`, `\n` and `\t` alike. Note the strip
+    # cannot come first: `\r` and `\n` are themselves C0, so stripping before mapping
+    # would weld two lines into one unreadable run-on ("a\r\nb" -> "ab").
+    #
+    # Content is kept, only flattened — the sole removals are characters the typing
+    # path would refuse and the trailing/leading line break described below.
+    private def sanitize_pasted(text : String) : String
+      collapsed = text.gsub("\r\n", "\n")
+      # A copied cell or row arrives with a TRAILING line break — that is a
+      # terminator, not content. Trim line breaks only, never spaces the user
+      # actually copied, so "value\r\n" pastes as "value" and an empty cell ("\r\n")
+      # sanitises to empty and therefore leaves the selection untouched instead of
+      # replacing it with a space.
+      body = collapsed.strip("\n\r")
+      String.build(body.bytesize) do |io|
+        body.each_char do |ch|
+          if ch == '\n' || ch == '\r' || ch == '\t'
+            io << ' '
+          elsif ch.ord >= 32 && ch.ord != 127
+            io << ch
+          end
+        end
+      end
+    end
+
     # Paste from clipboard at cursor position
     private def paste_clipboard
-      text = Widget.clipboard.string
+      # Whatever is on the clipboard is pasted as text — the library does not care who
+      # put it there. A consumer that copies structured data and then pastes it into a
+      # text field gets that text, flattened by the rules below; that is the user's
+      # own doing and not something this widget second-guesses.
+      return unless raw = Widget.clipboard.text
+
+      # Guard on the SANITISED result, not the raw payload: a control-only payload is
+      # non-empty raw but empty here, and a raw guard would let it through to
+      # delete_selection — destroying the selection for a paste that inserts nothing.
+      text = sanitize_pasted(raw)
       return if text.empty?
 
       # Delete selection first if any
@@ -874,7 +927,8 @@ module CrymbleUI
         delete_selection
       end
 
-      # Insert pasted text at cursor
+      # Insert pasted text at cursor. `text.size` is the SANITISED length in
+      # CHARACTERS (never bytes) — the caret must not desync on non-ASCII.
       @value.set(value[0...cursor_pos] + text + value[cursor_pos..])
       @cursor_pos.set(cursor_pos + text.size)
       reset_cursor_blink

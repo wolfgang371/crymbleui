@@ -933,15 +933,15 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)  # Select all
                 input.on_key_down(SF::Keyboard::Key::C, true, false)  # Copy
 
-                CrymbleUI::Widget.clipboard.string.should eq("hello")
+                CrymbleUI::Widget.clipboard.text.should eq("hello")
             end
 
             it "does nothing without selection" do
-                CrymbleUI::Widget.clipboard.string = "original"
+                CrymbleUI::Widget.clipboard.text = "original"
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::C, true, false)
 
-                CrymbleUI::Widget.clipboard.string.should eq("original")
+                CrymbleUI::Widget.clipboard.text.should eq("original")
             end
         end
 
@@ -954,14 +954,14 @@ describe CrymbleUI::TextInput do
                 # Selected "he"
                 input.on_key_down(SF::Keyboard::Key::X, true, false)
 
-                CrymbleUI::Widget.clipboard.string.should eq("he")
+                CrymbleUI::Widget.clipboard.text.should eq("he")
                 input.value.should eq("llo")
             end
         end
 
         describe "Ctrl+V paste" do
             it "pastes clipboard at cursor" do
-                CrymbleUI::Widget.clipboard.string = "world"
+                CrymbleUI::Widget.clipboard.text = "world"
                 input = CrymbleUI::TextInput.new(value: "hello ")
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
 
@@ -969,7 +969,7 @@ describe CrymbleUI::TextInput do
             end
 
             it "replaces selection with pasted text" do
-                CrymbleUI::Widget.clipboard.string = "world"
+                CrymbleUI::Widget.clipboard.text = "world"
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::A, true, false)  # Select all
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
@@ -978,7 +978,7 @@ describe CrymbleUI::TextInput do
             end
 
             it "does nothing with empty clipboard" do
-                CrymbleUI::Widget.clipboard.string = ""
+                CrymbleUI::Widget.clipboard.text = ""
                 input = CrymbleUI::TextInput.new(value: "hello")
                 input.on_key_down(SF::Keyboard::Key::V, true, false)
 
@@ -992,13 +992,13 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)
                 input.on_key_down(SF::Keyboard::Key::Insert, true, false)
 
-                CrymbleUI::Widget.clipboard.string.should eq("test")
+                CrymbleUI::Widget.clipboard.text.should eq("test")
             end
         end
 
         describe "Shift+Insert paste (alternative)" do
             it "pastes clipboard" do
-                CrymbleUI::Widget.clipboard.string = "pasted"
+                CrymbleUI::Widget.clipboard.text = "pasted"
                 input = CrymbleUI::TextInput.new(value: "")
                 input.on_key_down(SF::Keyboard::Key::Insert, false, true)
 
@@ -1012,7 +1012,7 @@ describe CrymbleUI::TextInput do
                 input.on_key_down(SF::Keyboard::Key::A, true, false)
                 input.on_key_down(SF::Keyboard::Key::Delete, false, true)
 
-                CrymbleUI::Widget.clipboard.string.should eq("cut me")
+                CrymbleUI::Widget.clipboard.text.should eq("cut me")
                 input.value.should eq("")
             end
         end
@@ -1217,12 +1217,18 @@ describe CrymbleUI::TextInput do
         end
     end
 
-    # Cell-keyboard ops live in embrace, registered as cursor-scoped panel shortcuts.
-    # TextInput declines the keys with a competing cell-op (Ctrl+X cut, Ctrl+V paste,
-    # bare Delete delete-record) — so they bubble to the owner — ONLY while PARKED in
-    # QuickEntry (on_focus armed pending_replace, nothing typed yet). Once you start
-    # typing (immediate editing, pending_replace cleared) they act on the text. Keys
-    # with no cell-op counterpart (Ctrl+C, Backspace, Ctrl+A) stay editor-handled always.
+    # Cell-keyboard ops live in the consuming application, registered as cursor-scoped
+    # panel shortcuts. While PARKED in QuickEntry (on_focus armed pending_replace,
+    # nothing typed yet) a TextInput is a grid cell, not a text field — so it declines
+    # EVERY clipboard key (Ctrl+C/Ctrl+Insert, Ctrl+X/Shift+Delete, Ctrl+V/Shift+Insert)
+    # as well as bare Delete, and they bubble to the owner. Once typing starts
+    # (immediate editing clears pending_replace), or in FullEdit, they act on the text.
+    #
+    # NOTE: this SUPERSEDES the earlier rule, which declined only the keys that had a
+    # competing cell-op and kept Ctrl+C "editor-handled always (no cell-copy op
+    # exists)". That gated a generic widget on which shortcuts one consumer happened
+    # to register: the moment an app grew a grid-level copy, Ctrl+C was swallowed here
+    # and never reached it. Backspace and Ctrl+A are not clipboard ops — unaffected.
     describe "CNP mode gating" do
         it "PARKED QuickEntry Ctrl+X is not consumed — bubbles to the cell-cut shortcut" do
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
@@ -1232,7 +1238,7 @@ describe CrymbleUI::TextInput do
         end
 
         it "PARKED QuickEntry Ctrl+V is not consumed — bubbles to the cell-paste shortcut" do
-            CrymbleUI::Widget.clipboard.string = "xyz"
+            CrymbleUI::Widget.clipboard.text = "xyz"
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
             input.on_focus # parked
             input.on_key_down(SF::Keyboard::Key::V, true, false).should be_false
@@ -1246,8 +1252,34 @@ describe CrymbleUI::TextInput do
             input.value.should eq("abc")
         end
 
-        it "QuickEntry Ctrl+C stays editor-handled (no cell-copy op exists)" do
+        it "PARKED QuickEntry Ctrl+C is not consumed — bubbles to a grid-level copy" do
             input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked
+            input.on_key_down(SF::Keyboard::Key::C, true, false).should be_false
+        end
+
+        it "PARKED QuickEntry Shift+Insert is not consumed — same rule as Ctrl+V" do
+            CrymbleUI::Widget.clipboard.text = "xyz"
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked
+            input.on_key_down(SF::Keyboard::Key::Insert, false, true).should be_false
+            input.value.should eq("abc")
+        end
+
+        it "PARKED QuickEntry Shift+Delete is not consumed — same rule as Ctrl+X" do
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus # parked
+            input.on_key_down(SF::Keyboard::Key::Delete, false, true).should be_false
+            input.value.should eq("abc")
+        end
+
+        # The other half of the rule: NOT parked (typing started) means the editor owns
+        # the key again. Without this, "decline while parked" could be over-applied to
+        # QuickEntry as a whole and nothing would catch it.
+        it "QuickEntry Ctrl+C IS consumed once typing has started (no longer parked)" do
+            input = CrymbleUI::TextInput.new(value: "abc", mode: CrymbleUI::TextInputMode::QuickEntry)
+            input.on_focus            # parked
+            input.on_text_input('z')  # immediate editing — clears pending_replace
             input.on_key_down(SF::Keyboard::Key::C, true, false).should be_true
         end
 

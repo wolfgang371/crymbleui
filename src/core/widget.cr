@@ -211,6 +211,14 @@ module CrymbleUI
             @@clipboard || raise "Clipboard not initialized"
         end
 
+        # Get the global clipboard, or nil when nothing has installed one yet.
+        # Present for the same reason as scheduler?/shortcut_manager?: a caller that
+        # legitimately runs before a renderer or suite installed one should branch on
+        # presence, not wrap the raise above in a blanket rescue.
+        def self.clipboard? : Clipboard?
+            @@clipboard
+        end
+
         # Enable/disable warnings (duplicate IDs, shortcut conflicts, etc.)
         # Useful for tests
         def self.enable_warnings=(value : Bool)
@@ -658,9 +666,17 @@ module CrymbleUI
             # Invalidate cached constraints (forces re-layout even if constraints unchanged)
             invalidate_last_constraints
 
-            # Invalidate background backend - layout change means position/size changed
-            # Background needs to be recaptured from new location
-            # IMPORTANT: Use setter to properly reset rendered_to_layer flag
+            # Layout changed, so the saved background must be recaptured from the new
+            # position. RELEASE it rather than dropping the pointer: under SFML the
+            # payload is a driver texture the collector cannot see, and this method walks
+            # the parent chain, so nil-ing alone strands one full-size surface for every
+            # ancestor holding a background — per invalidation, unbounded over a session.
+            #
+            # Unshared by construction (copy_state_from TRANSFERS a background rather than
+            # copying it), so this widget is its only owner — the argument dispose_subtree
+            # already relies on. The SETTER must stay non-disposing for exactly that
+            # reason; it is used here only to reset the rendered_to_layer flag.
+            @background_backend.try(&.dispose)
             self.background_backend = nil
 
             @parent.try &.mark_needs_layout

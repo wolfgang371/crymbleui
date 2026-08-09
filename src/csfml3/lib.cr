@@ -336,9 +336,14 @@ lib LibCSFML
   fun sfMouse_getPositionRenderWindow(relative_to : RenderWindow) : Vector2i
   fun sfMouse_setPositionRenderWindow(position : Vector2i, relative_to : RenderWindow)
 
-  # Clipboard functions
+  # Clipboard functions.
+  # The char* pair is documented ANSI and converts through std::locale() — which is
+  # "C" here, since nothing sets one — so it DELETES every non-ASCII codepoint in both
+  # directions ("Müller" -> "Mller"). Use the UTF-32 pair; sfChar32 is uint32_t.
   fun sfClipboard_getString : LibC::Char*
   fun sfClipboard_setString(text : LibC::Char*)
+  fun sfClipboard_getUnicodeString : UInt32*
+  fun sfClipboard_setUnicodeString(text : UInt32*)
 
   # ============================================================
   # RenderWindow Functions

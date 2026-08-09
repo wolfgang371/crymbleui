@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/testing/test_renderer"
+require "../../src/testing/surface_leaks"
 require "../../src/widgets/virtual_matrix"
 
 # THE GENERAL INVARIANT: after a rebuild, no backend that the live tree can no longer reach may
@@ -93,46 +94,11 @@ private class CensusPanelApp < CrymbleUI::App
   end
 end
 
-# Everything still legitimately owned: widgets via @children from the root, widgets standing on an
-# active layer (plus their subtrees), the layers' own surfaces, and the RENDERER's window buffer.
-#
-# That last one is not pedantry — it was a false positive on the first run of this spec, reported
-# as a 500x400 stranded texture. The renderer owns its window buffer directly and no walk of the
-# widget tree will ever find it. Deliberately NOT included: TestRenderer's @layer_backends /
-# @widget_backends registries, which are append-only by design and would mask real leaks by
-# declaring every backend ever made "reachable".
-private def reachable_backends(root : CrymbleUI::Widget,
-                               renderer : CrymbleUI::Testing::TestRenderer) : Set(UInt64)
-  live = Set(UInt64).new
-  live << renderer.backend.object_id
-  walk = uninitialized CrymbleUI::Widget -> Nil
-  walk = ->(w : CrymbleUI::Widget) do
-    w.widget_backend.try { |b| live << b.object_id }
-    w.background_backend.try { |b| live << b.object_id }
-    w.children.each { |c| walk.call(c) }
-    nil
-  end
-  walk.call(root)
-  CrymbleUI::Layer.active_layers(root).each do |layer|
-    layer.backend.try { |b| live << b.object_id }
-    # Membership in layer.widgets does NOT confer reachability. A widget can sit in a live layer's
-    # list while its parent chain no longer reaches the root — that is exactly the orphan the
-    # sweep is meant to drop, and counting it as reachable would whitelist the leak this spec
-    # exists to catch (it did, on the first draft: the surviving-layer case stayed green).
-    layer.widgets.each { |w| walk.call(w) if parent_chain_reaches?(w, root) }
-  end
-  live
-end
-
-# The same criterion Layer's orphan sweeps use: walk UP to the root.
-private def parent_chain_reaches?(widget : CrymbleUI::Widget, root : CrymbleUI::Widget) : Bool
-  current : CrymbleUI::Widget? = widget
-  while current
-    return true if current == root
-    current = current.parent
-  end
-  false
-end
+# Reachability is computed by the library's own oracle (src/testing/surface_leaks.cr) rather than
+# re-derived here: the criteria are subtle (the renderer's window buffer counts as an owner; a
+# widget in a live layer's list does NOT unless its parent chain still reaches the root) and both
+# were learned from false results on this spec's own first drafts. One definition, used by every
+# leak hunt.
 
 describe "unreachable backend census" do
   it "leaves no unreachable backend unreleased after the tree that owned it is discarded" do
@@ -151,8 +117,7 @@ describe "unreachable backend census" do
     created.size.should be > 10,
       "census recorded only #{created.size} backends — the fixture is not exercising the renderer"
 
-    live = reachable_backends(app.root.not_nil!, renderer)
-    stranded = created.reject { |b| b.disposed? || live.includes?(b.object_id) }
+    stranded = CrymbleUI::Testing::SurfaceLeaks.stranded(app.root.not_nil!, renderer, created)
 
     stranded.should be_empty,
       "#{stranded.size} of #{created.size} backends are UNREACHABLE from the live tree yet still " \
@@ -188,8 +153,7 @@ describe "unreachable backend census" do
     created.size.should be > 10,
       "census recorded only #{created.size} backends — the fixture is not exercising the renderer"
 
-    live = reachable_backends(app.root.not_nil!, renderer)
-    stranded = created.reject { |b| b.disposed? || live.includes?(b.object_id) }
+    stranded = CrymbleUI::Testing::SurfaceLeaks.stranded(app.root.not_nil!, renderer, created)
 
     stranded.should be_empty,
       "#{stranded.size} of #{created.size} backends were dropped from a SURVIVING layer without " \
@@ -211,7 +175,7 @@ describe "unreachable backend census" do
 
     CrymbleUI::Testing::TestRenderBackend.census_take
     live_root = app.root.not_nil!
-    live = reachable_backends(live_root, renderer)
+    live = CrymbleUI::Testing::SurfaceLeaks.reachable(live_root, renderer)
     live.should_not be_empty, "the live tree holds no backends at all — the fixture proves nothing"
 
     # The other direction of the same invariant: reachable implies NOT released. A census that only

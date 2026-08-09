@@ -4,6 +4,83 @@ Breaking changes for code built on CrymbleUI, newest first. See `docs/REACTIVITY
 
 ---
 
+## `Clipboard#string` / `#string=` are now `#text` / `#text=`, and the getter is nilable
+
+```crystal
+# before
+Widget.clipboard.string = tsv          # String
+text = Widget.clipboard.string         # String — "" also meant "nothing on the clipboard"
+
+# after
+Widget.clipboard.text = tsv            # String
+if text = Widget.clipboard.text        # String? — nil means NOTHING is on the clipboard
+  # ...
+end
+```
+
+**Why rename rather than just make the getter nilable.** Keeping the name would give only a partial
+compile guard: reads like `clipboard.string.empty?` stop compiling, but `clipboard.string = x` keeps
+working silently — the worst outcome for a published shard. The rename forces every call site to be
+visited exactly once.
+
+**There is deliberately no provenance.** The clipboard carries text and nothing else — no "who wrote
+this" tag. A component that copies structured data (a spreadsheet-style grid, say) puts text on the
+clipboard like anything else, and pasting it into a text field yields that text. That is the user's
+own doing, and the library does not police it.
+
+**What `nil` means, and what it does not mean yet.** The type now admits absence: `nil` is "there is
+nothing on the clipboard", a different state from an empty string having been copied. **The SFML
+backend cannot produce `nil` today** — `sfClipboard_getString` returns an empty string for no-owner,
+for a timed-out conversion, and for a genuinely empty clipboard alike, so those three are one value at
+that layer. Until the X11 selection reader lands, `nil` is reachable only from
+`Testing::TestClipboard`. Treat the distinction as something you may write against, not yet as a
+capability the SFML path delivers.
+
+**Paste behaviour also changed** (`TextInput`). A pasted payload is now flattened for a single-line
+field: the `\r\n` pair collapses to `\n`, leading/trailing line breaks are trimmed, then `\n`, `\r` and
+**tab** each become a single space, then anything the typing path refuses (`< 32`, and 127) is removed.
+Content is kept — nothing is truncated. Tab becomes a space rather than being dropped because it is the
+TSV field separator; dropping it would silently weld `"Mueller\t30"` into `"Mueller30"`. The trim is
+why copying one spreadsheet cell (`"value\r\n"`) pastes as `"value"`, and why copying an *empty* cell
+(`"\r\n"`) pastes nothing at all rather than replacing your selection with a space. Spaces you actually
+copied are never trimmed.
+
+**Non-ASCII now round-trips correctly — this was previously broken in both directions.** The wrapper
+bound only the ANSI CSFML entry points, which convert through the `"C"` locale and delete every
+non-ASCII codepoint: copying `Müller` put `Mller` on the OS clipboard, and reading it back yielded
+`Mller`. `SF::Clipboard` now uses the UTF-32 entry points and validates foreign codepoints as it
+decodes, so a value outside Unicode's range or a lone surrogate becomes U+FFFD instead of raising —
+another application's bytes must not be able to crash the process.
+
+Verified across a real process boundary in both directions (`tools/clipboard-roundtrip-probe.cr`),
+since `Testing::TestClipboard` stores a Crystal `String` verbatim and therefore cannot fail on this bug.
+
+### A parked `TextInput` no longer consumes ANY clipboard key
+
+`TextInput` now touches the clipboard **only while it is actually editing text**. While PARKED in
+`QuickEntry` (focus armed `pending_replace`, nothing typed yet) the widget is a grid cell, not a text
+field, so **every** clipboard key is declined and bubbles to the owner: `Ctrl+C`/`Ctrl+Insert`,
+`Ctrl+X`/`Shift+Delete`, `Ctrl+V`/`Shift+Insert`. Once typing starts, or in `FullEdit`, they act on the
+text as before. `Backspace` and `Ctrl+A` are not clipboard ops and are unaffected.
+
+Previously only the keys that had a "competing cell-op" were declined — which gated a generic widget on
+which shortcuts one consumer happened to register. The consequence was that `Ctrl+C` and `Shift+Insert`
+were swallowed before an application that grew a grid-level copy/paste could ever see them.
+
+**What to check in your app:** any clipboard key you want to act on at cell/grid level now reaches your
+shortcut handler while a cell is parked — register it. Conversely, `Shift+Insert` into a parked cell
+used to paste text into the cell editor and now does nothing unless you bind it.
+
+**Two test-harness changes** that affect consumer suites:
+
+- `Testing::TestClipboard` now starts at `nil` where it used to start at `""`. A spec asserting
+  `clipboard.text == ""` on a fresh instance must become `.nil?`.
+- `Testing::TestRenderer` now installs a `TestClipboard` **if and only if** none is installed. Copy and
+  paste paths previously raised `"Clipboard not initialized"` in a suite that installed none; they now
+  work. If your suite installs its own, it is left untouched.
+
+---
+
 ## Reactive fields are now `Source`-backed (auto-capture)
 
 `render_property` fields (and `VirtualMatrix#scroll_offset`) are no longer plain ivars — each is a

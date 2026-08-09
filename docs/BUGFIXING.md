@@ -107,6 +107,7 @@ temporary-instrumentation rule above). When hunting a rendering bug, reach for t
 | cv-coherency | `tools/cv-coherency.sh` | Cached-vs-immediate CONTENT-layer coherency headless, under `-Dcache_validation -Dverify_bounds` — the verify_bounds asserts (buffer-origin whole+fitting, sticky position invariants) and the sibling no-overlap RE-LAYOUT check (warn + `Widget.sibling_overlap_warnings`, self-tested by `spec/rendering/sibling_overlap_guard_spec.cr`) are ACTIVE only here, so this run is load-bearing, not optional. Blind spots: sticky layers (excluded by design) and uniform buffer-origin drift (cache and reference share the origin) |
 | SFML parity sweep | `tools/sfml-parity.sh` | The axioms headless cannot model: real FBO orientation, GL scissor, glyph atlas, full-stack compositing — 3 configs × scroll patterns with per-phase non-vacuity counters, sticky GAP (black-pixel) + GARBLE (content-color) probes. CAVEAT: the two proven historical fault classes (blit_region recenter, buffer-origin drift) manifest as a DETERMINISTIC GLX crash on the current driver, so exit 2 ("no verdict") must be investigated as a possible regression, never waved through |
 | Real-loop smoke | `spec/autotest/timer_rebuild_autotest.cr` | The SFML wait-event idle path (timer-driven rebuilds without input) |
+| Clipboard round trip | `tools/clipboard-roundtrip-probe.cr` — `serve` / `read`, commands in its header | That non-ASCII survives the OS clipboard in BOTH directions across a real process boundary. No spec can prove it: `Testing::TestClipboard` stores a Crystal String verbatim, so it round-trips non-ASCII whether or not the real path does. NOTE `serve` must pump a window's events — SFML answers SelectionRequest only from its event loop, so a windowless owner takes the selection and never answers. Blind spots: payloads large enough to trigger INCR, Wayland, and target-atom negotiation (it compares bytes only) |
 
 Perf attribution stays with the dedicated tools (`spec/autotest/grow_perf_autotest.cr`,
 `spec/autotest/vmatrix_resize_perf_autotest.cr`) — measurements, not tests.
@@ -114,6 +115,16 @@ Perf attribution stays with the dedicated tools (`spec/autotest/grow_perf_autote
 Reusable capture tooling for NEW hunts lives in `src/testing/layer_capture.cr` (per-layer/region
 capture, the sticky-inclusive software window compositor, PNG dumps, black-pixel + tolerance
 signatures) — extracted from the retired harnesses; build on it instead of re-copying.
+
+For GPU-memory hunts, `src/testing/surface_leaks.cr` answers "did this interaction leak a surface?"
+Scope the question with `TestRenderBackend.census_start` / `census_take`, then ask
+`SurfaceLeaks.stranded(root, renderer, created)` for the censused surfaces that are undisposed AND
+unreachable from the live tree. Ask it that way rather than bounding the number of live surfaces:
+the live generation is legitimately undisposed and scales with how much is on screen, so a
+count-based bound is either slack or wrong, while an unreachable surface is unambiguously lost
+(under SFML the payload is a driver texture the collector cannot see). `spec/core/unreachable_backend_census_spec.cr`
+is both its self-test and the worked example. It is what pinned the leak where `mark_needs_layout`
+shed one background per ancestor per layout invalidation.
 
 # Past SFML incidents (symptom → fix → guard)
 

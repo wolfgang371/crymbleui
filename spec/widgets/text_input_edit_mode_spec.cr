@@ -342,9 +342,24 @@ describe CrymbleUI::TextInput do
       input.value.should eq("bc") # forward-deleted 'a' at the caret — NOT a cell delete
     end
 
-    it "Shift+Delete stays editor-handled in QuickEntry regardless (it carries no cell-op)" do
+    # SUPERSEDED RULE — a deliberate behaviour change, not a broken test. This used to
+    # assert "Shift+Delete stays editor-handled in QuickEntry regardless (it carries no
+    # cell-op)". Shift+Delete IS a cut, and the editor now touches the clipboard only
+    # while it is actually editing text, so while PARKED it declines like every other
+    # clipboard key and bubbles to the owner. The old rationale gated a generic widget
+    # on which shortcuts one consumer happened to register — an application that grows
+    # a grid-level cut would never see the key at all.
+    it "PARKED Shift+Delete is not consumed — it is a cut, so it bubbles" do
       input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
       input.on_focus # parked
+      input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: true).should be_false
+      input.value.should eq("hello")
+    end
+
+    it "EDITING Shift+Delete is editor-handled again (typing cleared parked)" do
+      input = CrymbleUI::TextInput.new(value: "hello", mode: CrymbleUI::TextInputMode::QuickEntry)
+      input.on_focus
+      input.on_text_input('a') # typing started -> no longer parked
       input.on_key_down(SF::Keyboard::Key::Delete, control: false, shift: true).should be_true
     end
   end

@@ -7,6 +7,7 @@ require "../rendering/render_trigger"
 require "./test_render_backend"
 require "../rendering/pixel_snap"
 require "./test_shortcut_manager"
+require "./test_clipboard"
 
 module CrymbleUI
   module Testing
@@ -86,6 +87,12 @@ module CrymbleUI
         # whose suite does NOT pre-set one (e.g. embrace), this lazily provides a
         # shared fm — a gui spec that needs clean INITIAL focus should reset it.
         Widget.focus_manager = FocusManager.new unless Widget.focus_manager?
+        # Same rule for the clipboard, and for the same reason: copy/cut/paste paths
+        # reach `Widget.clipboard`, which RAISES when unset — so a consumer suite that
+        # never installs one (embrace does not) would fail on the raise rather than on
+        # the behaviour under test. CONDITIONAL so it cannot clobber the instance
+        # crymbleui's own spec_helper installs and its specs hold references to.
+        Widget.clipboard = TestClipboard.new unless Widget.clipboard?
         # Note: Widget.shortcut_manager not set - headless tests don't test keyboard shortcuts
 
         # Baseline for the per-frame zoom-epoch check (see render_frame). Seed to the

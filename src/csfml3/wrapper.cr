@@ -342,12 +342,39 @@ module SF
   # ============================================================
 
   module Clipboard
+    # UTF-32 in both directions. The ANSI (char*) entry points convert through
+    # std::locale() — "C" here, since nothing sets one — which DELETES every
+    # non-ASCII codepoint each way, silently mangling any non-English text on its
+    # way to or from the OS clipboard.
     def self.string : String
-      String.new(LibCSFML.sfClipboard_getString)
+      ptr = LibCSFML.sfClipboard_getUnicodeString
+      return "" if ptr.null?
+      String.build do |io|
+        i = 0
+        while (cp = ptr[i]) != 0_u32
+          # This is where ANOTHER APPLICATION's data enters the process, so it must
+          # not be able to crash us: a value outside Unicode's range, or a surrogate
+          # half, cannot be encoded as UTF-8 — substitute rather than raise. Doing it
+          # here makes the String valid by construction, so no caller re-validates.
+          io << (cp < 0xD800_u32 || (cp > 0xDFFF_u32 && cp <= 0x10FFFF_u32) ? cp.unsafe_chr : Char::REPLACEMENT)
+          i += 1
+        end
+      end
     end
 
     def self.string=(text : String)
-      LibCSFML.sfClipboard_setString(text.to_unsafe)
+      # ONE allocation of exactly the needed length. Deliberately NOT the
+      # `codepoints.map(&.to_u32)` idiom used for Text below: that builds two arrays
+      # and may realloc again on the terminator push — several times the payload in
+      # transient garbage at clipboard sizes.
+      buffer = Slice(UInt32).new(text.size + 1)
+      i = 0
+      text.each_codepoint do |cp|
+        buffer[i] = cp.to_u32
+        i += 1
+      end
+      buffer[i] = 0_u32 # NUL terminator
+      LibCSFML.sfClipboard_setUnicodeString(buffer.to_unsafe)
     end
   end
 

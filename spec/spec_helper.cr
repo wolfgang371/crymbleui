@@ -42,6 +42,14 @@ Spec.before_each do
   CrymbleUI::FontSizing.reset_zoom
   CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
   CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
+  # REPLACE (not clear) the clipboard: a fresh instance is the only way an example can
+  # observe "nothing has been copied" (text == nil) instead of inheriting whatever a
+  # previous example wrote — and `text=` takes a String, so nil is not assignable.
+  # Clearing would also stop being sufficient the moment the fake grows call counters.
+  # Consequence for spec authors: never hold this instance across an example boundary
+  # (no `before_all`/describe-body capture) — it is replaced, and a captured one goes
+  # silently dead, which reads as "the widget didn't copy".
+  CrymbleUI::Widget.clipboard = CrymbleUI::Testing::TestClipboard.new
   CrymbleUI::Layer.clear_registry  # Prevent orphaned layers from leaking between tests
   CrymbleUI::WindowPanel.clear_registry  # Prevent orphaned panels from leaking between tests
   CrymbleUI::Popup.clear_registry  # Prevent orphaned popups from leaking between tests
