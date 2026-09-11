@@ -391,6 +391,82 @@ module CrymbleUI
         def desaturate(amount : Float64 = 0.1) : Color
             scale_saturation(1.0 - amount)
         end
+
+        # WCAG relative luminance. NOT HSV `value` — `to_hsv` reports the max channel, which
+        # is a different quantity and the natural wrong turn here, since every other colour
+        # operation in this struct is HSV-based.
+        #
+        # Raises on a translucent colour rather than returning a number that is quietly wrong:
+        # luminance is only meaningful against a known compositing base, and the two backends
+        # disagree about translucent fills (CrSFML alpha-blends, the test backend writes
+        # opaquely), so a guess would be certified headless and wrong in production.
+        def relative_luminance : Float64
+            raise ArgumentError.new("relative_luminance needs an opaque color, got alpha #{@a}") unless @a == 255u8
+            0.2126 * Color.linearize(@r) + 0.7152 * Color.linearize(@g) + 0.0722 * Color.linearize(@b)
+        end
+
+        # WCAG contrast ratio, order-independent: 1.0 (identical) .. 21.0 (black on white).
+        def contrast_ratio(other : Color) : Float64
+            a = relative_luminance
+            b = other.relative_luminance
+            hi, lo = a > b ? {a, b} : {b, a}
+            (hi + 0.05) / (lo + 0.05)
+        end
+
+        # A NEUTRAL colour guaranteed to clear `min_ratio` against this one — the basis of a
+        # marker that must stay visible on a background the library does not choose (a caller
+        # tints a cell, a theme adds a colour later). Deriving beats any fixed token: no single
+        # hue clears a floor against every backdrop an app might paint under it.
+        #
+        # Two candidate targets follow from the WCAG ratio; validity is computed FROM
+        # `min_ratio`, never assumed, because the valid ranges shrink as the floor rises. They
+        # overlap only while `min_ratio^2 <= 21`, and above that a mid-luminance backdrop has
+        # NO valid neutral in either direction — so raise rather than return a near miss.
+        #
+        # Quantisation is directional (ceil the lighter candidate, floor the darker), i.e.
+        # always AWAY from the backdrop. Rounding to nearest instead lands at 2.977:1 against a
+        # 3.0 floor in the worst case: the 8-bit step is the difference between holding the
+        # floor and missing it. `Color.from_floats` truncates, so it is deliberately not used.
+        def contrasting_neutral(min_ratio : Float64 = 4.5) : Color
+            l = relative_luminance
+            lighter = min_ratio * (l + 0.05) - 0.05
+            darker = (l + 0.05) / min_ratio - 0.05
+            if lighter <= 1.0
+                Color.neutral(Color.delinearize_ceil(lighter))
+            elsif darker >= 0.0
+                Color.neutral(Color.delinearize_floor(darker))
+            else
+                raise ArgumentError.new(
+                    "no neutral clears #{min_ratio}:1 against luminance #{l.round(4)} — " \
+                    "the lighter/darker branches stop overlapping above #{Math.sqrt(21.0).round(4)}:1")
+            end
+        end
+
+        # sRGB transfer function, 8-bit channel -> linear light.
+        protected def self.linearize(c : UInt8) : Float64
+            v = c.to_f64 / 255.0
+            v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+        end
+
+        # Inverse transfer, linear light -> the real-valued 8-bit channel. For a NEUTRAL colour
+        # the three WCAG weights sum to 1.0, so the channel's linear value IS the luminance and
+        # this inversion is exact.
+        protected def self.channel_for(luminance : Float64) : Float64
+            v = luminance <= 0.0031308 ? luminance * 12.92 : 1.055 * (luminance ** (1.0 / 2.4)) - 0.055
+            v * 255.0
+        end
+
+        protected def self.delinearize_ceil(luminance : Float64) : UInt8
+            channel_for(luminance).ceil.clamp(0.0, 255.0).to_u8
+        end
+
+        protected def self.delinearize_floor(luminance : Float64) : UInt8
+            channel_for(luminance).floor.clamp(0.0, 255.0).to_u8
+        end
+
+        protected def self.neutral(channel : UInt8) : Color
+            Color.new(channel, channel, channel, 255u8)
+        end
     end
 
     # Text alignment within widgets

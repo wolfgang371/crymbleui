@@ -87,8 +87,8 @@ module CrymbleUI::Testing
     # NOTE: for Tab / Shift+Tab use `press_tab` instead — Tab dispatch is owned
     # by FocusManager#handle_tab_key (focused widget first, then focus cycling),
     # which this method bypasses by calling handle_key_down directly.
-    def press_key(key : SF::Keyboard::Key, control : Bool = false, shift : Bool = false)
-      CrymbleUI::Widget.focus_manager.handle_key_down(key, control, shift)
+    def press_key(key : SF::Keyboard::Key, control : Bool = false, shift : Bool = false, alt : Bool = false)
+      CrymbleUI::Widget.focus_manager.handle_key_down(key, control, shift, alt)
     end
 
     # Simulate pressing Tab / Shift+Tab the way the SFML renderer does:

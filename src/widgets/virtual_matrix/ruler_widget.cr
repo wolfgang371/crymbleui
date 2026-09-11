@@ -47,35 +47,68 @@ module CrymbleUI
         @bounds = Rect.new(position, measure(constraints))
       end
 
+      # WHERE A LABEL SITS: the same rule as the cell beside it, which is why the two cannot
+      # disagree about the line they both name (docs/PLACEMENT_CASES.md UC-2, field report #45).
+      #
+      # It calls the rule's OWN function (`PrimitiveBuilder#centred_in`) rather than restating it.
+      # This file carried a copy of the formula until 2026-09-10, and the copy is what let the two
+      # drift apart the moment the rule changed: the ruler kept centring in the whole row while
+      # every cell beside it centred in the visible part of it (#97/#98).
+      #
+      # What it must still supply itself is the EXTENT: pitch MINUS the gutter, which is how every
+      # box in this grid is sized (virtual_matrix.cr:486). Centring in the full pitch instead put
+      # every ruler number exactly half a gutter (1.5px at GRID_SPACING 3) below the cells of its
+      # own line, at every scroll position -- 12402 of 12402 comparisons, measured by I9.
+      private def label_pos(region_pos : Float64, region_size : Float64, label_size : Float64,
+                            band_lo : Float64, band_hi : Float64) : Float64
+        extent = region_size - @matrix.grid_spacing
+        natural = centred_in(region_pos, extent, label_size, band_lo, band_hi)
+        held_in_region(natural, region_pos, extent, label_size, band_lo, band_hi, label_size)
+      end
+
       # Render a sequence of labels along an axis with border lines.
       # axis=:col renders horizontally (labels "c1","c2",...), axis=:row renders vertically ("1","2",...).
       # acc_start: starting position, scroll: scroll offset to subtract, range: which indices to draw.
       protected def draw_labels(bounds : Rect, sizes : Array(Int32), range : Range(Int32, Int32),
                                 axis : Symbol, acc_start : Float64, scroll : Float64 = 0.0)
         font_size = FontSizing.calculate_size(-2)
+        # The band this ruler may paint in: from where its first label starts — past the corner strip
+        # and any sticky lines — to the far edge. Captured BEFORE the loop, which advances acc_start.
+        # Clamping to the widget's own origin instead would park a row number under the opaque corner
+        # strip, which sits above this layer: still emitted, still unreadable.
+        band_lo = acc_start
+        # THE VIEWPORT'S far edge, not this widget's. A ruler widget is laid out to the CONTENT
+        # layer's extent (virtual_matrix.cr:1653), which is the whole scrollable content — hundreds
+        # of pixels past the screen — so `bounds.height` here put the far edge somewhere you cannot
+        # see and the clamp could never engage. The near edge was right all along, which is exactly
+        # how it looked: "it's always visible on the upper part, but not in the lower one"
+        # (Wolfgang, 2026-09-10, images #97/#98). Both rulers share the matrix's origin, so the
+        # viewport's own extent is the right number in this space.
+        band_hi = axis == :col ? @matrix.bounds.width : @matrix.bounds.height
 
         range.each do |i|
           cell_size = sizes[i].to_f64
           screen_pos = acc_start - scroll
 
-          # Skip off-screen elements
+          # Skip lines outside the BAND, not outside the widget: now that a label is clamped into
+          # the band, a line hidden behind the sticky strip would otherwise plant its label inside it.
           if axis == :col
-            unless screen_pos + cell_size < 0 || screen_pos > bounds.width
+            unless screen_pos + cell_size <= band_lo || screen_pos >= band_hi
               label = "c#{i + 1}"
               text_dims = measure_text(label, font_size)
-              text_x = screen_pos + (cell_size - text_dims.width) / 2.0
-              text_y = (bounds.height - font_size) / 2.0
-              draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: -2)
+              text_x = label_pos(screen_pos, cell_size, text_dims.width, band_lo, band_hi)
+              text_y = (bounds.height - font_size) / 2.0 # cross-axis: the strip is one line high
+              draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: VirtualMatrix::RULER_LABEL_FONT_SCALE)
               border_x = screen_pos + cell_size
               draw_line(Vec2.new(border_x, 0.0), Vec2.new(border_x, bounds.height), VirtualMatrix.ruler_line_color)
             end
           else # :row
-            unless screen_pos + cell_size < 0 || screen_pos > bounds.height
+            unless screen_pos + cell_size <= band_lo || screen_pos >= band_hi
               label = "#{i + 1}"
               text_dims = measure_text(label, font_size)
-              text_x = (bounds.width - text_dims.width) / 2.0
-              text_y = screen_pos + (cell_size - font_size) / 2.0
-              draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: -2)
+              text_x = (bounds.width - text_dims.width) / 2.0 # cross-axis: the strip is one label wide
+              text_y = label_pos(screen_pos, cell_size, font_size, band_lo, band_hi)
+              draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: VirtualMatrix::RULER_LABEL_FONT_SCALE)
               border_y = screen_pos + cell_size
               draw_line(Vec2.new(0.0, border_y), Vec2.new(bounds.width, border_y), VirtualMatrix.ruler_line_color)
             end

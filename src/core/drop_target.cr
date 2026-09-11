@@ -63,9 +63,11 @@ module CrymbleUI
     end
 
     # Get highlight opacity for overlay layer (0.0-1.0)
-    # Override in concrete classes to customize
+    # Override in concrete classes to customize.
+    # The value is the THEME's drag-feedback strength — the same number DragManager falls back to
+    # for a target that is not a DropTarget, so both branches of that choice cannot drift apart.
     def highlight_opacity : Float64
-      0.4  # Default: 40% opacity
+      Theme.current.brightness_drag_opacity
     end
 
     # Called when drag enters this target

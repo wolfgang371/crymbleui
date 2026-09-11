@@ -2,6 +2,8 @@ require "../core/types"
 require "../rendering/draw_primitive"
 require "../rendering/render_backend"
 require "../rendering/pixel_snap"
+require "../rendering/clip_math"
+require "./test_font"
 
 module CrymbleUI
   module Testing
@@ -26,16 +28,23 @@ module CrymbleUI
       getter draw_text_count : Int32 = 0
       getter clear_count : Int32 = 0
 
-      # Clipping bug detection: tracks blit attempts at negative coordinates
-      # SFML allows this (renders partial sprite), TestRenderBackend clips it
-      # Used to detect layer-level clipping bugs in ScrollView
+      # Clipping bug detection: tracks blit attempts at negative coordinates.
+      # Both render the partial sprite, scissored by the target's clip — this counter is a
+      # smell detector for layer-level clipping bugs in ScrollView, not a divergence.
       getter negative_blit_count : Int32 = 0
       getter blit_count : Int32 = 0             # full-texture blits (harness)
       getter blit_region_count : Int32 = 0      # partial-region blits — "1 slot re-blit" oracle
 
-      # Clip stack for scissor-test simulation (matches SFML behavior)
+      # Clip stack for scissor-test simulation (matches SFML behavior).
+      # NOT exposed: a getter would hand out the live array, and the cached projections
+      # below are only sound while push_clip/pop_clip are the sole mutators. `clip_depth`
+      # covers the one thing a caller legitimately observes.
       @clip_stack : Array(Rect) = [] of Rect
-      getter clip_stack
+
+      # The clip as a device-pixel box {x0,y0,x1,y1}, x1/y1 exclusive; nil = no clip.
+      # Recomputed at push/pop — exactly when CrSFMLBackend#apply_clip recomputes its
+      # scissor. Deriving it per pixel instead walked the stack and allocated on every write.
+      @clip_box : Tuple(Int32, Int32, Int32, Int32)? = nil
 
       # Scissor suspension flag (matches SFML's GL_SCISSOR_TEST disable)
       @scissor_suspended : Bool = false
@@ -73,35 +82,54 @@ module CrymbleUI
         taken
       end
 
-      # Get current clip rect (intersection of all rects on stack)
-      private def current_clip : Rect?
-        return nil if @clip_stack.empty?
-        # Intersect all rects on stack
-        result = @clip_stack.first
-        @clip_stack.each_with_index do |rect, i|
-          next if i == 0
-          result = intersect_rects(result, rect)
-        end
-        result
+      # Both projections from one derivation. ClipMath is shared with CrSFMLBackend, so
+      # the collapse rule, the empty case and the float->device rounding cannot drift
+      # between instrument and production.
+      private def recompute_clip : Nil
+        @clip_box = ClipMath.device_box(@clip_stack)
+        # A push or a pop CANCELS a suspension, because production's push_clip/pop_clip
+        # call apply_clip unconditionally and that re-installs the stack's box over the
+        # full-target scissor suspend_clip put there. Modelling suspension as a sticky
+        # flag instead let the instrument stay unclipped for a backend's whole life after
+        # an unbalanced suspend — render_single_widget suspends and resumes with no
+        # `ensure`, so any raise between them leaves it stuck.
+        @scissor_suspended = false
       end
 
-      # Intersect two rectangles
-      private def intersect_rects(a : Rect, b : Rect) : Rect
-        x1 = [a.x, b.x].max
-        y1 = [a.y, b.y].max
-        x2 = [a.x + a.width, b.x + b.width].min
-        y2 = [a.y + a.height, b.y + b.height].min
-        width = [x2 - x1, 0.0].max
-        height = [y2 - y1, 0.0].max
-        Rect.new(x1, y1, width, height)
+      # The region writes may land in: the clip box (or the whole buffer when there is no
+      # clip, or while suspended) intersected with the buffer. Bulk primitives clamp their
+      # destination to this ONCE rather than testing every pixel — which is both what the
+      # GPU does (a scissor is a rect intersection, not a per-pixel predicate) and cheaper
+      # than the per-pixel path it makes them consistent with.
+      #
+      # NORMALISED so it can never invert. ClipMath legitimately returns boxes that miss
+      # the buffer entirely — a disjoint stack collapses to a degenerate box at, say,
+      # {1000,1000,1000,1000} — and a naive intersection then yields x0 > x1. That is not
+      # cosmetic: Array#fill raises on a negative count and, worse, SILENTLY fills the
+      # buffer's tail on a negative start.
+      protected def writable_box : Tuple(Int32, Int32, Int32, Int32)
+        box = @clip_box
+        return {0, 0, @width, @height} if box.nil? || @scissor_suspended
+        x0 = box[0].clamp(0, @width)
+        y0 = box[1].clamp(0, @height)
+        {x0, y0, box[2].clamp(x0, @width), box[3].clamp(y0, @height)}
       end
 
-      # Check if point is within current clip region
+      # Fill a half-open device box {x0, y0, x1, y1} — x1/y1 EXCLUSIVE, the same convention
+      # ClipMath uses. The ONE place a bulk write happens, so the empty-box guard exists
+      # once instead of in each caller.
+      private def fill_span(x0 : Int32, y0 : Int32, x1 : Int32, y1 : Int32, color : Color) : Nil
+        return if x0 >= x1 || y0 >= y1
+        cols = x1 - x0
+        (y0...y1).each { |y| @pixels.fill(color, y * @width + x0, cols) }
+      end
+
+      # Is this device pixel inside the clip? Four integer comparisons against the box
+      # CrSFMLBackend hands to the GPU — the same box, from the same function.
       private def point_in_clip?(x : Int32, y : Int32) : Bool
-        clip = current_clip
-        return true if clip.nil?  # No clip = everything visible
-        x >= clip.x.to_i && x < (clip.x + clip.width).to_i &&
-        y >= clip.y.to_i && y < (clip.y + clip.height).to_i
+        box = @clip_box
+        return true if box.nil? # No clip = everything visible
+        x >= box[0] && y >= box[1] && x < box[2] && y < box[3]
       end
 
       # Reset performance counters
@@ -205,7 +233,12 @@ module CrymbleUI
       def clear(color : Color = Color.new(255, 255, 255, 255))
         assert_live("clear")
         @clear_count += 1
-        @pixels.fill(color)
+        # SFML applies the view's scissor to `clear` as well as to draws. No production
+        # site clears a backend that holds its own live clip (audited — which is the whole
+        # reason suspend_clip/resume_clip still exist), so this is a contract guard for the
+        # next caller rather than a fix for a live defect.
+        x1, y1, x2, y2 = writable_box
+        fill_span(x1, y1, x2, y2, color)
       end
 
       # Fill rectangle with color.
@@ -219,24 +252,25 @@ module CrymbleUI
         assert_live("fill_rect")
         @primitive_count += 1  # Count all primitives
         @fill_rect_count += 1
-        x1 = (bounds.x - 0.5).ceil.to_i.clamp(0, @width)
-        y1 = (bounds.y - 0.5).ceil.to_i.clamp(0, @height)
-        x2 = (bounds.x + bounds.width - 0.5).ceil.to_i.clamp(0, @width)
-        y2 = (bounds.y + bounds.height - 0.5).ceil.to_i.clamp(0, @height)
-        return if x1 >= x2 || y1 >= y2
-
-        cols = x2 - x1
-        (y1...y2).each do |y|
-          offset = y * @width + x1
-          cols.times { |i| @pixels[offset + i] = color }
-        end
+        # Clamped to the CLIP, not merely the buffer: production scissors a fill like any
+        # other draw. The centre-coverage rounding (the SFML rasterizer model) is
+        # unchanged — only what it is clamped against.
+        bx1, by1, bx2, by2 = writable_box
+        fill_span(
+          (bounds.x - 0.5).ceil.to_i.clamp(bx1, bx2),
+          (bounds.y - 0.5).ceil.to_i.clamp(by1, by2),
+          (bounds.x + bounds.width - 0.5).ceil.to_i.clamp(bx1, bx2),
+          (bounds.y + bounds.height - 0.5).ceil.to_i.clamp(by1, by2),
+          color)
       end
 
-      # Draw rectangle outline with color
-      # Simulates SFML's outline_thickness behavior: border is drawn CENTERED on edges
-      # When shape starts at x=0, border extends from x=-0.5 to x=0.5, so left half is clipped
-      # This reproduces the clipping bug visible in checkbox_demo
-      # Note: width parameter currently ignored in test backend (always draws 1px)
+      # Four edges INSIDE bounds — the shape CrSFMLBackend#draw_rect produces (four filled
+      # rects), not SFML's centred outline_thickness.
+      #
+      # DIVERGENCE a caller here can hit: `width` is ignored, always 1px, where production
+      # honours thickness (drag_manager asks for 2.0). Two further ones are cross-file and
+      # tracked in the backlog: the raw truncations below vs fill_rect's centre coverage,
+      # and SFMLRenderer#execute_primitive's DrawRect arm, which is still a centred outline.
       def draw_rect(bounds : Rect, color : Color, width : Float64 = 1.0)
         assert_live("draw_rect")
         @primitive_count += 1  # Count all primitives
@@ -246,32 +280,16 @@ module CrymbleUI
         x2 = (bounds.x + bounds.width - 1).to_i
         y2 = (bounds.y + bounds.height - 1).to_i
 
-        # SFML outline_thickness draws centered on edges (±0.5px). The OUTER half of an outline that sits
-        # on the current clip/scissor boundary is clipped away by GL scissor (or, for a widget-backend
-        # render, the backend edge at 0). Simulate that by skipping the border's leftmost column / topmost
-        # row when it coincides with the clip's left/top edge — CLIP-RELATIVE, not `bounds.x == 0`. This
-        # holds whether the primitive is drawn widget-local (per-cell texture path: clip origin at 0) OR
-        # at a buffer offset (direct-to-layer path: clip origin at the cell's buffer position). Keying on
-        # 0 alone made the SAME widget's border render 1px differently between the two paths — a false
-        # cache-validation divergence (the instrument, not the cache, was wrong; matches SFML, which
-        # scissors identically wherever the clip sits).
-        clip = (@scissor_suspended || @clip_stack.empty?) ? nil : @clip_stack.last
-        clip_left = clip ? clip.x : 0.0
-        clip_top = clip ? clip.y : 0.0
-        skip_left = bounds.x <= clip_left
-        skip_top = bounds.y <= clip_top
-
-        # Top and bottom edges (skip left/right corners if those edges are clipped)
-        start_x = skip_left ? x1 + 1 : x1
-        (start_x..x2).each do |x|
-          set_pixel(x, y1, color) unless skip_top
+        # All four edges, INSIDE bounds. Production draws a border as four FILLED rects
+        # positioned inside the rect (crsfml_backend.cr#draw_rect), so an edge sitting on
+        # the clip boundary is inside the scissor and IS drawn; where an edge genuinely
+        # falls outside, set_pixel's own clip check removes it.
+        (x1..x2).each do |x|
+          set_pixel(x, y1, color)
           set_pixel(x, y2, color)
         end
-
-        # Left and right edges
-        start_y = skip_top ? y1 + 1 : y1
-        (start_y..y2).each do |y|
-          set_pixel(x1, y, color) unless skip_left
+        (y1..y2).each do |y|
+          set_pixel(x1, y, color)
           set_pixel(x2, y, color)
         end
       end
@@ -403,13 +421,35 @@ module CrymbleUI
         assert_live("draw_text")
         @draw_text_count += 1
 
-        char_width = (size * 0.6).to_i.clamp(4, 20)  # ~60% of height
+        # Pitch comes from the FONT, not from a second copy of the ratio here: the two must
+        # agree or every horizontal pixel claim in the suite is measured against a width the
+        # font never reported.
+        char_width = (size * TestFont::CHAR_WIDTH_RATIO).to_i.clamp(4, 20)
+        # The line SLOT comes from the headless font, not from a second local formula: the
+        # two must agree about where line k sits or a multi-line claim is unreadable. The
+        # glyph's INK is then capped to the slot, because the existing clamp floors at 6px
+        # and would otherwise make ink TALLER than the step below size 6 — an instrument
+        # contradicting itself, which is the failure this whole pass exists to prevent.
+        line_step = TestFont.line_step(size)
         char_height = size.to_i.clamp(6, 30)
+        char_height = line_step.to_i if line_step < char_height
         # Same snap as the SFML text path — headless ink lands on production's pixel.
-        x = PixelSnap.snap(position.x).to_i
+        origin_x = PixelSnap.snap(position.x).to_i
+        x = origin_x
         y = PixelSnap.snap(position.y).to_i
+        line = 0
 
         text.each_char do |char|
+          if char == '\n'
+            # SFML renders `\n` natively, so the headless backend must too: back to the
+            # origin column, down one slot. Snapped from the ORIGIN each time rather than
+            # accumulated, so line k lands on the same device row the font's k * step
+            # predicts and rounding cannot drift across a long block.
+            line += 1
+            x = origin_x
+            y = PixelSnap.snap(position.y + line * line_step).to_i
+            next
+          end
           code = char.ord
           # Draw 2 vertical stripes based on 2 LSBs
           # LSB 0 -> left stripe, LSB 1 -> right stripe
@@ -457,8 +497,14 @@ module CrymbleUI
           # Skip actual text rendering in tests (no font support)
         when FillTriangle
           fill_triangle(primitive.p1, primitive.p2, primitive.p3, primitive.color)
-        when PushClip, PopClip
-          # Skip clipping in tests (would need clip stack implementation)
+        when PushClip
+          # The clip stack DOES exist here, and since it governs every write it must
+          # govern these too — production's dispatcher pushes and pops the same way
+          # (layer_renderer's execute_primitive_with_offset). Dropping them silently
+          # rendered a widget that clips its own primitive stream unclipped.
+          push_clip(primitive.rect)
+        when PopClip
+          pop_clip
         end
       end
 
@@ -522,18 +568,32 @@ module CrymbleUI
         # FAST PATH: Row-level copy for opaque blits (most common case).
         # Skips per-pixel get/set/clip overhead — direct array slice copy.
         if !use_alpha_blend || (opacity >= 1.0 && blend_mode == BlendMode::Normal)
-          # Clamp to valid target region
-          src_y_start = offset_y < 0 ? -offset_y : 0
-          src_x_start = offset_x < 0 ? -offset_x : 0
-          rows = Math.min(clip_height - src_y_start, target.height - (offset_y + src_y_start))
-          cols = Math.min(clip_width - src_x_start, target.width - (offset_x + src_x_start))
-          return if rows <= 0 || cols <= 0
+          # Clip the DESTINATION span to the target's writable box — its clip intersected
+          # with its buffer. Production draws a blit as a sprite, so the TARGET's view
+          # scissor governs it exactly like any other draw; the source's clip is correctly
+          # irrelevant. Clamping to the target's buffer alone let a blit paint straight
+          # through a live clip, which is the architecture's main path
+          # (layer_renderer.cr blits each widget texture into the layer INSIDE the layer
+          # clip, in COPY mode) and the reason the slow path and the fast path disagreed.
+          #
+          # Derive the source start FROM the clipped destination. Computing it from the
+          # sign of the offset first and clipping afterwards is the wrong variant: it drops
+          # the case where the clip's near edge lies inside the buffer but beyond `offset`.
+          tx1, ty1, tx2, ty2 = target.writable_box
+          dx0 = Math.max(offset_x, tx1)
+          dy0 = Math.max(offset_y, ty1)
+          # The source rect is bounded too. clip_width/clip_height are a SOURCE-side crop
+          # supplied by the caller and NOT derived from this backend — the compositor
+          # passes cover()-rounded layer bounds against a span()-sized buffer — so without
+          # this a row could read into the next one.
+          dx1 = Math.min(offset_x + Math.min(clip_width, @width), tx2)
+          dy1 = Math.min(offset_y + Math.min(clip_height, @height), ty2)
+          return if dx0 >= dx1 || dy0 >= dy1
 
-          rows.times do |i|
-            sy = src_y_start + i
-            ty = offset_y + sy
-            src_offset = sy * @width + src_x_start
-            dst_offset = ty * target.width + (offset_x + src_x_start)
+          cols = dx1 - dx0
+          (dy0...dy1).each do |ty|
+            src_offset = (ty - offset_y) * @width + (dx0 - offset_x)
+            dst_offset = ty * target.width + dx0
 
             if use_alpha_blend
               # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent
@@ -553,10 +613,11 @@ module CrymbleUI
                 end
               end
             else
-              # COPY mode: direct array copy (no alpha check)
-              @pixels[src_offset, cols].each_with_index do |c, j|
-                target.@pixels[dst_offset + j] = c
-              end
+              # COPY mode: direct copy, no alpha check. Indexed rather than
+              # `@pixels[src_offset, cols]` — that slice allocates a fresh Array per ROW,
+              # and this is the architecture's main path (every widget texture into its
+              # layer, every frame).
+              cols.times { |j| target.@pixels[dst_offset + j] = @pixels[src_offset + j] }
             end
           end
           return
@@ -619,8 +680,9 @@ module CrymbleUI
         assert_live("blit")
         assert_live_other(source, "blit", "source")
         @blit_count += 1
-        # Track negative blit destinations (indicates missing layer-level clipping)
-        # SFML would render partial sprite; TestRenderBackend clips via set_pixel bounds check
+        # Track negative blit destinations (indicates missing layer-level clipping).
+        # SFML renders the partial sprite, scissored by the target's view; blit_to matches
+        # that by clipping the destination span to the target's writable box.
         if dest_x < 0 || dest_y < 0
           @negative_blit_count += 1
         end
@@ -719,12 +781,20 @@ module CrymbleUI
       def push_clip(rect : Rect)
         assert_live("push_clip")
         @clip_stack << rect
+        recompute_clip
       end
 
       # Pop clipping region from stack
       def pop_clip
         assert_live("pop_clip")
+        # The `if any?` SWALLOWS an underflow that CrSFMLBackend#pop_clip raises on —
+        # a recorded divergence, tracked in the backlog, not a contract.
         @clip_stack.pop if @clip_stack.any?
+        recompute_clip
+      end
+
+      def clip_depth : Int32
+        @clip_stack.size
       end
 
       # Suspend scissor clipping (matches SFML's glDisable(GL_SCISSOR_TEST))

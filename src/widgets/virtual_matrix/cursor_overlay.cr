@@ -168,15 +168,21 @@ module CrymbleUI
     # the band layer flips to Subtractive blend in a light theme, which would
     # invert this fixed-identity color into its complement (teal-green). Normal
     # alpha compositing keeps the decal salmon over any background, in any theme.
+    # OPAQUE salmon. Theme-independent by design: this is an identity marker
+    # ("this cell is armed to move"), not a background-adaptive tint. The
+    # see-through comes from the LAYER's opacity, NOT the fill alpha: a
+    # semi-transparent fill drawn into a transparent-cleared RT is premultiplied
+    # over black by the GPU (salmon → muddy grey), which composites to a nearly
+    # invisible tint on a light background. layer.opacity attenuates an opaque RT
+    # once at composite time instead — the same pattern the drag ghost uses.
+    #
+    # PUBLIC because it is the app's drop-target signal, not just this widget's: a
+    # host that paints its own drop feedback (embrace's field list, through a
+    # DropZoneBox) must be able to say the same thing in the same colour rather
+    # than copy the value and drift.
+    DRAG_HIGHLIGHT_COLOR = Color.new(204_u8, 102_u8, 102_u8, 255_u8)
+
     private class DragOverlayWidget < MatrixOverlayWidget
-      # OPAQUE salmon. Theme-independent by design: this is an identity marker
-      # ("this cell is armed to move"), not a background-adaptive tint. The
-      # see-through comes from the LAYER's opacity, NOT the fill alpha: a
-      # semi-transparent fill drawn into a transparent-cleared RT is premultiplied
-      # over black by the GPU (salmon → muddy grey), which composites to a nearly
-      # invisible tint on a light background. layer.opacity attenuates an opaque RT
-      # once at composite time instead — the same pattern the drag ghost uses.
-      DRAG_HIGHLIGHT_COLOR = Color.new(204_u8, 102_u8, 102_u8, 255_u8)
 
       def initialize(matrix : VirtualMatrix)
         super(matrix, "#{matrix.id}_drag_overlay")

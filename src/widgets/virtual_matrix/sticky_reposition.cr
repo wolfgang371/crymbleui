@@ -66,16 +66,32 @@ module CrymbleUI
 
         bounding = get_bounding_box(key)
         is_compound = bounding[0] != bounding[1]
-
+        # The layout pass's half of CRYMBLE_CARET_LOG. Without it, "no [caret] line this frame" is
+        # ambiguous between "no frame ran" and "the OTHER pass ran" — and the two have opposite
+        # fixes. The blit-path half lives in blit_plan.cr; the passes run either/or per frame.
+        log_caret_frame(key, "LAYOUT", widget)
         # Compound cells derive BOTH screen-space position AND visible extent per
         # axis from StickyMath.compound_axis (shared with the blit-plan fast path):
         # (a) correct screen-space position (not content-space)
         # (b) extent shrinks as constituents shift out (prevents sibling overlap)
+        #
+        # KNOWN COST of (b), unfixed: the clipping means a group label sits at the MIDDLE of the
+        # visible slice rather than at the leading edge like everything else naming the same
+        # region, and once the slice gets short the label can fall outside it and not be drawn at
+        # all (field report 2026-09-06, image #45: "a" absent, then appearing after one line of
+        # scroll). Replacing this with the shared ink rule was tried three times and backed out
+        # three times — see the compound branch below for the measured reason.
         compound_w = 0.0
         compound_h = 0.0
 
         if !is_sticky_col
           if is_compound
+            # X KEEPS the box-level pin. The ink rule that replaces it on Y has no horizontal
+            # counterpart: `ink_region` is consumed by the `vcentered_*` family, and cell text
+            # is hard left-aligned at padding (text.cr) with no `hcentered_*` owner anywhere. Take
+            # this away without a replacement and a column header scrolls out with its span —
+            # measured in the demo, field report 2026-09-06 image #49 ("1a"/"2a" scrolling out
+            # immediately). Asymmetric because the two axes genuinely are.
             new_x, compound_w = Widgets::VirtualMatrix::StickyMath.compound_axis(
               col_view, bounding[0][1], bounding[1][1], true_x)
           else
@@ -93,6 +109,18 @@ module CrymbleUI
 
         if !is_sticky_row
           if is_compound
+            # A SPAN keeps StickyMath.compound_axis on BOTH axes, and the reason is not the pin.
+            # Giving Y the natural span was tried twice and backed out twice; the second attempt
+            # broke compound_shifted_visibility_spec's equivalence lock, which is the measured
+            # reason: `compound_axis` also computes the span's extent under SHIFTED-OUT
+            # constituents (AxisView#shifted, the sticky-tail work), so a span's height is NOT
+            # `cum[hi+1] - cum[lo]` once the grid compacts. A naive sum makes the two passes
+            # disagree, and a divergence between them is a visible jump when the frame type flips.
+            #
+            # The cost of keeping it is field report 2026-09-06 (a): the box pin engages at a
+            # threshold and shifts the label 1-3px while the ruler beside it moves smoothly.
+            # Fixing that means teaching the shared rule about shifted constituents, not deleting
+            # the function that already knows.
             new_y, compound_h = Widgets::VirtualMatrix::StickyMath.compound_axis(
               row_view, bounding[0][0], bounding[1][0], true_y)
           else

@@ -181,7 +181,22 @@ module CrymbleUI
 
     # Detect if point is near a column or row border in the header area.
     # Returns {ResizeAxis, index} where index is the col/row to the LEFT/ABOVE the border.
+    # Would content sizing overwrite a drag on this line? While the mode is on, of every line —
+    # `interactive_resize`'s own rationale ("a drag would only be overwritten by the next
+    # re-measure, so offering it is a lie"), and under shrink-only sizing that is true of pinned
+    # lines too: they are measured like any other, they simply never grow. An earlier version
+    # exempted them, which was correct only while the mode did not size them at all.
+    #
+    # The refusal is the LIBRARY's, not the consumer's: `interactive_resize` stays a separate hard
+    # veto for a consumer that wants no resizing whatsoever.
+    private def line_is_content_sized?(axis : ResizeAxis, index : Int32) : Bool
+      @auto_size
+    end
+
     private def detect_resize_edge(point : Vec2) : Tuple(ResizeAxis, Int32)?
+      # One gate for the whole gesture: this is the only route to both `on_mouse_down`'s resize
+      # start and `preferred_cursor`'s handle, so refusing here refuses both.
+      return nil unless interactive_resize
       sx = point.x - absolute_bounds.x
       sy = point.y - absolute_bounds.y
 
@@ -196,7 +211,10 @@ module CrymbleUI
         acc = 0.0
         (0...@cols).each do |c|
           acc += col_width_pixels(c)
-          return {ResizeAxis::Col, c} if (local_x - acc).abs < resize_tolerance
+          if (local_x - acc).abs < resize_tolerance
+            return nil if line_is_content_sized?(ResizeAxis::Col, c)
+            return {ResizeAxis::Col, c}
+          end
           break if acc > local_x + resize_tolerance
         end
       end
@@ -209,7 +227,10 @@ module CrymbleUI
         acc = 0.0
         (0...@rows).each do |r|
           acc += row_height_pixels(r)
-          return {ResizeAxis::Row, r} if (local_y - acc).abs < resize_tolerance
+          if (local_y - acc).abs < resize_tolerance
+            return nil if line_is_content_sized?(ResizeAxis::Row, r)
+            return {ResizeAxis::Row, r}
+          end
           break if acc > local_y + resize_tolerance
         end
       end
@@ -348,7 +369,17 @@ module CrymbleUI
       mark_cursor_overlay_dirty
     end
 
+    # A double-click OPENS the editor, and it opens with the caret at the end of the value — which
+    # in a cell taller than the viewport is off screen, so the cell reads as "not focused" (field
+    # report). Scoping the mouse path out was wrong: a single click does put the caret where the
+    # user clicked, but the click that OPENS an editor does not.
     def on_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
+      handled = handle_mouse_up(point, button)
+      snap_to_caret
+      handled
+    end
+
+    private def handle_mouse_up(point : Vec2, button : MouseButton = MouseButton::Left)
       if resize_axis != ResizeAxis::None
         # Persist the new sizes to the adapter (survives shape duplication).
         if adapter = @adapter
@@ -398,9 +429,22 @@ module CrymbleUI
 
     # === KEYBOARD HANDLING ===
 
+    # Both key entry points wrap their handler so the caret is followed AFTER the editor has moved
+    # it. The existing pre-forward `snap_to_cursor` calls stay: they materialise an off-screen cell
+    # and re-establish proxy focus, which has to happen before the key is delivered. What they
+    # cannot do is see where the caret ends up — the editor has not consumed the key yet — and with
+    # cells that can exceed the viewport that is the difference between typing and typing blind.
+    # One wrapper each, rather than a call at every forward site: `on_key_down` alone has
+    # seven navigation snaps and five proxy forwards, several behind an early `return true`.
     def on_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
+      handled = handle_key_down(key, control, shift, alt)
+      snap_to_caret
+      handled
+    end
+
+    private def handle_key_down(key : SF::Keyboard::Key, control : Bool, shift : Bool, alt : Bool = false) : Bool
       {% if flag?(:CURSOR_PERF) %}
-        _kd_start = Time.monotonic
+        _kd_start = Time.instant
       {% end %}
       # For editing keys (not navigation/tab), snap to cursor first.
       # If the cursor cell was off-screen, this recreates it and
@@ -422,7 +466,12 @@ module CrymbleUI
       # longer carries cell-op vocabulary.
       if key == SF::Keyboard::Key::Escape
         if proxy = @proxy_focused_widget
-          proxy.on_key_down(key, control, shift)
+          # Every forward below passes `alt` through unchanged. The matrix has no opinion on
+          # what a modifier means — that is the editor's to interpret — and dropping it here
+          # made a chord that arrives correctly all the way from the renderer
+          # (dispatch_key -> handle_key_down -> the focused widget) reach the cell as a bare
+          # key, which reads as a broken widget rather than as broken routing.
+          proxy.on_key_down(key, control, shift, alt)
         end
         return true
       end
@@ -434,20 +483,33 @@ module CrymbleUI
         when SF::Keyboard::Key::Up, SF::Keyboard::Key::Down,
              SF::Keyboard::Key::Left, SF::Keyboard::Key::Right
           if proxy.wants_arrow_keys?
-            return true if proxy.on_key_down(key, control, shift)
+            return true if proxy.on_key_down(key, control, shift, alt)
           end
           clear_proxy_focus
         when SF::Keyboard::Key::Tab
           # Don't forward Tab to the proxy — fall through (no return) to the
           # grid-nav Tab case below, which round-robins the cell cursor.
         when SF::Keyboard::Key::Enter, SF::Keyboard::Key::Space
+          # A MODIFIED Enter on a multi-line text editor is an AUTHORING chord, not an
+          # activation, so the editor gets first refusal and Alt/Ctrl/Shift+Enter inserts a
+          # break instead of drilling. Gated three ways, each for its own reason: on Enter alone,
+          # because this branch also handles Space and Ctrl+Space on a Bool cell must still
+          # reach on_cell_activate; on the proxy being a TextInput, because ComboBox returns
+          # true for Enter (a Ctrl+Enter on a reference cell would silently expand its
+          # dropdown instead of drilling); and on that editor actually being multi-line, so
+          # a numeric or aggregate cell keeps today's behaviour exactly.
+          if key == SF::Keyboard::Key::Enter && (alt || control || shift) &&
+             (ti = proxy).is_a?(TextInput) && ti.multiline
+            return true if ti.on_key_down(key, control, shift, alt)
+          end
+
           # App-level activation (e.g. drill-down) gets priority over the
           # proxy's default Enter/Space handler. If on_cell_activate returns
           # true, skip proxy forward entirely.
           if @on_cell_activate.try(&.call(cursor_rc))
             return true
           end
-          if proxy.on_key_down(key, control, shift)
+          if proxy.on_key_down(key, control, shift, alt)
             return true
           end
           if proxy.is_a?(TextInput)
@@ -468,7 +530,7 @@ module CrymbleUI
           proxy.trigger_click
           return true
         else
-          return true if proxy.on_key_down(key, control, shift)
+          return true if proxy.on_key_down(key, control, shift, alt)
         end
       end
 
@@ -489,7 +551,7 @@ module CrymbleUI
         snap_to_cursor
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
-          _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
+          _kd_ms = (Time.instant - _kd_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_UP: #{_kd_ms.round(2)}ms cursor=#{cursor_rc} scroll=#{scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
         {% end %}
         true
@@ -498,7 +560,7 @@ module CrymbleUI
         snap_to_cursor
         mark_needs_render
         {% if flag?(:CURSOR_PERF) %}
-          _kd_ms = (Time.monotonic - _kd_start).total_milliseconds
+          _kd_ms = (Time.instant - _kd_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "KEY_DOWN: #{_kd_ms.round(2)}ms cursor=#{cursor_rc} scroll=#{scroll_offset.y.round(1)} active_cells=#{@active_cells.size} rows=#{@rows} cols=#{@cols}" }
         {% end %}
         true
@@ -530,6 +592,12 @@ module CrymbleUI
     end
 
     def on_text_input(char : Char) : Bool
+      handled = handle_text_input(char)
+      snap_to_caret
+      handled
+    end
+
+    private def handle_text_input(char : Char) : Bool
       # Service a pending invalidation BEFORE deciding where this character goes. A commit earlier in
       # the SAME poll batch (cursor-down -> cell_assign -> the adapter's invalidate_all!) sets
       # @pending_invalidate_all, and update_proxy_focus then refuses to attach to cells that are

@@ -17,12 +17,13 @@ module CrymbleUI
   #     (blit, entire texture)       |  draws automatically       |  add a Y-flip
   #   PARTIAL region blit            | samples a sub-rect of the  | YES — texture_rect
   #     (blit_region)                |  bottom-up FBO texture      |  Y invert + scale(-1)
-  #   OpenGL scissor (apply_clip)    | GL origin is BOTTOM-LEFT    | YES — gl_y flip
   #
   # (Narration ported from crsfml_backend.cr:205-208 and :226-234: full-texture
   # blit needs NO flip — SFML handles it — but partial texture_rect sampling of the
-  # bottom-up FBO texture DOES, and so does the GL scissor whose origin is at the
-  # bottom.)
+  # bottom-up FBO texture DOES.)
+  #
+  # Clipping is NOT in this table: the clip is expressed as the target view's scissor
+  # and SFML performs that flip itself, so no flip of ours is involved.
   #
   # LIMIT OF WHAT THIS MODULE + ITS SPECS PROVE: they prove the flip triple is
   # self-consistent with the convention table above (feeding the triple back
@@ -51,13 +52,6 @@ module CrymbleUI
         draw_y: dest_y + height,
         scale_y: -1.0_f32
       )
-    end
-
-    # OpenGL scissor origin (bottom-left) for a top-down clip band [top, top+height)
-    # on a surface of height `surface_height`. GL's Y origin is at the bottom, so the
-    # band's GL origin is its distance from the bottom edge: H - (top + height).
-    def self.scissor_gl_y(surface_height : Int32, top : Int32, height : Int32) : Int32
-      surface_height - (top + height)
     end
   end
 end

@@ -60,6 +60,33 @@ end
 
 describe CrymbleUI::VirtualMatrix do
   describe "Dynamic Handle Cell" do
+    it "a content-size fit does not un-pin a partially scrolled merged cell" do
+      # A merged cell whose span is partly scrolled out is laid out at a CLIPPED position, so its
+      # handle stays at the viewport edge and its label drifts at half the content's speed instead
+      # of leaving with it (compute_compound_visible_sizes). `flush_fit_cells` — the per-keystroke
+      # relayout content sizing added — re-positions every live cell from the raw cumulative
+      # offsets, with no knowledge of that clipping, so one keystroke threw the pinned cell back to
+      # its true position. Field report: the row-header label stopped staying visible.
+      merges = [{ {0, 0}, {3, 0} }] # a row-spanning header, as embrace's pivot produces
+      adapter = CompoundScrollAdapter.new(12, 4, merges: merges)
+      matrix, app, constraints = setup_compound_matrix(adapter, 600.0, 200.0, show_rulers: false)
+      matrix.auto_size = true
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+
+      row_h = CrymbleUI::VirtualMatrix::GRID_SPACING + CrymbleUI::VirtualMatrix::DEFAULT_ROW_HEIGHT * 20.0
+      matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, row_h * 2 + 5.0) # part of the span is above
+      matrix.layout(constraints, CrymbleUI::Vec2.zero)
+      handle = matrix.active_cells[{0, 0}]? || matrix.active_cells[{2, 0}]?
+      handle.should_not be_nil
+      pinned_y = handle.not_nil!.bounds.y
+
+      matrix.fit_cell_to_content(5, 1, 200.0, 20.0, 1) # one keystroke's worth of sizing
+      matrix.pre_render_flush
+
+      after = matrix.active_cells[{0, 0}]? || matrix.active_cells[{2, 0}]?
+      after.not_nil!.bounds.y.should eq(pinned_y)
+    end
+
     it "merged cell handle is top-left when no scroll" do
       # Merged cell (0,2)-(0,3): spans cols 2 and 3 in row 0
       merges = [{ {0, 2}, {0, 3} }]

@@ -139,7 +139,11 @@ module CrymbleUI
       when TextAlign::Right then bounds.width - text_size.width - padding
       else                       (bounds.width - text_size.width) / 2.0 # Center (default)
       end
-      text_y = vcentered_text_y(bounds.height, font_scale)
+      # Anchored as a BLOCK, for the same reason as Text: measure_text reserves a slot per
+      # line, so a label carrying a break gets a taller box that a single line's centring
+      # would misplace. `display_text` is what is measured and drawn, so it is what is
+      # counted. Identical to vcentered_text_y for a single line.
+      text_y = vcentered_block_y(bounds.height, TextLines.count(display_text), font_scale)
       text_position = Vec2.new(text_x, text_y)
 
       # Create widget-local rect at (0,0)

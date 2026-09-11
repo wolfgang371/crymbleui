@@ -108,10 +108,10 @@ describe "ComboBox two-way Source binding (bind:)" do
     app.find("a").not_nil!.as(CrymbleUI::ComboBox).selected_value.should be_nil # out-of-range → blank
   end
 
-  it "rejects bind: together with editable: or a non-default selected: (index-only)" do
+  it "rejects bind: together with allow_custom: or a non-default selected: (index-only)" do
     src = CrymbleUI::Source(Int32).new(0)
     expect_raises(ArgumentError, /index-only/) do
-      CrymbleUI::ComboBox.new(ITEMS, editable: true, bind: src)
+      CrymbleUI::ComboBox.new(ITEMS, allow_custom: true, bind: src)
     end
     expect_raises(ArgumentError, /index-only/) do
       CrymbleUI::ComboBox.new(ITEMS, selected: 1, bind: src)

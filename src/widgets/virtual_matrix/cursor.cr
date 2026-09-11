@@ -254,13 +254,85 @@ module CrymbleUI
       end
     end
 
+    # Scroll the CARET into view, not just its cell.
+    #
+    # `snap_to_cursor` works at cell granularity, which was enough while a cell always fitted: put
+    # the cell on screen and the caret was on screen with it. A content-sized cell can now be larger
+    # than the viewport, so the caret walks inside a cell that is already "visible" and
+    # leaves the screen with nothing following it — you type blind.
+    #
+    # The caret's geometry belongs to the editor, so it is ASKED for rather than re-derived; a
+    # widget that draws no caret answers nothing and this is a no-op. Sticky lines are skipped for
+    # the same reason `snap_to_cursor` skips them: they do not scroll, and what carries the caret
+    # there is the editor's own two-axis offset — measured, not assumed (a 63-character label in a
+    # 100px header cell scrolls its editor 440px), and guarded in `auto_size_spec`.
+    #
+    # Driven from the two KEY entry points only. A mouse click needs no counterpart: it puts the
+    # caret where the user clicked, which is on screen by construction.
+    #
+    # O(1): the caret's cell position is read from the per-resize cumulative arrays, so no prefix
+    # sums are walked on the keystroke path. (It used to read `@active_cells[...].bounds` instead,
+    # which is only content-space for a cell on the CONTENT layer — see the note at the arithmetic.)
+    def snap_to_caret : Nil
+      widget = @proxy_focused_widget
+      return unless widget && widget.responds_to?(:caret_rect)
+      caret = widget.caret_rect
+      return unless caret
+      row, col = cursor_rc
+      # PER AXIS. A sticky column is pinned horizontally and says nothing about whether the view
+      # must scroll DOWN to the caret; the old `||` read "either axis pinned -> nothing to do" and
+      # so swallowed every snap in a grid where all columns are sticky — which a 3-column pivot is,
+      # since [2,1,0]'s trailing run is the whole set (field report 2026-09-05: Enter on a tall
+      # multi-line cell scrolled nothing and showed no caret). Only a cell pinned on BOTH axes is
+      # genuinely unscrollable.
+      return if row < sticky_row_count && col < sticky_col_count
+      return unless @content_layer
+
+      vp_w = @content_layer.try(&.bounds.width) || bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || bounds.height
+      return unless vp_w > 0 && vp_h > 0
+
+      # The caret in CONTENT space, taken from the RULERS rather than from `cell.bounds`: a cell on
+      # a sticky layer carries SCREEN coordinates on its scrolling axis (reposition_sticky_cells
+      # writes `content - scroll` there), so reading bounds would have been content-space for a
+      # content cell and screen-space for a sticky one — the same double-count that once let the
+      # view scroll only downwards, reintroduced through the axis this method just started serving.
+      # Cumulative arrays keep it O(1), which is what makes this affordable per keystroke.
+      row_cum = @cached_row_physical_cum
+      col_cum = @cached_col_physical_cum
+      content_x = ruler_col_width_pixels + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_width_pixels(c) })
+      content_y = ruler_row_height_pixels + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_height_pixels(r) })
+      caret_left = content_x + caret.x
+      caret_top = content_y + caret.y
+      caret_right = caret_left + caret.width
+      caret_bottom = caret_top + caret.height
+
+      sticky_w = sticky_col_width_pixels + ruler_col_width_pixels
+      sticky_h = sticky_row_height_pixels + ruler_row_height_pixels
+      new_x = scroll_offset.x
+      new_y = scroll_offset.y
+      unless row < sticky_row_count # a pinned ROW does not move vertically, so nothing to follow
+        new_y = caret_top - sticky_h if caret_top - new_y < sticky_h
+        new_y = caret_bottom - vp_h if caret_bottom - new_y > vp_h
+      end
+      unless col < sticky_col_count # ...and the horizontal dual
+        new_x = caret_left - sticky_w if caret_left - new_x < sticky_w
+        new_x = caret_right - vp_w if caret_right - new_x > vp_w
+      end
+
+      clamped = Vec2.new(new_x.clamp(0.0, max_content_scroll_x), new_y.clamp(0.0, max_content_scroll_y))
+      return if clamped == scroll_offset
+      @scroll_offset.set(clamped)
+      apply_scroll
+    end
+
     # Auto-scroll to keep cursor visible.
     # Follows the on_mouse_wheel pattern: render-only, no layout.
     # When for_edit is true, snaps to show the full merged region (for typing/editing).
     # When for_edit is false (default), snaps to the single cursor cell (for navigation).
     def snap_to_cursor(for_edit : Bool = false)
       {% if flag?(:CURSOR_PERF) %}
-        _snap_start = Time.monotonic
+        _snap_start = Time.instant
       {% end %}
       return unless @content_layer
       return if @rows == 0 || @cols == 0 # degenerate grid: no cell to scroll into view
@@ -304,7 +376,12 @@ module CrymbleUI
         screen_left = ruler_col_w_i + data_pos_x - scroll_x_i
         screen_right = ruler_col_w_i + data_pos_x + merged_width - scroll_x_i
 
-        if screen_left < sticky_w
+        # A cell WIDER than the room it has satisfies both tests at once, and each branch's snap
+        # re-arms the other: consecutive calls then alternate (measured 552/206 before this guard),
+        # and the same cell showed its head or its tail depending on which side you arrived from.
+        # Such a cell aligns its LEADING edge — you read a value from its start, and the cut marker
+        # says the rest is there. (The vertical twin below is the same rule.)
+        if screen_left < sticky_w || merged_width > vp_w - sticky_w
           # Left edge hidden behind sticky header + ruler → snap left
           new_scroll_x = (ruler_col_w_i + data_pos_x - sticky_w).to_f64
         elsif screen_right > vp_w
@@ -326,7 +403,8 @@ module CrymbleUI
         screen_top = ruler_row_h_i + data_pos_y - scroll_y_i
         screen_bottom = ruler_row_h_i + data_pos_y + merged_height - scroll_y_i
 
-        if screen_top < sticky_h
+        # Taller than the room it has: leading edge, as on X above.
+        if screen_top < sticky_h || merged_height > vp_h - sticky_h
           # Top edge hidden behind sticky header + ruler → snap up
           new_scroll_y = (ruler_row_h_i + data_pos_y - sticky_h).to_f64
         elsif screen_bottom > vp_h
@@ -350,12 +428,12 @@ module CrymbleUI
         {% end %}
         self.scroll_offset = Vec2.new(new_scroll_x, new_scroll_y)  # custom setter: Source.set + apply_scroll
         {% if flag?(:CURSOR_PERF) %}
-          _snap_ms = (Time.monotonic - _snap_start).total_milliseconds
+          _snap_ms = (Time.instant - _snap_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  SNAP_TO_CURSOR(scroll): #{_snap_ms.round(2)}ms" }
         {% end %}
       else
         {% if flag?(:CURSOR_PERF) %}
-          _snap_ms = (Time.monotonic - _snap_start).total_milliseconds
+          _snap_ms = (Time.instant - _snap_start).total_milliseconds
           if _snap_ms > 0.05
             File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  SNAP_TO_CURSOR(no-scroll): #{_snap_ms.round(2)}ms" }
           end

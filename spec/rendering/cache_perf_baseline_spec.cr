@@ -89,6 +89,39 @@ describe "perf baselines (frame_widget_count regression detectors)" do
     matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), matrix.absolute_bounds.center)
     renderer.render_frame(app)
     puts "[baseline] scroll one line → frame_widget_count = #{lr.frame_widget_count}"
-    lr.frame_widget_count.should be <= 6 # the newly-exposed row of cells; NOT the whole viewport
+    # Was 6, "the newly-exposed row", until the ink-placement rule made a scroll frame repaint
+    # every cell whose ink region moved; briefly 32, until the repaint was scoped to cells
+    # that can actually be seen. What is left is the visible carriers, which genuinely move.
+    # Real SFML cost of the rule at 1400x900 with sticky headers: +8.7ms per scroll frame, down
+    # from +22.4ms (55 fps, was 31). The fixture is HEADERLESS and so measures the cheap shape.
+    lr.frame_widget_count.should be <= 20 # NOT the whole viewport (80) and NOT the tree
+  end
+
+  it "idle frames re-render nothing at all" do
+    # The ink pass runs every frame, so a still panel must still be free: a region that did not
+    # move marks nobody. A placement change that marks unconditionally shows up here as constant
+    # background repaint, which no scroll-frame bound would catch.
+    matrix = CrymbleUI::VirtualMatrix.new(BaselineMatrixAdapter.new, id: "m")
+    renderer = CrymbleUI::Testing::TestRenderer.new(330, 220)
+    app = TestApp.new
+    app.root_widget = matrix
+    app.build_tree
+    matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(330.0, 200.0)), CrymbleUI::Vec2.zero)
+    renderer.settle_rendering(app)
+
+    3.times do
+      lr.reset_frame_counters
+      renderer.render_frame(app)
+      lr.frame_widget_count.should eq 0
+    end
+
+    # ...and still free once scrolling has left every cell carrying a region.
+    matrix.on_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), matrix.absolute_bounds.center)
+    renderer.render_frame(app)
+    3.times do
+      lr.reset_frame_counters
+      renderer.render_frame(app)
+      lr.frame_widget_count.should eq 0
+    end
   end
 end

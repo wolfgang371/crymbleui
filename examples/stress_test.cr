@@ -78,7 +78,7 @@ class StressTest < CrymbleUI::App
   @active_timer_id : Int32? = nil
 
   def build : CrymbleUI::Widget
-    # start_time = Time.monotonic  # Uncomment to measure build time
+    # start_time = Time.instant  # Uncomment to measure build time
     window("CrymbleUI Stress Test - #{TOTAL_BUTTONS} Buttons", 1000, 800) do
       vstack(spacing: 5.0) do
         cpu_monitor

@@ -45,6 +45,17 @@ why copying one spreadsheet cell (`"value\r\n"`) pastes as `"value"`, and why co
 (`"\r\n"`) pastes nothing at all rather than replacing your selection with a space. Spaces you actually
 copied are never trimmed.
 
+**`TextInput` gained a `multiline:` flag** (constructor and all three `text_input*` DSL helpers),
+default `false`, which changes two things and only two: Alt+Enter / Ctrl+Enter insert a hard line
+break, and a pasted break SURVIVES instead of becoming a space (tab still becomes a space on both
+paths — it is the TSV field separator — and only a TERMINATING break is trimmed, so a leading blank
+line is kept as content). DISPLAY is not gated by it: any `TextInput` handed a value containing `\n`
+now measures, centres, carets and marks it honestly, because a consumer can set one through `value=`
+or an adopted `bind:` Source and a widget that renders what it cannot describe is worse than either.
+Consequently `measure_text` reports a taller box for a multi-line string (see ARCHITECTURE.md), so a
+`Text` or `Button` label containing a break now lays out at its true height rather than overflowing
+a one-line box.
+
 **Non-ASCII now round-trips correctly — this was previously broken in both directions.** The wrapper
 bound only the ANSI CSFML entry points, which convert through the `"C"` locale and delete every
 non-ASCII codepoint: copying `Müller` put `Mller` on the OS clipboard, and reading it back yielded

@@ -68,15 +68,20 @@ module CrymbleUI
     # Pop clipping region from stack
     abstract def pop_clip
 
-    # Temporarily suspend scissor clipping (disables GL scissor test)
-    # Used when drawing to OTHER backends while a clip is active on THIS backend
-    # OpenGL scissor is global state, so we must disable it to avoid affecting other textures
+    # Current clip-stack depth. The renderer unwinds to a recorded depth on the way out
+    # of a layer: a clip left pushed is now PERMANENT for the backend's life (it lives on
+    # the target's view), so "pop once" is not enough — an inner cell or primitive clip
+    # can be live when a render raises.
+    abstract def clip_depth : Int32
+
+    # Temporarily lift this backend's clip. NOT because the scissor is global — it is
+    # per-target, so other backends were never governed by it. It guards a `clear` on THIS
+    # backend, which SFML also scissors. See LAYER_RENDERING_ARCHITECTURE.md "Clipping".
     def suspend_clip
       # Default: no-op (test backend doesn't use GL scissor)
     end
 
-    # Resume scissor clipping after suspend_clip
-    # Re-enables GL scissor test if there's an active clip on the stack
+    # Restore the clip suspended above
     def resume_clip
       # Default: no-op (test backend doesn't use GL scissor)
     end

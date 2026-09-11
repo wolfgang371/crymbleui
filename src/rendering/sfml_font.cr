@@ -15,11 +15,17 @@ module CrymbleUI
     def measure_text(text : String, size : Float64) : Size
       sf_text = SF::Text.new(text, @font, size.round.to_u32)
       bounds = sf_text.local_bounds
-      # Width: use actual text width from local_bounds
-      # Height: use font's line spacing for CONSISTENT height across all text
-      # (local_bounds.height varies per-glyph, causing buttons with different text to have different heights)
+      # Width: actual text width from local_bounds — for a multi-line string SFML already
+      # reports the WIDEST line, which is what a block occupies.
+      # Height: the font's line spacing for CONSISTENT height across all text
+      # (local_bounds.height varies per-glyph, causing buttons with different text to have
+      # different heights) — times the LINE COUNT. SFML renders `\n` natively, so a 3-line
+      # string was being drawn three lines tall inside a box measured as one; the layout
+      # reserved a third of what it painted. The per-glyph-consistency intent above is about
+      # glyph variation, not line count, and multiplying preserves it exactly: a string with
+      # no break is byte-identical.
       line_height = @font.get_line_spacing(size.round.to_u32).to_f64
-      Size.new(bounds.width.to_f64, line_height)
+      Size.new(bounds.width.to_f64, line_height * (text.count('\n') + 1))
     end
 
     # Get kerning between two characters at given font size

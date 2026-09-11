@@ -295,7 +295,19 @@ describe "MultiComboBox (selected : Set(Int32))" do
   # ===== REGRESSION CANARY =====
 
   it "non-checkable ComboBoxItem has unchanged primitive count (inert canary)" do
-    # A non-checkable item produces exactly 2 primitives: fill_rect + draw_text
+    # A non-checkable item produces exactly 4 primitives:
+    #   fill_rect + push_clip + draw_text + pop_clip
+    #
+    # The count moved from 2 to 4 when the label gained an X-only clip to its own text box,
+    # so a long label stops where that box ends instead of running under the row's right
+    # padding. This canary caught that change, which is what it is for — the number is only
+    # allowed to move together with an explanation of what the new primitives DO.
+    #
+    # The clip is genuinely not inert here: PADDING is 8.0, so the label box is 16px narrower
+    # than the row and the clip constrains real pixels. Where a clip would cover the whole
+    # widget it is not emitted at all (PrimitiveBuilder#clipped skips it) — which is why a
+    # Text at its default zero padding still renders exactly one primitive, and why this
+    # canary is still able to notice inert growth.
     item = CrymbleUI::ComboBoxItem.new("TestItem")
     bounds = CrymbleUI::Rect.new(0.0, 0.0, 150.0, 24.0)
     prims = item.to_primitives(bounds)
@@ -304,7 +316,9 @@ describe "MultiComboBox (selected : Set(Int32))" do
 
     fill_rects.should eq(1)
     draw_texts.should eq(1)
-    prims.size.should eq(2)
+    prims.count(&.is_a?(CrymbleUI::PushClip)).should eq(1)
+    prims.count(&.is_a?(CrymbleUI::PopClip)).should eq(1)
+    prims.size.should eq(4)
   end
 
   it "checkable ComboBoxItem draws a REAL checkbox in the gutter (not a text glyph)" do

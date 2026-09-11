@@ -873,6 +873,22 @@ module SF
       LibCSFML.sfView_reset(@handle, rect.to_csfml)
     end
 
+    # Scissor rect, in FACTORS of the target size (not pixels). SFML re-applies it from
+    # the view on every draw AND clear, which is the whole point of expressing a clip
+    # this way: it survives the render-target re-activations that wipe raw GL state.
+    # The default {(0,0),(1,1)} is documented as disabling the scissor test entirely.
+    def scissor=(scissor : FloatRect)
+      LibCSFML.sfView_setScissor(@handle, scissor.to_csfml)
+    end
+
+    # An OWNED copy. `RenderTexture#view` / `#default_view` hand back an INTERIOR pointer
+    # into the render texture (owns: false, deliberately); a backend that wants a view of
+    # its own to mutate must copy first, and copy ONCE — copying per clip change would
+    # allocate on the render hot path.
+    def dup : View
+      View.new(LibCSFML.sfView_copy(@handle), owns: true)
+    end
+
     def to_unsafe : LibCSFML::View
       @handle
     end
@@ -1025,6 +1041,13 @@ module SF
 
     def default_view : View
       View.new(LibCSFML.sfRenderTexture_getDefaultView(@handle), owns: false)
+    end
+
+    # The view's scissor resolved to DEVICE PIXELS. SFML stores the scissor as factors of
+    # the target size and converts back with lround; this is that conversion, exposed so a
+    # witness can assert the round trip rather than assume it.
+    def scissor(view : View) : IntRect
+      IntRect.from_csfml(LibCSFML.sfRenderTexture_getScissor(@handle, view.to_unsafe))
     end
 
     def smooth=(smooth : Bool)

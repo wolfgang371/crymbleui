@@ -34,4 +34,32 @@ describe "min_intrinsic_height through the matrix nesting" do
     # That floor reaches the top: the DropZoneBox/Expanded pass-throughs don't revert to greedy.
     floor.should be_close(vm_floor, 60.0)
   end
+  # The floor is "one DEFAULT line", not "whatever line 0 currently measures".
+  #
+  # It exists so a grid cannot collapse to nothing. Reading row 0's ACTUAL height made it follow
+  # content instead: a 60-line value in row 0 drove the floor to 888px and WindowPanel grew the
+  # Shape to fit — the panel got taller instead of scrolling, and the matrix's own scrollbar went
+  # off-screen with it. The width dual did the same for column 0 (measured 3414px in a 1400px
+  # window, where hit_test at the visible bottom edge returned nothing at all).
+  it "does not follow row 0's actual height — the floor is one DEFAULT row" do
+    vm = CrymbleUI::VirtualMatrix.new(rows: 60, cols: 3, id: "vm_tall")
+    vm.sticky_row_count.should eq(0) # instrument: row 0 is a DATA row here, so the skip rule
+    #                                  (sticky lines are not content-sized) cannot explain the result
+    before = vm.min_intrinsic_height(400.0)
+
+    vm.row_height(0, 43.0) # ~860px: a 60-line value's worth
+
+    vm.get_row_height(0).should be > 40.0            # control: the row really is that tall now
+    vm.min_intrinsic_height(400.0).should eq(before) # ...and the panel floor did not follow it
+  end
+
+  it "the width dual: the floor does not follow column 0's actual width" do
+    vm = CrymbleUI::VirtualMatrix.new(rows: 10, cols: 3, id: "vm_wide")
+    before = vm.min_intrinsic_width(400.0)
+
+    vm.col_width(0, 168.0) # ~3400px, the measured sticky-column case
+
+    vm.get_col_width(0).should be > 100.0
+    vm.min_intrinsic_width(400.0).should eq(before)
+  end
 end

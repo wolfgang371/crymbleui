@@ -1,6 +1,8 @@
 # OpenGL bindings for scissor test (rectangular clipping)
 #
-# Shared by CrSFMLBackend and SFMLPaintContext for widget content clipping
+# Used by SFMLPaintContext. CrSFMLBackend does NOT use these: it expresses a clip as
+# the target view's scissor and lets SFML apply it (LAYER_RENDERING_ARCHITECTURE.md,
+# "Clipping"), which is what makes the clip survive render-target re-activation.
 # Note: Requires X11 display - tests using these backends need DISPLAY set
 {% if flag?(:win32) %}
   @[Link("opengl32")]

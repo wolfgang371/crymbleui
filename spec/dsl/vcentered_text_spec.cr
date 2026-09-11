@@ -55,3 +55,64 @@ describe "vcentered_text_y" do
     probe.vcentered_text_y(30.0, 0).should eq((30.0 - size) / 2.0)
   end
 end
+
+describe "PrimitiveBuilder#vcentered_block_y" do
+  # Reported from the running app: growing a row by a pixel made a multi-line cell's text
+  # JUMP by a whole line. The anchor was computed by two different formulas either side of
+  # "does the block fit" — centred-block above, single-line-centred below — and those differ
+  # by (block_extent - ref_h)/2, i.e. half a line per extra line. Continuity is the property;
+  # asserting the two regimes separately cannot see a step between them.
+  it "moves continuously as the band grows — no jump at the fit threshold" do
+    original = CrymbleUI::Widget.font
+    CrymbleUI::Widget.font = StubRefFont.new # ref_h = size/2, step = size: distinct, like production
+    begin
+      probe = VCenterProbe.new
+      step = 0.5
+      previous = nil
+      h = 1.0
+      while h <= 80.0
+        y = probe.vcentered_block_y(h, 3, 0, 0.0)
+        if prev = previous
+          # The anchor may not move faster than the band it sits in. A regime change that
+          # shifts it by half a line shows up here as a delta many times the step.
+          (y - prev).abs.should be <= step
+        end
+        previous = y
+        h += step
+      end
+    ensure
+      CrymbleUI::Widget.font = original
+    end
+  end
+
+  it "still equals vcentered_text_y for a single line, at every band height" do
+    original = CrymbleUI::Widget.font
+    CrymbleUI::Widget.font = StubRefFont.new
+    begin
+      probe = VCenterProbe.new
+      [1.0, 5.0, 7.0, 17.0, 40.0, 120.0].each do |h|
+        probe.vcentered_block_y(h, 1, 0, 0.0).should eq(probe.vcentered_text_y(h, 0, 0.0))
+      end
+    ensure
+      CrymbleUI::Widget.font = original
+    end
+  end
+
+  it "keeps line 1 fully visible once the band can hold one line" do
+    # Between "one line fits" and "the whole block fits" the block is top-aligned: centring it
+    # there would push line 1 off the top, which is what the user reads first.
+    original = CrymbleUI::Widget.font
+    CrymbleUI::Widget.font = StubRefFont.new
+    begin
+      probe = VCenterProbe.new
+      # font_scale 0 is the 14px base, and StubRefFont reports ref_h = size * 0.5.
+      ref_h = 7.0
+      [8.0, 14.0, 20.0].each do |h| # one line fits, the 3-line block does not
+        probe.vcentered_block_y(h, 3, 0, 0.0).should be >= 0.0
+        (probe.vcentered_block_y(h, 3, 0, 0.0) + ref_h).should be <= h
+      end
+    ensure
+      CrymbleUI::Widget.font = original
+    end
+  end
+end

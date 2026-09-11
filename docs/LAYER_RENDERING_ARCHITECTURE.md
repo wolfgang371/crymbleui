@@ -691,10 +691,25 @@ list, a ComboBox popup) leaves cell edges exposed over the layer bg, so it stays
 > so a correct fault would just re-derive the disposition oracle.
 >
 > **Border pixel-parity:** the direct path draws a cell's primitives at a *buffer offset*, whereas the texture
-> path drew them widget-local at (0,0). `draw_rect` (borders) simulates SFML clipping the outline's outer half
-> at the scissor edge; that skip is **clip-relative** (`bounds.x <= clip.x`), NOT origin-0, so a border renders
-> identically whichever path drew it — matching real SFML, which scissors wherever the clip sits. (Keying the
-> skip on `bounds.x == 0` alone made the two paths differ by 1px — the cv oracle caught it.)
+> path draws them widget-local at (0,0), so a border must render identically either way. It now does
+> **unconditionally**, because neither path skips anything: `draw_rect` draws all four edges INSIDE bounds,
+> which is the shape `CrSFMLBackend#draw_rect` produces (four filled rects). An edge on the clip boundary is
+> inside the scissor and IS drawn; an edge genuinely outside is removed by the ordinary clip.
+>
+> It used to simulate SFML's **centred** `outline_thickness` and skip the leftmost column / topmost row at a
+> clip edge. Production replaced that outline with filled rects in 2025-12 (fixing sub-pixel artifacts at
+> fractional zoom), so the simulation modelled an abandoned behaviour for eight months — that, not a parity
+> defect, is why it went. For the record: the clip-relative keying **did** deliver the cell parity it claimed.
+> The cell clip's origin IS the primitive offset (both are `layer_local_x/y`), so the skip test reduced to
+> `bounds.x <= 0` — bit-identical to the widget-backend path, whose clip origin is 0. What it did NOT cover is
+> the general case: the two paths agreed only where the clip origin equalled the primitive offset, so a border
+> at widget-local 0 inside a widget at a non-zero layer offset skipped on one path and not the other.
+>
+> Still divergent, recorded rather than fixed here: the instrument ignores `draw_rect`'s `width` (always 1px)
+> where production honours thickness — live at `drag_manager.cr:49`, which asks for 2.0; and
+> `SFMLRenderer#execute_primitive`'s DrawRect arm still uses a centred outline, so the instrument matches
+> production on the layer path and not on the direct-to-window overlay path (latent: no DrawRect currently
+> reaches `overlay_primitives`).
 
 ### Two kinds of signal — and the trap
 
@@ -893,15 +908,78 @@ the rendering core (`src/rendering/`), the headless instruments, the matrix blit
 **FBO surface orientation (the Y-flip convention):** owned by `src/rendering/fbo_math.cr` —
 its header carries the full convention table (RenderTexture.texture is bottom-up; the window and
 copy_to_image are top-down; full-sprite blits need NO flip) and the pure flip algebra
-(`blit_region_flip`, `scissor_gl_y`), property-spec'd in `spec/rendering/fbo_math_spec.cr`. Those
+(`blit_region_flip`), property-spec'd in `spec/rendering/fbo_math_spec.cr`. Clipping is NOT in that
+table — see "Clipping" below: SFML performs the scissor's flip itself. Those
 specs prove self-consistency with the convention; the real FBO orientation axiom is witnessed only
 by the SFML parity sweep (`tools/sfml-parity.sh`).
+
+### Clipping (who owns the scissor)
+
+A clip pushed on a `RenderBackend` governs every subsequent draw on that backend until it is popped.
+That is now true by construction, and it was not before — the how matters, because two plausible
+fixes were built and refuted against it:
+
+- **The clip is the target VIEW's scissor**, set in `CrSFMLBackend#apply_clip`, not a `glScissor` we
+  issue. SFML applies its own GL state *inside* `RenderTarget#draw` and `#clear`, and that reset
+  disables `GL_SCISSOR_TEST` while leaving the box. Any scissor we enable ourselves therefore
+  survives only until the next render-target re-activation, so the FIRST draw after one escaped its
+  clip — in a grid, the first cell of the layer, whose text then ran across its neighbours and out
+  into empty panel space. Expressed as the view's scissor, SFML re-applies it on every
+  re-activation instead of clearing it. Re-applying our own scissor before each draw does NOT work:
+  SFML's reset happens after ours, inside the draw.
+- **The clip is per-TARGET, not global.** Measured: with a clip live on one backend, a draw on
+  another comes back completely unclipped. The old "OpenGL scissor is global state" comments were
+  folklore. `suspend_clip`/`resume_clip` survive for a different and real reason: SFML applies the
+  view scissor to `clear` as well as to draws, so a clear issued while that backend's own clip is
+  live would be confined to it.
+- **A view carries ONE scissor**, so `apply_clip` collapses the stack to its INTERSECTION (it used
+  to apply only the top, i.e. inner-replaces-outer). It intersects in float and converts once at the
+  end — origin floors, extents `PixelSnap.cover` — because rounding each rect first and intersecting
+  afterwards gives a different answer at fractional boundaries, and because a rounded-to-nearest
+  extent would re-open the seam note below. An empty intersection is clamped to zero extent: a
+  negative extent reaching `glScissor` is `GL_INVALID_VALUE`, which drops the call and leaves the
+  PREVIOUS box live — a silent wrong-clip rather than a no-op.
+- **Never `setView` a backend RenderTexture** anywhere else: the view is the clip's carrier, and
+  SFML re-applies whatever view it holds.
+
+Witness: `tools/clip-containment-probe.cr` (needs a real DISPLAY; no headless spec can see any of
+this, because `TestRenderBackend` clips in software with no GL context).
 
 **Historical seam note:**
 Scissor clipping once truncated (giving 298 for bounds 298.666) while the compositor ceiled (giving 299):
 pixel 298 was never rendered but was sampled — white/garbage pixels at the right edge. The lesson
 generalizes: two code paths converting the SAME coordinate MUST share one conversion — which is what
 PixelSnap and the lint tripwire enforce structurally.
+
+The same seam then reappeared BETWEEN the backends: `TestRenderBackend` truncated both clip edges
+while `CrSFMLBackend` floored the origin and covered the extent, so headless clipped one column
+narrower than production — it under-included, and a real right-edge defect could pass a green suite.
+Both now derive the clip's device box from one function, `ClipMath.device_box(stack)`
+(`src/rendering/clip_math.cr`), which owns the stack collapse, the empty case and the rounding
+together; a helper sharing only the rounding would have left the collapse — the half that had already
+drifted three ways — hand-copied. Guarded by `spec/rendering/clip_math_spec.cr` (including the
+deliberately-kept limitation that `cover(far - near)` under-covers by a pixel at a fractional origin)
+and by tripwire (g) in `spec/rendering/instrument_tripwires_spec.cr`, which catches the side the
+PixelSnap lint structurally cannot: production's clip locals carry no carrier word.
+
+That parity now covers EVERY primitive, not just the per-pixel path. `fill_rect`, `clear` and
+`blit_to`'s fast path used to write the pixel buffer directly and consult no clip at all — so the
+same blit clipped or not depending on its blend mode, and a widget overhanging its layer clip left
+content in the headless buffer that production scissors away. They now clamp their destination once
+against `writable_box` (the clip box intersected with the buffer, normalised so it can never invert),
+which is also what the GPU does: a scissor is a rect intersection, not a per-pixel predicate.
+
+Two consequences worth knowing. A blit is governed by the **target's** clip and the target's
+suspension — the source's clip is irrelevant, because production draws a blit as a sprite onto the
+target's render surface. And a push or a pop **cancels** a suspension, because production's
+`push_clip`/`pop_clip` call `apply_clip` unconditionally and that re-installs the stack's box over
+the full-target scissor `suspend_clip` left; modelling suspension as a sticky flag let the instrument
+stay unclipped for a backend's whole life after an unbalanced suspend.
+
+Guards: `spec/testing/clip_parity_spec.cr` (behaviour, including exact-area assertions in BOTH
+directions so an over-clip is caught too), tripwire (h) in
+`spec/rendering/instrument_tripwires_spec.cr` (no bulk write may bypass the clamp), and case M of
+`tools/clip-containment-probe.cr` (real GL: a sprite blit under a live clip IS scissored).
 
 **Cache-validation instrument (`render_layer_immediate`):**
 The `render_layer_immediate` method (the ground-truth pass used by the cache-validation harness,

@@ -36,8 +36,20 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Array sizes implicitly define row_count and col_count.
     # Controls both visibility lifetime AND sticky behavior:
     # - Elements early in the array scroll out first
-    # - Elements at the tail that form a contiguous set {0,1,...,N-1}
-    #   are treated as sticky (rendered on fixed-position layers)
+    # - The tail is scanned BACKWARDS and stays sticky only while the accumulated set is
+    #   {0,1,...,k-1} at EVERY step; the scan stops at the first element that breaks it
+    #   (sticky lines render on fixed-position layers)
+    #
+    # So the sticky tail must be DESCENDING — `[.., 1, 0]`. Appending a header block in its
+    # natural order ends `[.., 0, 1]`: the first element read is {1}, not {0}, the scan stops
+    # immediately, and NOTHING is sticky — with no error anywhere, the headers just become
+    # ordinary scrolling content. Two adapters shipped that bug before it was found through a
+    # user-visible symptom (crymble-ui SimpleMatrixAdapter, embrace's pivot; see
+    # VIRTUAL_MATRIX_ARCHITECTURE.md "Sticky Derivation from scroll_order"), so an adapter that
+    # knows its header count wants exactly:
+    #
+    #     (sticky_count...total).to_a + (0...sticky_count).to_a.reverse
+    #
     # Default: must be implemented by subclass
     abstract def get_scrollorder : {Array(Int32), Array(Int32)}
 
@@ -85,8 +97,32 @@ module CrymbleUI::Widgets::VirtualMatrix
     # the existing prefix (per-column resize survives), pad new columns with the default, drop removed.
     private def fit_custom_sizes(custom : Array(Float64)?, count : Int32, default : Float64) : Array(Float64)
       return Array.new(count, default) unless custom
-      return custom if custom.size == count
+      # DUP, never the stored array itself: VirtualMatrix owns the copy it gets back and mutates
+      # it in place (drag resize, content sizing), so handing over the adapter's own array makes
+      # every such write reach through and rewrite the user's persisted sizes. The drag path hid
+      # this by re-persisting identical values immediately; content sizing does not, and the
+      # dragged widths were being destroyed the moment it switched on.
+      return custom.dup if custom.size == count
       Array.new(count) { |i| custom[i]? || default }
+    end
+
+    # The size a cell's content wants, for VirtualMatrix#auto_size. Returns the width the
+    # content needs, its natural height, and its line count — the line count separately because
+    # the row policy is expressed in lines, and deriving lines from a pixel height would mean
+    # re-deriving a widget's chrome arithmetic out here.
+    #
+    # CONTRACT: this default calls `cell_paint` OUTSIDE the render pass. An adapter whose
+    # `cell_paint` carries frame-scoped side effects — recording per-frame state, arming
+    # animations — MUST override this method rather than let the default call it.
+    #
+    # Widgets that cannot report a content width (they have no text of their own) contribute 0,
+    # i.e. they never widen a column; a Checkbox is the case that matters.
+    def cell_natural_size(row : Int32, col : Int32) : NamedTuple(width: Float64, height: Float64, lines: Int32)
+      widget = cell_paint(row, col)
+      loose = CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(Float64::INFINITY, Float64::INFINITY))
+      width = widget.responds_to?(:content_width) ? widget.content_width : 0.0
+      lines = widget.responds_to?(:content_line_count) ? widget.content_line_count : 1
+      {width: width, height: widget.measure(loose).height, lines: lines}
     end
 
     # Row operations (optional - default implementations do nothing)

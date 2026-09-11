@@ -200,10 +200,9 @@ module CrymbleUI
       # Background rect
       bg_rect = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
-      # Text position (vertically centered)
-      text_x = PADDING
+      # Text baseline (vertically centered). The x origin depends on the row kind and is
+      # resolved below, next to the clip box it has to agree with.
       text_y = vcentered_text_y(bounds.height, font_scale)
-      text_pos = Vec2.new(text_x, text_y)
 
       primitives do
         fill_rect(bg_rect, bg_color)
@@ -211,15 +210,34 @@ module CrymbleUI
         # pull-closure HERE (inside to_primitives) auto-captures the selection Source, so
         # a selection change re-renders this row with no manual mark. Read the reactive
         # getters (label_text / text_color / font_scale), never the ivars.
+        # The label's own box. Its ORIGIN differs by row kind — past the gutter on a
+        # checkable row, at PADDING on a plain one — but the RIGHT inset is PADDING either
+        # way: deriving it symmetrically from the origin would reserve a phantom GUTTER_WIDTH
+        # on the right and mark labels as cut that actually fit. X only, so the glyphs may
+        # still overhang a short row vertically. The checkbox glyph is emitted OUTSIDE this
+        # clip — it sits at x in [2, ~16], left of the label origin, so a clip around the
+        # whole block would delete it from every checkable row.
+        label_origin = @check_state_fn ? GUTTER_WIDTH + PADDING : PADDING
+        label_box = Rect.new(label_origin, 0.0, bounds.width - label_origin - PADDING, bounds.height)
+
+        # Say so where the label is cut, BEFORE the clip so the band sits behind the glyphs.
+        # Derived from `bg_color` — the colour filled ABOVE, after the hover/selected highlight
+        # — not from `background_color`. The two differ on exactly the rows that matter: a
+        # selected row over a caller-supplied per-item colour is where a property-derived band
+        # goes invisible, and that row is the one holding the current value.
+        mark_clipped_text(
+          clipped_text_bands(Rect.new(label_origin, text_y, label_box.width, font_size),
+            0.0, measure_text(label_text, font_size).width),
+          on: bg_color)
+
         if fn = @check_state_fn
           box = font_size
           box_rect = Rect.new(2.0, (bounds.height - box) / 2.0, box, box)
           draw_check_glyph(fn.call, box_rect, box_color: text_color, check_color: text_color,
             line_thickness: box * 0.2, junction_radius: box * 0.1)
-          # Shift the label to the right of the gutter.
-          draw_text(label_text, Vec2.new(GUTTER_WIDTH + PADDING, text_y), text_color, font_scale)
-        else
-          draw_text(label_text, text_pos, text_color, font_scale)
+        end
+        clipped(label_box, within: bg_rect) do
+          draw_text(label_text, Vec2.new(label_origin, text_y), text_color, font_scale)
         end
       end
     end

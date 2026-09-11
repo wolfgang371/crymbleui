@@ -1,6 +1,17 @@
 require "../spec_helper"
 require "../../src/widgets/simple_matrix"
 
+private def derived_counts(rows, sticky_row_count = 0, sticky_col_count = 0) : {Int32, Int32}
+  adapter = CrymbleUI::SimpleMatrixAdapter.new(rows: rows,
+    sticky_row_count: sticky_row_count, sticky_col_count: sticky_col_count)
+  matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter)
+  {matrix.sticky_row_count, matrix.sticky_col_count}
+end
+
+private def wide_row(n : Int32)
+  [Array.new(n) { |_| CrymbleUI::Text.new("").as(CrymbleUI::Widget) }]
+end
+
 describe CrymbleUI::SimpleMatrixAdapter do
   it "returns the widget supplied for each cell" do
     w_00 = CrymbleUI::Text.new("A")
@@ -14,19 +25,40 @@ describe CrymbleUI::SimpleMatrixAdapter do
     adapter.cell_paint(1, 1).should be w_11
   end
 
-  it "reports sticky rows as a trailing contiguous set in row_order" do
-    rows = Array.new(4) { |_| [] of CrymbleUI::Widget }
-    adapter = CrymbleUI::SimpleMatrixAdapter.new(rows: rows, sticky_row_count: 1)
-    row_order, _ = adapter.get_scrollorder
-    # Trailing set must be {0..K-1} = {0}. Non-sticky rows (1, 2, 3) first, then 0.
-    row_order.should eq [1, 2, 3, 0]
+  # Stickiness is DERIVED, never declared: VirtualMatrix#derive_sticky_count scans the order from
+  # the end and keeps the run only while the accumulated set is {0..k-1} at EVERY step, breaking at
+  # the first miss. So the tail must be DESCENDING — [.., 1, 0], not [.., 0, 1] — or the very first
+  # element read is {1}, which is not {0}, and the count is zero.
+  #
+  # These examples assert what the MATRIX derives, not the array this adapter returns. Asserting the
+  # array is asserting a proxy: it passed for years while `sticky_col_count: 2` silently produced a
+  # matrix with no sticky columns at all (measured 2026-09-05).
+  it "makes the requested number of columns actually sticky" do
+    (1..3).each do |n|
+      _, cols = derived_counts(wide_row(6), sticky_col_count: n)
+      cols.should eq(n), "asked for #{n} sticky columns, matrix derived #{cols}"
+    end
   end
 
-  it "reports sticky cols as a trailing contiguous set in col_order" do
-    rows = [Array.new(4) { |_| CrymbleUI::Text.new("").as(CrymbleUI::Widget) }]
-    adapter = CrymbleUI::SimpleMatrixAdapter.new(rows: rows, sticky_col_count: 2)
+  it "makes the requested number of rows actually sticky" do
+    (1..3).each do |n|
+      rows = Array.new(6) { [CrymbleUI::Text.new("").as(CrymbleUI::Widget)] }
+      derived, _ = derived_counts(rows, sticky_row_count: n)
+      derived.should eq(n), "asked for #{n} sticky rows, matrix derived #{derived}"
+    end
+  end
+
+  it "puts the sticky columns at the tail, descending" do
+    adapter = CrymbleUI::SimpleMatrixAdapter.new(rows: wide_row(4), sticky_col_count: 2)
     _, col_order = adapter.get_scrollorder
-    col_order.should eq [2, 3, 0, 1]
+    col_order.should eq [2, 3, 1, 0]
+  end
+
+  it "puts the sticky rows at the tail, descending" do
+    rows = Array.new(4) { [CrymbleUI::Text.new("").as(CrymbleUI::Widget)] }
+    adapter = CrymbleUI::SimpleMatrixAdapter.new(rows: rows, sticky_row_count: 2)
+    row_order, _ = adapter.get_scrollorder
+    row_order.should eq [2, 3, 1, 0]
   end
 
   it "returns header_info truthy for header rows only" do

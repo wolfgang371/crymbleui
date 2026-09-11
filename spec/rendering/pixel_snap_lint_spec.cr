@@ -37,6 +37,7 @@ LINT_ROLE_TABLE = <<-TABLE
     a backend/texture EXTENT (size)               -> PixelSnap.span   (via device_pixel_span)
     a culling/visibility BOUND                    -> PixelSnap.cover  (ceil, conservative)
     a viewport slot key (stamp/blit-shift)        -> slot_axis        (one owner, both sides)
+    a CLIP box (scissor region)                   -> ClipMath.device_box (one owner, both backends)
   Or annotate `# snap-exempt: <reason>` if this is genuinely not a device-pixel coordinate.
   Policy: docs/LAYER_RENDERING_ARCHITECTURE.md "Float-to-Integer Coordinate Rounding".
   TABLE
@@ -63,7 +64,7 @@ private def lint_violations(path : String) : Array(String)
     hit =
       line.matches?(/\.round\(:/) ||
         (line.matches?(/\b(sf_text|text)\.position\s*=/) && !line.includes?("PixelSnap")) ||
-        (line.matches?(/\b(\w+_)?(position|bounds|origin|offset|dest\w*)\b/) &&
+        (line.matches?(/\b(\w+_)?(position|bounds|origin|offset|dest\w*|clip\w*)\b/) &&
           (line.matches?(/\.(x|y)\.#{LINT_CONV}/) ||
             line.matches?(/\)\.#{LINT_CONV}/) ||
             line.matches?(/\.(width|height)\.#{LINT_CONV}/)) &&
@@ -78,6 +79,7 @@ end
 # file => {expected count, reason}. 0 = fully migrated/clean.
 LINT_EXPECTED = {
   "src/rendering/cache_validation.cr"   => {0, "clean"},
+  "src/rendering/clip_math.cr"          => {0, "the clip conversion itself — all via PixelSnap"},
   "src/rendering/crsfml_backend.cr"     => {0, "text snapped; shapes/blits outside pattern scope"},
   "src/rendering/draw_primitive.cr"     => {0, "data definitions"},
   "src/rendering/fbo_math.cr"           => {0, "pure Int32 flip algebra"},
@@ -91,9 +93,9 @@ LINT_EXPECTED = {
   "src/rendering/renderer.cr"           => {0, "no conversions"},
   "src/rendering/sfml_clipboard.cr"     => {0, "no coordinates"},
   "src/rendering/sfml_font.cr"          => {0, "measures only, draws nothing"},
-  "src/rendering/sfml_paint_context.cr" => {0, "text snapped"},
+  "src/rendering/sfml_paint_context.cr" => {4, "raw-GL scissor path: truncates all four clip edges and applies only the stack top; owned by the task that resolves that file"},
   "src/rendering/sfml_renderer.cr"      => {0, "text + compositor snapped"},
-  "src/testing/test_render_backend.cr"  => {8, "fill_rect center-coverage + draw_rect outline model the SFML rasterizer (permanent)"},
+  "src/testing/test_render_backend.cr"  => {8, "4 fill_rect centre-coverage (SFML rasterizer model); 4 draw_rect raw truncation — diverges from SFML at frac(x) > 0.5, tracked in the backlog"},
   "src/testing/test_renderer.cr"        => {0, "compositor snapped; clip extents via cover (parity with SFML)"},
   # Matrix blit/park internals + the layer sampling seam:
   "src/widgets/virtual_matrix/adapter.cr"           => {0, "no coordinate conversions"},

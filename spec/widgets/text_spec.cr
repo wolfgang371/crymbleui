@@ -141,6 +141,11 @@ describe CrymbleUI::Text do
     end
 
     describe "#to_primitives" do
+        # A Text that FITS emits exactly one primitive — no background (none set), no clip (its
+        # text box is its bounds at padding 0, so the clip would change nothing and is skipped),
+        # and no cut marker. This is the "stays inert when there is nothing to say" case; the
+        # examples below deliberately locate the DrawText rather than index it, because a Text
+        # whose content IS cut also emits a marker band ahead of it.
         it "generates single DrawText primitive" do
             text = CrymbleUI::Text.new("Hello", font_scale: 3)  # ~18.63pt
             bounds = CrymbleUI::Rect.new(10.0, 10.0, 100.0, 30.0)
@@ -156,7 +161,7 @@ describe CrymbleUI::Text do
             bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, 30.0)
 
             primitives = text.to_primitives(bounds)
-            primitive = primitives[0].as(CrymbleUI::DrawText)
+            primitive = primitives.find(&.is_a?(CrymbleUI::DrawText)).not_nil!.as(CrymbleUI::DrawText)
 
             primitive.text.should eq("Test Message")
         end
@@ -166,7 +171,7 @@ describe CrymbleUI::Text do
             bounds = CrymbleUI::Rect.new(25.0, 50.0, 100.0, 30.0)
 
             primitives = text.to_primitives(bounds)
-            primitive = primitives[0].as(CrymbleUI::DrawText)
+            primitive = primitives.find(&.is_a?(CrymbleUI::DrawText)).not_nil!.as(CrymbleUI::DrawText)
 
             # Text is left-aligned at x=padding (0 by default), vertically centered
             font_size = text.font_size
@@ -188,7 +193,7 @@ describe CrymbleUI::Text do
             bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, 30.0)
 
             primitives = text.to_primitives(bounds)
-            primitive = primitives[0].as(CrymbleUI::DrawText)
+            primitive = primitives.find(&.is_a?(CrymbleUI::DrawText)).not_nil!.as(CrymbleUI::DrawText)
 
             primitive.color.should eq(color)
         end
@@ -198,7 +203,7 @@ describe CrymbleUI::Text do
             bounds = CrymbleUI::Rect.new(0.0, 0.0, 100.0, 40.0)
 
             primitives = text.to_primitives(bounds)
-            primitive = primitives[0].as(CrymbleUI::DrawText)
+            primitive = primitives.find(&.is_a?(CrymbleUI::DrawText)).not_nil!.as(CrymbleUI::DrawText)
 
             primitive.size.should be_close(24.77, 0.1)
         end

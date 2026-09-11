@@ -131,4 +131,25 @@ describe CrymbleUI::VirtualMatrix do
       header_cell.not_nil!.bounds.x.should eq(content_cell.not_nil!.bounds.x - scroll_x.to_i.to_f64)
     end
   end
+  # A sticky extent bigger than the viewport must not lay its LAYERS outside the widget.
+  # The sizes come from the grid, and nothing bounded them: the sticky column layer's height is
+  # `viewport - sticky_row_height` (measured collapsing to 0.0 with a tall sticky row, taking the
+  # row-header strip with it) and the sticky row/corner layers take the raw extents, so they
+  # composite over their neighbours. Content sizing no longer produces such an extent, but a DRAG
+  # still can — `set_col_width_for_drag` clamps to Float64::MAX — so the bound belongs here, where
+  # the value is read, not on any one producer.
+  it "keeps the sticky layers inside the viewport when the sticky extent exceeds it" do
+    sv = CrymbleUI::ScrollView.new(CrymbleUI::ScrollDirection::Both, id: "clamp_test")
+    sv.viewport_size = CrymbleUI::Size.new(400.0, 300.0)
+    sv.content_size = CrymbleUI::Size.new(4000.0, 3000.0)
+    sv.sticky_col_width = 3000.0 # far wider than the 400px viewport
+    sv.sticky_row_height = 2000.0
+    sv.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0)), CrymbleUI::Vec2.zero)
+
+    [sv.sticky_col_layer, sv.sticky_row_layer, sv.sticky_corner_layer].compact.each do |layer|
+      b = layer.bounds
+      b.width.should be <= 400.0
+      b.height.should be <= 300.0
+    end
+  end
 end

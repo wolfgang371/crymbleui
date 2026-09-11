@@ -692,6 +692,7 @@ module CrymbleUI
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
+                multiline : Bool = false,
                 &block : String -> Nil
             )
                 widget = TextInput.new(
@@ -707,6 +708,7 @@ module CrymbleUI
                     placeholder_color: placeholder_color,
                     padding: padding,
                     mode: mode,
+                    multiline: multiline,
                     &block
                 )
                 widget.user_data = user_data if user_data
@@ -737,7 +739,8 @@ module CrymbleUI
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
                 on_event : Proc(String, TextInputEvent, Nil)? = nil,
-                bind : Source(String)? = nil
+                bind : Source(String)? = nil,
+                multiline : Bool = false
             )
                 widget = TextInput.new(
                     value: value,
@@ -752,7 +755,8 @@ module CrymbleUI
                     focused_border_color: focused_border_color,
                     placeholder_color: placeholder_color,
                     padding: padding,
-                    mode: mode
+                    mode: mode,
+                    multiline: multiline
                 )
                 widget.on_event = on_event
                 widget.user_data = user_data if user_data
@@ -775,7 +779,8 @@ module CrymbleUI
                 padding : Float64 = 4.0,
                 mode : TextInputMode = TextInputMode::FullEdit,
                 user_data : Hash(Symbol, String)? = nil,
-                bind : Source(String)? = nil
+                bind : Source(String)? = nil,
+                multiline : Bool = false
             )
                 widget = TextInput.new(
                     value: value,
@@ -790,7 +795,8 @@ module CrymbleUI
                     focused_border_color: focused_border_color,
                     placeholder_color: placeholder_color,
                     padding: padding,
-                    mode: mode
+                    mode: mode,
+                    multiline: multiline
                 )
                 widget.user_data = user_data if user_data
                 current_container.add_child(widget)

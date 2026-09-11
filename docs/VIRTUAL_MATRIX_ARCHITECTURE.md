@@ -385,14 +385,29 @@ Output tuple:
 Sticky elements are **derived** from the scroll_order tail, not declared separately:
 
 ```
-scroll_order = [2, 3, 4, 5, 6, 7, 0, 1]
+scroll_order = [2, 3, 4, 5, 6, 7, 1, 0]
                 |-- scroll out first --| |- tail -|
 
-Tail {0, 1} forms contiguous set {0, 1, ..., N-1} -> 2 sticky elements
+Read from the END: {0} == {0} ok -> {0,1} == {0,1} ok -> {0,1,7} != {0,1,2} stop
 Rows 0 and 1 are sticky (scroll out last, rendered at fixed positions)
 ```
 
-The `derive_sticky_count` method walks the tail backwards, checking if the accumulated set equals `{0, 1, ..., size-1}`.
+The `derive_sticky_count` method walks the tail backwards, checking at EVERY step that the
+accumulated set equals `{0, 1, ..., size-1}`, and stops at the first element that breaks it.
+
+**The tail must therefore be DESCENDING** — `[.., 1, 0]`. An adapter that appends its header
+block in natural order ends `[.., 0, 1]`, the first element read is `{1}`, which is not `{0}`,
+and the derived count is **zero**: no error, no warning, the headers simply stop being sticky
+and their spanning cells become ordinary content. This example itself was written ascending
+until 2026-09-05, and both the library's `SimpleMatrixAdapter` (any request for >= 2 sticky
+lines silently yielded none) and embrace's pivot (same-level row headers) had the bug
+that reading it produces. `ConfigurableMatrixAdapter#get_scrollorder` is the reference.
+
+An adapter that knows its header count wants exactly:
+
+```crystal
+(sticky_count...total).to_a + (0...sticky_count).to_a.reverse
+```
 
 ### Incremental Caching Strategy
 
@@ -528,10 +543,27 @@ QuickEntry (cell-nav, default):
 
 FullEdit (character editing):
   wants_arrow_keys? = true
-  Arrow keys -> move the text caret within the cell
+  Arrow keys -> move the text caret within the cell; Up/Down move by LINE (which for a
+                single-line value is start/end, i.e. unchanged)
+  Home/End   -> start/end of the LINE; Ctrl+Home / Ctrl+End the whole value
   Typing     -> inserts at the caret
   Enter      -> commit + LEAVE full-edit (back to QuickEntry, SAME cell)
   Escape     -> cancel (restore value) + back to QuickEntry (clean, no caret)
+```
+
+Two further keys, in either state:
+
+```
+  Alt+Enter / Ctrl+Enter -> insert a hard line break, in a proxy that opted into `multiline`.
+      Taken BEFORE the owner's on_cell_activate, which bare Enter still gets first. Gated on
+      Enter alone (so Ctrl+Space on a checkbox cell still activates), on the proxy being a
+      TextInput (a ComboBox returns true for Enter and would expand its dropdown instead),
+      and on that editor being multi-line (so a numeric or drill-down cell is untouched).
+      From the parked state the chord opens full edit and parks the caret at the end first —
+      inserting without that destroys the cell, because the next typed character replaces.
+  Home/End while PARKED -> DECLINED, so the grid's own Home (column 0) and Ctrl+Home (cell
+      {0,0}) reach the matrix. They were previously consumed by the editor with no visible
+      effect, which left both dead on every text cell.
 ```
 
 The caret appears the moment you start typing or enter full-edit; a fresh cell
@@ -820,6 +852,38 @@ Per-scroll (creation/destruction regions):
 - Full adapter invalidation (flush_invalidate_all)
 - Reconciliation (copy_state_from)
 
+### A size change is not a Source
+
+`@col_widths` / `@row_heights` are mutated in place, so nothing marks the things derived from them.
+Every consumer must be told, and the list of consumers is exactly this, in this ORDER, in
+`refresh_after_size_change`:
+
+1. `invalidate_dimension_caches` — **first**: the totals memoise, so extents computed before the
+   clear are one change stale;
+2. the sticky chrome's BOUNDS (`refresh_sticky_geometry`) — invalidating the widgets' primitive
+   caches is not enough, they keep drawing inside a box measured for the old sizes;
+3. `ScrollView#refresh_extents` — `content_size` is a `reconcile_property` with a bare-assignment
+   setter, so writing it alone flips `needs_horizontal_scrollbar?` while the bar stays unpainted.
+   Its chrome geometry is established in a LAYOUT, so the scrollbar LAYER must be marked
+   (measured: `content_size` + `invalidate_primitive_cache` + `mark_needs_render` over two frames
+   still left a full 16px strip differing from the same state after a layout);
+4. clamp `@scroll_offset`, **then** `apply_scroll` — `apply_scroll` writes the layer offset and
+   recomputes the visible cells but does not clamp, so clamping after it would be undone on any
+   shrink.
+
+The content layer needs nothing: `Layer#bounds` pulls through `compute_bounds_for_layer`, which
+re-runs `effective_content_size` on every read.
+
+Three paths are deliberately NOT full callers, and `spec/rendering/size_writer_lint_spec.cr` holds
+the reviewed list so a new writer cannot join them silently:
+- the two **drag** setters do step 1 only — live extents mid-gesture would make a scrollbar appear
+  under the single-boundary blit-shift, and per-move sticky geometry is the 99%-CPU resize bug the
+  gesture's deferral exists to prevent. Mouse-up's `perform_layout` is where the extents land;
+- `fit_cell_to_content` passes `sticky: false` — `flush_fit_cells` does the sticky work once at the
+  end of the same frame;
+- the **constructors** and the `copy_state_from` carry do nothing: there is no ScrollView or layer
+  yet, and a reconciled instance starts `NeedsLayout`, so a layout follows anyway.
+
 ## Key Invariants
 
 1. **Layout is expensive, render is cheap**: After initial layout, scrolling and cursor movement NEVER call `mark_needs_layout`. `scroll_offset` is a Source-backed `reactive_property`; scroll-changing paths write it via `@scroll_offset.set` (or the `scroll_offset=` setter) and route through `apply_scroll`, which composites (updates `layer.scroll_offset`), optionally syncs the ScrollView, recenters (`update_visible_cells`), and marks render. The setter does NOT call `mark_needs_layout` — scroll never re-layouts.
@@ -845,7 +909,7 @@ Per-scroll (creation/destruction regions):
 | Cursor move | O(1) render-only | mark_cursor_overlay_dirty, no layout |
 | snap_to_cursor | O(visible) | May trigger update_visible_cells if scroll changed |
 | Resize drag (per move) | O(affected_cells) | Re-layout cells at/after resized dimension |
-| Resize end | O(1) | Update ScrollView content_size |
+| Resize end | O(n) | `on_mouse_up` runs a full `perform_layout` — this is where a drag's ScrollView extents land (see "A size change is not a Source") |
 | Adapter cell invalidation | O(1) per cell | Deferred to pre_render_flush |
 | Adapter full invalidation | O(n) | Destroy all, rebuild dimension caches |
 | Size cache lookup | O(1) | Via cumulative arrays after O(n) build |

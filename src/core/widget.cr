@@ -190,8 +190,11 @@ module CrymbleUI
             @@app
         end
 
-        # Set the global font (called by renderer)
-        def self.font=(font : Font)
+        # Set the global font (called by renderer). Nilable, so a caller that installs a font
+        # temporarily can put back what it found. The getter has always been `Font?`; with a
+        # non-nil-only setter "restore the previous value" was inexpressible, so a spec that
+        # swapped the font in could only leak it into every later file sharing the binary.
+        def self.font=(font : Font?)
             @@font = font
             @@measure_text_cache.clear # font changed → cached measurements are invalid
         end
@@ -265,6 +268,13 @@ module CrymbleUI
         # Can be called during measure() phase
         # Returns the visual size of the text (width/height only, no offsets)
         # Use with draw_text() which automatically compensates for SFML local_bounds offsets
+        # How many distinct strings a per-string memo may retain before it is dropped
+        # wholesale. Dynamic text (cell values, labels a user types) has no natural bound, so
+        # an unbounded memo grows for the life of the process; a full clear rather than an LRU
+        # because the working set is whatever is on screen and repopulates in one frame.
+        # Shared by every memo keyed on a string — see CrymbleUI::TextLines.
+        TEXT_MEMO_LIMIT = 20_000
+
         def self.measure_text(text : String, size : Float64) : Size
             return Size.new(0.0, 0.0) unless font = @@font
 
@@ -274,7 +284,7 @@ module CrymbleUI
             end
             # Delegate to Font implementation (SFML or headless)
             result = font.measure_text(text, size)
-            @@measure_text_cache.clear if @@measure_text_cache.size > 20_000 # bound dynamic-text growth
+            @@measure_text_cache.clear if @@measure_text_cache.size > TEXT_MEMO_LIMIT
             @@measure_text_cache[key] = result
             result
         end
@@ -436,6 +446,37 @@ module CrymbleUI
 
         # Calculate absolute window coordinates from parent-relative bounds
         # Traverses parent chain to convert relative position to absolute
+        # WHERE THIS WIDGET PLACES ITS INK, in its own local frame (origin = its box).
+        #
+        # `pos`/`size` are the REGION the content names — its line, or a whole span for a compound
+        # header, which is NOT the same as the box once that box has been pinned. `band_lo`/
+        # `band_hi` are the part of the world on screen. nil is not "no adjustment": it means "my
+        # region IS my box, and all of it is visible", so a widget that loses this silently starts
+        # placing against a different region. A compound must never be without one.
+        #
+        # `compound` says the region is a GROUP of lines rather than one. THE PLACEMENT RULE DOES
+        # NOT READ IT — `centred_in` treats every region identically, and stopped taking the flag
+        # at all on 2026-09-11. What reads it is the carrier gate (VirtualMatrix#ink_region_for): a
+        # one-line region withdraws when it sits wholly inside the band, because the widget's own
+        # answer is then the rule's answer, while a compound must keep its region wherever it sits,
+        # since its span is not its box and losing it would switch the label to being placed
+        # against the box (measured as a 6px jump for 1px of scroll).
+        #
+        # Set by a scrolling container's per-frame pass; see VirtualMatrix#update_ink_regions.
+        # It carried the widget's own height as `box` until 2026-09-11, for two consumers that both
+        # went: the rule's own box clamp (redundant with PrimitiveBuilder#confine, which uses the
+        # CURRENT box rather than this copy) and the geometric guess at `pinned`, now told.
+        # `pinned` is a FACT the matrix knows, not something to infer from these numbers: the
+        # cell's box is positioned and CLIPPED by StickyMath.compound_axis (a compound on a sticky
+        # column, outside the sticky rows — see sticky_reposition.cr), so the box is held still
+        # while the span scrolls and says nothing about where the group is. The rule read it off
+        # the geometry until 2026-09-11 (`region reaches outside box`), which is the same answer
+        # only by luck: a pinned box whose span happens to fit reads as unpinned.
+        record InkRegion, pos : Float64, size : Float64, band_lo : Float64, band_hi : Float64,
+          compound : Bool = false, pinned : Bool = false
+
+        property ink_region : InkRegion? = nil
+
         def absolute_bounds : Rect
             Widget.increment_absolute_bounds_count
             if parent = @parent

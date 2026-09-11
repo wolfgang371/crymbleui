@@ -36,6 +36,11 @@ module CrymbleUI::Widgets::VirtualMatrix
       end
     end
 
+    # Whether `compound_axis` traces each disposition it computes. Read ONCE, at load: the log sits
+    # on the render path — per compound cell, per frame — and an ENV lookup there would be a cost
+    # every user pays so that nobody can read the trace.
+    LOG_DISPOSITIONS = !ENV["CRYMBLE_STICKY_LOG"]?.nil?
+
     # Everything pass-constant a compound-cell axis disposition needs: built once
     # per axis per pass, so the four call sites (X/Y in the layout pass and the
     # blit-plan fast path) cannot transpose axis inputs. `scroll_q` is the
@@ -63,23 +68,41 @@ module CrymbleUI::Widgets::VirtualMatrix
     #
     # Scans constituents bb_lo..bb_hi: skips shifted-out ones (once the grid
     # compacts, their raw physical positions are meaningless) and physically
-    # invisible ones (behind the sticky boundary / past the viewport). A
-    # multi-constituent extent pins at the sticky boundary; a single remaining
-    # constituent scrolls off unclamped at its regular size; with none visible,
+    # invisible ones (behind the sticky boundary / past the viewport). The extent
+    # pins at the sticky boundary while the span CONTINUES — which is not the same
+    # as "more than one constituent visible": one constituent taller than the
+    # viewport is alone on screen at the START of its span too. Only the last
+    # SURVIVING constituent (`last_live`; a shifted-out tail is already compacted
+    # away) scrolls off unclamped at its regular size. With none visible,
     # scrolled-past parks (extent 0) while not-yet-visible keeps the full extent
     # at the content position. Returns {position, extent}.
     def self.compound_axis(view : AxisView, bb_lo : Int32, bb_hi : Int32,
                            true_pos : Float64) : {Float64, Float64}
+      # A span that has NOT yet reached the sticky boundary is not pinned at all: it rides in with
+      # its rows, at content speed, exactly like the ruler number and the plain cells beside it.
+      # Clamping the far edge to the viewport instead made the box grow from BELOW as the span
+      # arrived, so its centred label advanced at half the speed of the content it belongs to —
+      # "scrolled in oddly, the other way round" (field report 2026-09-05, image #37; measured at
+      # 42px of label per 84px of scroll). Pinning belongs to the LEADING edge only; the half-speed
+      # drift on the way OUT is the sticky behaviour that was asked for and is unchanged.
+      first_top = view.ruler_offset + (view.cum ? view.cum.not_nil![bb_lo].to_f64 : (0...bb_lo).sum { |j| view.sizes[j] }.to_f64)
+      if first_top - view.scroll_q >= view.sticky_extent
+        return {first_top - view.scroll_q, (bb_lo..bb_hi).sum { |j| view.sizes[j].to_f64 }}
+      end
+
       min_screen = Float64::MAX
       max_screen = -Float64::MAX
       visible_count = 0
       single_pos = 0.0
       single_size = 0.0
+      single_index = -1
+      last_live = -1
       cum = view.cum
       (bb_lo..bb_hi).each do |i|
         if s = view.shifted
           next if s.includes?(i)
         end
+        last_live = i # highest constituent that still EXISTS (shifted-out ones are compacted away)
         true_i = view.ruler_offset + (cum ? cum[i].to_f64 : (0...i).sum { |j| view.sizes[j] }.to_f64)
         unclamped = true_i - view.scroll_q
         far_edge = unclamped + view.sizes[i].to_f64
@@ -88,24 +111,48 @@ module CrymbleUI::Widgets::VirtualMatrix
         visible_count += 1
         single_pos = unclamped
         single_size = view.sizes[i].to_f64
+        single_index = i
         min_screen = { {unclamped, view.sticky_extent}.max, min_screen }.min # pin at boundary
         max_screen = { {far_edge, view.viewport_extent}.min, max_screen }.max
       end
 
-      if min_screen < Float64::MAX
-        if visible_count > 1
-          {min_screen, max_screen - min_screen} # pinned compound extent
+      result, reason =
+        if min_screen < Float64::MAX
+          if visible_count > 1 || single_index != last_live
+            # Pinned to the visible slice. ONE visible constituent is not enough to release: a
+            # constituent taller than the viewport is the only one visible at the START of its span
+            # too, and there the span continues below — releasing it scrolls the label away with
+            # the first row and pins it only once the second comes into view, i.e. backwards (field
+            # report 2026-09-05: a six-line first row under a 60px viewport gave pos=-10
+            # extent=123, the whole box adrift). What licenses the release is being the last
+            # constituent that still EXISTS — `last_live`, not `bb_hi`: once the grid compacts, a
+            # shifted-out tail constituent is gone, so the last unshifted one legitimately ends the
+            # span (compound_shifted_visibility_spec's scroll=240 case, which caught this).
+            { {min_screen, max_screen - min_screen}, "pinned" }
+          else
+            { {single_pos, single_size}, "released-last" }
+          end
         else
-          {single_pos, single_size} # single constituent scrolls off unclamped
+          last_edge = view.ruler_offset + (cum ? cum[bb_hi + 1].to_f64 : (0..bb_hi).sum { |j| view.sizes[j] }.to_f64)
+          if last_edge - view.scroll_q <= view.sticky_extent
+            { {view.park, 0.0}, "parked" }
+          else
+            { {true_pos, (bb_lo..bb_hi).sum { |j| view.sizes[j].to_f64 }}, "not-yet-visible" }
+          end
         end
-      else
-        last_edge = view.ruler_offset + (cum ? cum[bb_hi + 1].to_f64 : (0..bb_hi).sum { |j| view.sizes[j] }.to_f64)
-        if last_edge - view.scroll_q <= view.sticky_extent
-          {view.park, 0.0} # scrolled past the sticky header
-        else
-          {true_pos, (bb_lo..bb_hi).sum { |j| view.sizes[j].to_f64 }} # not yet visible
-        end
+
+      # WHY this compound sits where it does, on demand: CRYMBLE_STICKY_LOG=1, zero cost unset.
+      # Logged HERE, in the shared rule, and over EVERY branch: the previous diagnostic lived in
+      # reposition_sticky_cells alone, so it went silent on every frame the blit path served — i.e.
+      # exactly the frames a scrolling field report is about. `reason` is read from the branch
+      # actually taken rather than recomputed, so the instrument cannot disagree with the code.
+      if LOG_DISPOSITIONS
+        STDERR.puts "[compound] bb=#{bb_lo}..#{bb_hi} visible=#{visible_count} last_live=#{last_live} " \
+                    "scroll=#{view.scroll_q.round(1)} vp=#{view.viewport_extent.round(1)} " \
+                    "sticky_extent=#{view.sticky_extent.round(1)} " \
+                    "-> pos=#{result[0].round(1)} extent=#{result[1].round(1)} #{reason}"
       end
+      result
     end
 
     # Returns the min scroll position (in pixels) such that element `index` is barely fully visible.

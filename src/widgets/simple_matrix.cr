@@ -52,16 +52,23 @@ module CrymbleUI
 
     # Sticky rows / cols are a contiguous trailing set {0..K-1} of the
     # scroll_order. Put non-sticky indices first, then sticky at the tail.
+    # Sticky lines go at the TAIL, descending. Stickiness is derived, not declared:
+    # VirtualMatrix#derive_sticky_count scans from the end and keeps the run only while the
+    # accumulated set is {0..k-1} at every step, breaking at the first miss. Ascending, the first
+    # element read is {1} — not {0} — so it broke immediately and ANY request for two or more
+    # sticky lines produced a matrix with NONE (measured 2026-09-05; the old spec asserted the
+    # array this method returns, so it never saw that). ConfigurableMatrixAdapter documents the
+    # same rule for the demo.
     def get_scrollorder : {Array(Int32), Array(Int32)}
       r_total = row_count
       c_total = col_count
       r_order = if @sticky_row_count > 0 && @sticky_row_count <= r_total
-                  (@sticky_row_count...r_total).to_a + (0...@sticky_row_count).to_a
+                  (@sticky_row_count...r_total).to_a + (0...@sticky_row_count).to_a.reverse
                 else
                   (0...r_total).to_a
                 end
       c_order = if @sticky_col_count > 0 && @sticky_col_count <= c_total
-                  (@sticky_col_count...c_total).to_a + (0...@sticky_col_count).to_a
+                  (@sticky_col_count...c_total).to_a + (0...@sticky_col_count).to_a.reverse
                 else
                   (0...c_total).to_a
                 end

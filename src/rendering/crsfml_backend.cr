@@ -1,8 +1,8 @@
 require "../csfml3/wrapper"
 require "../core/types"
 require "./render_backend"
-require "./opengl_bindings"
 require "./pixel_snap"
+require "./clip_math"
 require "./fbo_math"
 
 module CrymbleUI
@@ -16,7 +16,19 @@ module CrymbleUI
     @width : Int32
     @height : Int32
     @font : SF::Font
-    @clip_stack : Array(SF::IntRect) # Stack of scissor clip rectangles
+    # Clip rects as pushed, in FLOAT pixels. Kept unrounded so the whole stack is
+    # intersected in float and converted to device pixels ONCE, at the end — rounding
+    # each rect first and intersecting afterwards gives a different answer at fractional
+    # boundaries. That puts the conversion ORDER in step with TestRenderBackend, which
+    # also intersects in float. The rounding RULE still differs (the instrument truncates
+    # both edges; this ceils the extent) — tracked in the backlog, still open.
+    @clip_stack : Array(Rect)
+    # ONE long-lived view per backend, the clip's carrier. Copied from the texture's
+    # DEFAULT view (sfView_create would yield centre (500,500)/size (1000,1000) and
+    # silently relocate every draw). Copied ONCE: RenderTexture#view hands back an
+    # interior pointer into the render texture, and a per-clip copy would both allocate
+    # on the render hot path and hand View#finalize a handle destroyed manually.
+    @clip_view : SF::View
 
     # Factory method - creates a new backend
     def self.acquire(width : Int32, height : Int32, font : SF::Font) : CrSFMLBackend
@@ -27,7 +39,8 @@ module CrymbleUI
     def initialize(width : Int32, height : Int32, font : SF::Font)
       @texture = SF::RenderTexture.new(width.to_u32, height.to_u32)
       @font = font
-      @clip_stack = [] of SF::IntRect
+      @clip_stack = [] of Rect
+      @clip_view = @texture.default_view.dup
       # Cached because they must remain answerable AFTER dispose (blit-plan bookkeeping and the
       # size-compare in render_single_widget both read them). Querying the destroyed texture would
       # be sfRenderTexture_getSize(NULL) — a hard SEGFAULT that no raise-on-use contract can catch.
@@ -315,12 +328,10 @@ module CrymbleUI
       @texture.draw(sprite)
     end
 
-    # Push clipping region onto stack
-    # Use ceil for width/height to avoid off-by-one when bounds are fractional
-    # (matches compositor which uses .ceil.to_i for texture_rect)
+    # Push clipping region onto stack. Stored unrounded — see @clip_stack.
     def push_clip(rect : Rect)
       assert_live("push_clip")
-      @clip_stack << SF.int_rect(rect.x.to_i, rect.y.to_i, rect.width.ceil.to_i, rect.height.ceil.to_i)
+      @clip_stack << rect
       apply_clip
     end
 
@@ -331,65 +342,70 @@ module CrymbleUI
       apply_clip
     end
 
-    # Temporarily suspend scissor clipping (disables GL scissor test)
-    # Used when drawing to OTHER backends while a clip is active on THIS backend
-    # OpenGL scissor is global state, so we must disable it to avoid affecting other textures
+    # Deliberately NOT assert_live: this is a pure read of the stack, and the renderer
+    # calls it while unwinding, where raising would replace the exception being unwound.
+    def clip_depth : Int32
+      @clip_stack.size
+    end
+
+    # Temporarily lift this backend's clip, for the stretch where the renderer draws to
+    # OTHER backends mid-clip (background capture/restore).
+    #
+    # NOT because "the scissor is global" — it is not. Measured: with a clip live on one
+    # backend, a draw on another comes back completely unclipped, because each render
+    # texture carries its own view. So this pair no longer protects the OTHER backends'
+    # draws; they were never at risk once the clip became per-target.
+    #
+    # It is retained as a contract guard for THIS backend: SFML applies the view's scissor
+    # to `clear` as well as to draws, so a clear issued on this backend while its own clip
+    # is live would be confined to it. Audited: no current call site does that, so the pair
+    # is a no-op today. Deleting it belongs to the task that resolves the remaining
+    # raw-GL clip path, not to this change.
     def suspend_clip
       assert_live("suspend_clip")
-      display = ENV["DISPLAY"]?
-      return if display.nil? || display.empty?
-
-      # No-Fallbacks: GL rescue deleted — LibGL.disable is pure FFI and cannot raise
-      # a catchable Crystal exception; the rescue only ever masked real invariant
-      # breaks. The DISPLAY guard (headless skip) is retained.
-      LibGL.disable(LibGL::GL_SCISSOR_TEST)
+      install_scissor(FULL_TARGET_SCISSOR)
     end
 
-    # Resume scissor clipping after suspend_clip
-    # Re-enables GL scissor test if there's an active clip on the stack
+    # Restore the clip suspended above. This IS apply_clip — re-deriving "the current
+    # clip" anywhere else is how the stack-top/intersection split got in last time.
     def resume_clip
       assert_live("resume_clip")
-      display = ENV["DISPLAY"]?
-      return if display.nil? || display.empty?
+      apply_clip
+    end
 
-      # No-Fallbacks: GL rescue deleted — LibGL.enable is pure FFI and cannot raise
-      # a catchable Crystal exception. The DISPLAY guard (headless skip) is retained.
-      if @clip_stack.last?
-        LibGL.enable(LibGL::GL_SCISSOR_TEST)
+    # SFML documents the full-target scissor as equivalent to disabling the test.
+    FULL_TARGET_SCISSOR = SF.float_rect(0.0, 0.0, 1.0, 1.0)
+
+    # Hand the clip to SFML as the view's scissor rather than issuing glScissor ourselves.
+    #
+    # WHY, and it is the whole bug: SFML applies its own GL state inside RenderTarget#draw
+    # and RenderTarget#clear, and that reset disables GL_SCISSOR_TEST while leaving the
+    # box. Any scissor WE enable is therefore live only until the next render-target
+    # re-activation — so the first draw after one escaped its clip, which in a grid is the
+    # first cell of the layer, whose text then ran across its neighbours. Expressed as the
+    # view's scissor, SFML re-applies it itself on every re-activation instead.
+    private def apply_clip
+      # The stack collapse AND the float->device rounding both live in ClipMath, shared
+      # with TestRenderBackend. They used to be derived separately and drifted: the
+      # instrument clipped one column narrower at a fractional edge, so a real right-edge
+      # defect could pass headless. One function means that is unrepresentable, not merely
+      # spec-detected.
+      if box = ClipMath.device_box(@clip_stack)
+        x0, y0, x1, y1 = box
+        install_scissor(SF.float_rect(
+          x0.to_f32 / @width, y0.to_f32 / @height,
+          (x1 - x0).to_f32 / @width, (y1 - y0).to_f32 / @height))
+      else
+        install_scissor(FULL_TARGET_SCISSOR)
       end
     end
 
-    # Apply current clipping region using OpenGL scissor test
-    private def apply_clip
-      # Skip OpenGL calls if no display available (headless tests)
-      # This allows tests to compile/link but skip actual GL calls
-      display = ENV["DISPLAY"]?
-      return if display.nil? || display.empty?
-
-      # No-Fallbacks: the GL rescue is deleted (silent-swallow -> loud-raise). GL's
-      # real "no active context" failure was never a catchable Crystal exception, so
-      # the rescue only ever masked genuine invariant breaks. The one surviving
-      # RAISABLE statement is the UInt32 -> Int32 conversion of @texture.size.y at the
-      # scissor_gl_y call site below: a texture height overflowing Int32 is a broken
-      # invariant that SHOULD be loud. The DISPLAY guard above is retained (headless
-      # never executes this body).
-      if clip = @clip_stack.last?
-        # Enable scissor test
-        LibGL.enable(LibGL::GL_SCISSOR_TEST)
-
-        # Convert clip rect to OpenGL coordinates. GL's origin is bottom-left, our
-        # clip band is top-down; FboMath.scissor_gl_y performs the flip. The UInt32
-        # texture height converts to Int32 here, at the call site.
-        gl_x = clip.left
-        gl_y = FboMath.scissor_gl_y(@texture.size.y.to_i32, clip.top, clip.height)
-        gl_width = clip.width
-        gl_height = clip.height
-
-        LibGL.scissor(gl_x, gl_y, gl_width, gl_height)
-      else
-        # No clip region - disable scissor test
-        LibGL.disable(LibGL::GL_SCISSOR_TEST)
-      end
+    # The ONLY place this backend's view is touched. The view IS the clip's carrier, so
+    # setting it anywhere else would silently replace the active clip; a tripwire pins
+    # that (spec/rendering/instrument_tripwires_spec.cr, guard (f)).
+    private def install_scissor(scissor : SF::FloatRect)
+      @clip_view.scissor = scissor
+      @texture.view = @clip_view
     end
 
     # Capture rectangular region of pixels as packed UInt32 (RGBA: R in high byte)

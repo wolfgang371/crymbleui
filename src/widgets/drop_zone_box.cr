@@ -27,15 +27,29 @@ module CrymbleUI
 
     theme_property hover_color, dropzone_hover
 
+    # How strongly the overlay paints `hover_color`. The DragManager multiplies this into the
+    # layer opacity ON TOP of the colour's own alpha, so a caller that can set only the colour
+    # cannot reach the strength the drop feedback actually renders at: embrace's field list asked
+    # for alpha 200/255 and got 0.31 on screen, which read as "merely slightly lighter" against
+    # its saturated section backgrounds. Unset means the theme's drag-feedback strength
+    # (`brightness.drag_opacity`, via DropTarget), so existing zones are unchanged.
+    @highlight_opacity : Float64?
+
     def initialize(
       @accept_types : Array(String),
       @on_drop_handler : Proc(DragData, Vec2, Nil)? = nil,
       @background_color : ThemeColor? = Theme.ref(&.dropzone_background),
       hover_color : ThemeColor? = nil,
+      @highlight_opacity : Float64? = nil,
       id : String? = nil
     )
       super(id: id)
       @hover_color = hover_color
+    end
+
+    # Override to use the configured strength for the overlay highlight; unset means the theme's.
+    def highlight_opacity : Float64
+      @highlight_opacity || super
     end
 
     def accepts_drop?(data : DragData) : Bool

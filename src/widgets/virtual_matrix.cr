@@ -127,6 +127,19 @@ module CrymbleUI
     DEFAULT_ROW_HEIGHT   = Widgets::VirtualMatrix::MatrixAdapter::DEFAULT_ROW_HEIGHT
     OFFSCREEN_PARK       = -1000.0 # Parking position for invisible cells (far off-screen to avoid rendering)
 
+    # The ruler labels' font scale. Named because three places need to agree on it: the two
+    # draw_text calls in the ruler widget, and auto-size's column floor — a column that shrinks
+    # past its own label leaves the user no signal, since the ruler strip paints no cut marker.
+    RULER_LABEL_FONT_SCALE = -2
+
+    # May the user drag column/row borders? A consumer that sizes lines to their content
+    # (auto_size) turns this off: a drag there would simply be overwritten by the next
+    # re-measure, so offering it is a lie. Gated at `detect_resize_edge`, the single choke point
+    # for both the gesture and the resize cursor — the same shape as WindowPanel#resizable.
+    # A plain property, deliberately not reconciled: the consumer sets it each build alongside
+    # auto_size.
+    property interactive_resize : Bool = true
+
     # Interactive resize constants
     RESIZE_TOLERANCE_BASE = 4.0  # pixels from border to trigger resize (at zoom 1.0)
     MIN_COL_WIDTH    = 0.5  # minimum column width in frame_height units
@@ -459,12 +472,391 @@ module CrymbleUI
       layer == @content_layer ? content_background_color : nil
     end
 
+    # Lay a cell out at a position the CALLER decides, at the size its bounding box implies.
+    #
+    # Only the size half is shared. The three existing sites derive position three different
+    # ways — the creation loop anchors on the canonical top-left with the ruler offset, the
+    # resize branch on the key, and the sticky-compound path on `col_physical_cum` with NO ruler
+    # term because those cells live on sticky layers — so a helper that also owned the position
+    # would hand one of them coordinates it must not have.
+    private def layout_cell_at(widget : Widget, bounding, col_sizes : Array(Int32),
+                               row_sizes : Array(Int32), x : Float64, y : Float64) : Nil
+      cell_width = calculate_merged_width(bounding, col_sizes)
+      cell_height = calculate_merged_height(bounding, row_sizes)
+      widget.layout(BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing)),
+        Vec2.new(x, y))
+    end
+
+    # === CONTENT SIZING ===
+
+    # There is no product cap on a content-sized line: a value gets the room it needs, however
+    # long it is, and the user scrolls. The only ceiling is the renderer's — past
+    # `LayerRenderer::MAX_WIDGET_SPAN` a widget is drawn TRUNCATED, so a cell sized beyond it
+    # would lose content while its cut marker, which compares the text against the box it was
+    # given, still reported everything as fitting. Stopping there keeps that lie impossible.
+
+    @auto_size : Bool = false
+    @auto_size_pending : Bool = false
+    # Did THIS instance's consumer set the mode, or is it still the constructor default? A DSL
+    # consumer configures the new widget BEFORE reconciliation runs, so the carry below must not
+    # overwrite what it just said.
+    @auto_size_explicit : Bool = false
+    # The sizes the mode measured, captured AT THE MOMENT the mode goes off and held until a
+    # frame can hand them to the adapter. Captured rather than read at flush time because the
+    # consumer that switches the mode off also announces a structural change, and
+    # `flush_invalidate_all` reinstalls `adapter.get_sizes` over @col_widths/@row_heights before
+    # this runs — reading then would hand over the adapter's own defaults, and the measured
+    # layout would be gone (probe: custom=[5,5,5] where it had measured [1.09, 1.39, 18.61]).
+    @auto_size_handover : Tuple(Array(Float64), Array(Float64))? = nil
+    @fit_pending : Bool = false
+
+    # Size every line to its content instead of to the user's drags. Off by default; the
+    # consumer that turns it on is also expected to refuse the resize gesture, since
+    # a drag would otherwise be overwritten by the next re-measure.
+    def auto_size : Bool
+      @auto_size
+    end
+
+    def auto_size=(value : Bool) : Bool
+      @auto_size_explicit = true
+      return value if @auto_size == value
+      @auto_size = value
+      if value
+        @auto_size_pending = true
+      else
+        # Turning it OFF hands the sizes the mode computed over to the adapter, as the user's
+        # own. The measured layout is a good starting point to adjust from, so switching off
+        # means "I'll take it from here", not "throw that away": nothing on screen moves, and
+        # the sizes are now ordinary custom sizes the resize gesture can drag.
+        @auto_size_handover = {@row_heights.dup, @col_widths.dup}
+      end
+      mark_needs_layout
+      value
+    end
+
+    # Re-measure every cell and size each line to the content in it.
+    #
+    # Costs one `cell_natural_size` per cell, so it runs on a STRUCTURAL trigger — the mode being
+    # switched on, or an announced change — and never per keystroke.
+    #
+    # It does NOT go near the drag path: that raises without a gesture, cannot express a change
+    # to more than one line, and faking its state would let a later mouse-up persist these
+    # computed widths into the adapter, destroying whatever the user had dragged. Instead the
+    # cells are torn down and rebuilt at the new sizes, which is what the creation loop does
+    # correctly for every line at once.
+    private def flush_auto_size : Nil
+      adapter = @adapter
+      return unless adapter && @auto_size
+      row_order, col_order = adapter.get_scrollorder
+      return if row_order.empty? || col_order.empty?
+
+      widest = Array.new(col_order.size, 0.0)
+      tallest = Array.new(row_order.size, 0.0)
+      multiline = Array.new(row_order.size, false)
+      row_order.size.times do |r|
+        col_order.size.times do |c|
+          # A cell that SPANS several lines does not vote on any one of them: a grouped header
+          # covering eight columns would otherwise dump its whole width into the first, and a
+          # row-header spanning eight records would make all eight that tall. Its own fit is not
+          # guaranteed here — it may show its cut marker — which is the honest trade until the
+          # deficit is distributed across the lines it covers.
+          bounding = adapter.cell_get_bounding_box(r, c)
+          spans_cols = bounding[1][1] != bounding[0][1]
+          spans_rows = bounding[1][0] != bounding[0][0]
+          next if spans_cols && spans_rows
+          natural = adapter.cell_natural_size(r, c)
+          widest[c] = natural[:width] if !spans_cols && natural[:width] > widest[c]
+          if !spans_rows && natural[:lines] > 1 && natural[:height] > tallest[r]
+            tallest[r] = natural[:height]
+            multiline[r] = true
+          end
+        end
+      end
+
+      # A STICKY line is sized to its content like any other — but it may only SHRINK.
+      #
+      # The hazard is one-directional. GROWING a pinned line past the viewport promises what the
+      # layout cannot keep: it never scrolls, so the overflow is unreachable by any gesture AND
+      # unmarked, because the cell fits its own text and it is the VIEWPORT that clips it, one level
+      # above where the cut marker looks. SHRINKING cannot do that — a line narrower than it was
+      # hides nothing that was not already hidden — and refusing it made the mode leave a wide,
+      # empty record-label column beside compacted data columns, which is not "sized to content" by
+      # any reading (field report).
+      #
+      # So: never wider than the user already had it, never narrower than its ruler label (the ruler
+      # strip paints no cut marker, so a cut label would be a silent loss). Per AXIS — a cell in a
+      # pinned column still votes its line count to its own row, which scrolls normally.
+      fh = frame_height
+      floor = auto_col_floor_units(fh)
+      sticky_cols = sizing_sticky_col_count
+      sticky_rows = sizing_sticky_row_count
+      # Why content sizing did what it did, on demand: `CRYMBLE_AUTOSIZE_LOG=1`. Zero cost unset,
+      # and it is what found the sticky-count bug above — from the running app, in one toggle, after
+      # every headless fixture had said the feature was fine. The four numbers that matter are the
+      # sticky counts, what each line measured, and the widths either side of the assignment.
+      if ENV["CRYMBLE_AUTOSIZE_LOG"]?
+        STDERR.puts "[autosize] cols=#{col_order.size} rows=#{row_order.size} " \
+                    "sticky=(#{sticky_row_count},#{sticky_col_count}) fh=#{fh} floor=#{floor.round(2)}"
+        STDERR.puts "[autosize] widest=#{widest.map(&.round(1))}"
+        STDERR.puts "[autosize] tallest=#{tallest.map(&.round(1))} multiline=#{multiline}"
+        STDERR.puts "[autosize] widths BEFORE=#{@col_widths.map(&.round(2))}"
+      end
+      col_order.size.times do |c|
+        wanted = auto_col_units(widest[c], fh)
+        @col_widths[c] = if c < sticky_cols
+                           # shrink-only, and never below the label floor
+                           Math.max(Math.min(wanted, @col_widths[c]? || wanted), floor)
+                         else
+                           wanted
+                         end
+      end
+      if ENV["CRYMBLE_AUTOSIZE_LOG"]?
+        STDERR.puts "[autosize] widths AFTER =#{@col_widths.map(&.round(2))}"
+      end
+      row_order.size.times do |r|
+        wanted = multiline[r] ? auto_row_units(tallest[r], fh) : DEFAULT_ROW_HEIGHT
+        # Same rule on this axis: a pinned row may shrink to its content, never grow past a
+        # viewport it cannot scroll. Its floor is DEFAULT_ROW_HEIGHT, which `auto_row_units`
+        # already applies — there is no label-width counterpart, because the row ruler's label
+        # is bounded by the ruler's WIDTH, not by the row's height.
+        @row_heights[r] = r < sticky_rows ? Math.min(wanted, @row_heights[r]? || wanted) : wanted
+      end
+
+      destroy_active_cells
+      @force_cell_update = true
+      refresh_after_size_change
+      # The rulers are CachePolicy::Dynamic: the screen draws their CACHED primitives, and the
+      # sizes they lay labels out from are not Sources, so nothing invalidates them on their
+      # own. Without this the ruler keeps drawing the OLD column pitch under correctly-sized
+      # cells — and a test calling `to_primitives` cannot see it, because that recomputes.
+      mark_ruler_widgets_dirty_for_axis
+      mark_needs_clear_and_render_all_layers
+    end
+
+    # The sticky chrome is sized FROM the column and row sizes, so it goes stale the moment
+    # those change: the corner strip's width is ruler + sticky columns, the row strip's height
+    # is the sticky rows, and the ScrollView needs both to place its sticky layers. Invalidating
+    # their primitive caches is NOT enough — they keep drawing inside a box measured for the old
+    # sizes, which is how the sticky column's header label ended up off its column and the strip
+    # overlapping the first data column (measured: 143px wide where 64.8 was required).
+    #
+    # flush_resize_update does exactly this for the drag; this is the same work for the paths
+    # that change sizes without a gesture.
+    private def refresh_sticky_geometry : Nil
+      ruler_w = ruler_col_width_pixels
+      ruler_h = ruler_row_height_pixels
+      if crw = @corner_ruler_widget
+        crw.layout(BoxConstraints.tight(Size.new(ruler_w + sticky_col_width_pixels, ruler_h)), Vec2.zero)
+      end
+      if strip = @corner_row_strip_widget
+        strip.layout(BoxConstraints.tight(Size.new(ruler_w, sticky_row_height_pixels)), Vec2.new(0.0, ruler_h))
+      end
+      if sv = @content_scroll_view
+        sv.sticky_row_height = sticky_row_height_pixels + ruler_h
+        sv.sticky_col_width = sticky_col_width_pixels + ruler_w
+        sv.update_sticky_layer_bounds
+      end
+    end
+
+    # Everything derived from @col_widths / @row_heights that cannot see them change.
+    #
+    # A size change is not a Source: the arrays are mutated in place, so nothing marks the
+    # dependents and every consumer must be told. Which consumers exist was knowledge that lived
+    # only inside flush_resize_update, so each new size-changing path rediscovered one the hard way
+    # — sticky chrome, ruler caches, the scroll extents (here). This is the
+    # one place that knows the list; `spec/rendering/size_writer_lint_spec.cr` fails when a writer
+    # appears that does not call it.
+    #
+    # ORDER IS LOAD-BEARING. The totals memoise, so the caches go first or the extents are computed
+    # one change stale. And the clamp must precede `apply_scroll`: that method writes the layer
+    # offset and recomputes the visible cells but does NOT clamp, and `set_scroll_offset_for_sync`
+    # does not either — so calling it first would push an offset past the new end straight back over
+    # `refresh_extents`' work, which is what a SHRINK (the toggle-off handover, an invalidate that
+    # drops rows) does.
+    #
+    # The content layer needs nothing: `Layer#bounds` pulls through `compute_bounds_for_layer`,
+    # which re-runs `effective_content_size` on every read — MEASURED at the narrowed 384px while
+    # the bar was still unpainted, which is how this method learned that the missing piece was the
+    # scrollbar layer's LAYOUT and not any invalidation.
+    # Is the geometry we would publish right now INTERMEDIATE?
+    #
+    # A structural change reinstalls the adapter's own sizes and only then re-measures the content
+    # (`flush_invalidate_all` sets @auto_size_pending; `flush_auto_size` runs later in the same
+    # flush). Between those two the grid is briefly its DEFAULT size — measured at 89px of content
+    # against a 402px viewport where the real content is 654px — and every clamp in sight then
+    # computes a maximum scroll of ZERO and discards the user's position. Inserting a record while
+    # scrolled therefore threw the view back to the top (field report), which is why nothing may
+    # clamp against this state.
+    #
+    # Unreachable before content sizing existed: without it a row could not exceed the viewport, so
+    # default-sized and final geometry were both smaller than the view and neither clamped anything.
+    private def remeasure_pending? : Bool
+      @auto_size && @auto_size_pending
+    end
+
+    private def refresh_after_size_change(sticky : Bool = true) : Nil
+      invalidate_dimension_caches
+      refresh_sticky_geometry if sticky
+      # A re-measure is queued: publishing the intermediate extents would clamp the scroll offset
+      # to a maximum of zero. `flush_auto_size` refreshes with the final geometry moments later.
+      return if remeasure_pending?
+      if sv = @content_scroll_view
+        sv.refresh_extents(Size.new(horizontal_clip? ? sv.viewport_size.width : total_content_width,
+          total_content_height))
+        clamped = Vec2.new(scroll_offset.x.clamp(0.0, max_content_scroll_x),
+          scroll_offset.y.clamp(0.0, max_content_scroll_y))
+        @scroll_offset.set(clamped) unless clamped == scroll_offset
+        apply_scroll
+      end
+    end
+
+    # Grow the column and row a cell sits in so the content now in it fits — WITHOUT tearing the
+    # cell down, because the caller is typing into it and destroying the widget would take the
+    # editor and the caret with it.
+    #
+    # Grow-only on purpose: shrinking while typing would either cost a full-column rescan per
+    # keystroke or narrow the column below what OTHER rows hold, banding cells the user is not
+    # editing. The shrink lands at the next structural re-measure.
+    #
+    # Deliberately NOT the drag path: `set_col_width_for_drag` accumulates a shift that only the
+    # drag branch drains, so a residue left there would blit the next real drag by the wrong
+    # offset; and the drag branch skips content columns left of its resize_index, so it cannot
+    # express this at all. `resize_axis` is never written, so no later mouse-up can mistake this
+    # for a gesture and persist these sizes over the user's dragged ones.
+    # Takes the same three numbers `cell_natural_size` reports, and for the same reason it
+    # reports them: the caller has already measured the content, and turning a line count back
+    # into pixels here would re-derive the widget chrome that content_width exists to keep in
+    # one place. `lines` decides only WHETHER the row grows — a single-line cell keeps the
+    # default height, whose natural height exceeds the box it already paints in.
+    def fit_cell_to_content(row : Int32, col : Int32,
+                            content_width : Float64, content_height : Float64, lines : Int32) : Nil
+      return unless @auto_size
+      fh = frame_height
+      changed = false
+      # Sticky lines are not content-sized (see flush_auto_size): per axis, and here too — this is
+      # the per-keystroke path, and it writes the arrays directly.
+      if col >= sizing_sticky_col_count
+        wanted_col = auto_col_units(content_width, fh)
+        if wanted_col > (@col_widths[col]? || 0.0)
+          @col_widths[col] = wanted_col
+          changed = true
+        end
+      end
+      if lines > 1 && row >= sizing_sticky_row_count
+        wanted_row = auto_row_units(content_height, fh)
+        if wanted_row > (@row_heights[row]? || 0.0)
+          @row_heights[row] = wanted_row
+          changed = true
+        end
+      end
+      return unless changed
+      # `sticky: false` — `flush_fit_cells` re-lays the sticky chrome out at the end of this same
+      # frame, and the drag path's rationale applies here too: doing it per keystroke as well would
+      # pay for two Widget#layout calls that the frame is about to repeat.
+      refresh_after_size_change(sticky: false)
+      @fit_pending = true
+      mark_needs_render
+    end
+
+    # Re-lay-out the LIVE cells at the geometry `fit_cell_to_content` just changed. The creation
+    # loop cannot do this: it skips cells that are already laid out, which is exactly why a
+    # programmatic size change used to move the model number and leave the pixels alone.
+    private def flush_fit_cells : Nil
+      vp_w = @content_layer.try(&.bounds.width) || bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || bounds.height
+      return unless vp_w > 0 && vp_h > 0
+      update_visible_cells(vp_w, vp_h) # recompute geometry (and create any newly-exposed cells)
+      col_sizes = @cached_col_sizes
+      row_sizes = @cached_row_sizes
+      col_cum = @cached_col_physical_cum
+      row_cum = @cached_row_physical_cum
+      return unless col_sizes && row_sizes && col_cum && row_cum
+      sticky_rows_val = sticky_row_count
+      sticky_cols_val = sticky_col_count
+      ruler_x = ruler_col_width_pixels.to_i
+      ruler_y = ruler_row_height_pixels.to_i
+      @active_cells.each do |key, widget|
+        row, col = key
+        # Sticky cells are re-sized and repositioned by the sticky path, which reads the same
+        # size arrays — laying them out here in content space would put them in the wrong place.
+        next if row < sticky_rows_val || col < sticky_cols_val
+        next unless col < col_cum.size && row < row_cum.size
+        layout_cell_at(widget, get_bounding_box(key), col_sizes, row_sizes,
+          (ruler_x + col_cum[col]).to_f64, (ruler_y + row_cum[row]).to_f64)
+      end
+      # The blit shift is single-boundary by construction, so this path forgoes it and repaints:
+      # a deliberate cost, and the reason it must not reach for `can_shift`.
+      refresh_sticky_geometry
+      mark_needs_clear_and_render_all_layers
+      mark_ruler_widgets_dirty_for_axis
+
+      # AFTER the cells have been re-laid-out at their new sizes — and this is the site that
+      # matters most. The key wrappers snap too, but they run while `fit_cell_to_content` has only
+      # set @fit_pending: the cell is still its OLD size there, so the caret looks safely inside it
+      # and nothing scrolls. Then the cell grows here, the caret ends up hundreds of pixels below
+      # the viewport, and without this call it stays there (field report: a 865px cell in a 402px
+      # matrix, caret at y=845, scroll offset 0).
+      snap_to_caret
+    end
+
+    # Ruler invalidation without consulting `resize_axis` — this path never sets it, and
+    # `mark_ruler_widgets_dirty` asserts on it precisely so that no non-gesture caller sneaks in.
+    private def mark_ruler_widgets_dirty_for_axis : Nil
+      @col_ruler_widget.try &.invalidate_primitive_cache
+      @row_ruler_widget.try &.invalidate_primitive_cache
+      @corner_ruler_widget.try &.invalidate_primitive_cache
+      @corner_row_strip_widget.try &.invalidate_primitive_cache
+    end
+
+    # Content pixels -> frame-height units, rounded UP. The painted box is
+    # `trunc(grid_spacing + units * frame_height) - grid_spacing`, so a size that is a residue
+    # short of what the content needs brings the cut marker straight back.
+    private def auto_col_units(content_px : Float64, fh : Float64) : Float64
+      units = (content_px + 1.0) / fh
+      units.clamp(auto_col_floor_units(fh), max_span_units(fh))
+    end
+
+    # The renderer's ceiling, in the units sizes are expressed in. `grid_spacing` comes off it
+    # because the painted box is inset by one spacing from the line's span, and it is the BOX
+    # the renderer has to draw.
+    private def max_span_units(fh : Float64) : Float64
+      (LayerRenderer::MAX_WIDGET_SPAN - grid_spacing) / fh
+    end
+
+    # A column never shrinks past its own ruler label. Below that the grid stops being
+    # navigable — and a cut LABEL is invisible, because the ruler strip is the one place that
+    # paints no cut marker, so the user would get no signal at all. With rulers hidden there is
+    # no label to protect and the floor is the ordinary minimum.
+    private def auto_col_floor_units(fh : Float64) : Float64
+      return MIN_COL_WIDTH unless show_rulers
+      label_px = Widget.measure_text("c99", FontSizing.calculate_size(RULER_LABEL_FONT_SCALE)).width
+      {(label_px + 1.0) / fh, MIN_COL_WIDTH}.max
+    end
+
+    # A row keeps the default height for single-line content — its natural height is TALLER than
+    # the box it already paints in, so sizing every row to it would make an ordinary table ~20%
+    # shorter in records while claiming to fit content that already fits. Only genuinely
+    # multi-line content grows the row, and it grows as far as the value needs.
+    private def auto_row_units(content_px : Float64, fh : Float64) : Float64
+      units = (content_px + 1.0) / fh
+      units.clamp(DEFAULT_ROW_HEIGHT, max_span_units(fh))
+    end
+
+    private def mark_needs_clear_and_render_all_layers : Nil
+      {@content_layer, @cursor_overlay_layer, @drag_overlay_layer}.each do |layer|
+        layer.try &.mark_needs_clear_and_render
+      end
+    end
+
     # === SIZE SETTERS/GETTERS ===
 
     # Set custom row height (in frame_height multiples)
     def row_height(row : Int32, height : Float64)
       @row_heights[row] = height
-      @cached_total_height = nil  # Invalidate cache
+      # Caches only: this setter schedules a LAYOUT, and `setup_scroll_view` is what publishes the
+      # extents there. Refreshing them here as well would pay for `update_visible_cells` twice per
+      # call — O(n) each, so a caller sizing every row would make it quadratic. The full refresh is
+      # for the paths that change a size with NO layout behind them.
       invalidate_dimension_caches
       @force_cell_update = true
       mark_needs_layout
@@ -473,8 +865,7 @@ module CrymbleUI
     # Set custom column width (in frame_height multiples)
     def col_width(col : Int32, width : Float64)
       @col_widths[col] = width
-      @cached_total_width = nil  # Invalidate cache
-      invalidate_dimension_caches
+      invalidate_dimension_caches # caches only — see row_height
       @force_cell_update = true
       mark_needs_layout
     end
@@ -512,6 +903,28 @@ module CrymbleUI
 
     # === STICKY HELPERS ===
 
+    # The sticky counts as CONTENT SIZING must read them — 0 when EVERY line is sticky.
+    #
+    # `derive_sticky_count` counts the trailing scroll-order entries that form {0..N-1}, and on a
+    # small grid that is all of them: two columns order as [1, 0], so both qualify and the count
+    # equals the column count (field report 2026-09-02: `sticky=(1,2)` on a `cols=2 rows=1` grid,
+    # every width left untouched — the mode had disabled itself).
+    #
+    # For stickiness that is a fine answer: it means nothing scrolls. But the exclusion exists
+    # because a pinned line cannot be scrolled TO while the rest of the grid moves — and where
+    # nothing moves at all, there is no unreachable region to protect. So sizing treats an
+    # all-sticky grid as having no sticky lines, and a cell too wide for it is cut and marked like
+    # any other. Only a grid that genuinely has both kinds gets the exclusion.
+    private def sizing_sticky_col_count : Int32
+      count = sticky_col_count
+      count < @cols ? count : 0
+    end
+
+    private def sizing_sticky_row_count : Int32
+      count = sticky_row_count
+      count < @rows ? count : 0
+    end
+
     # Derive sticky count from scroll_order tail.
     # Elements at the end of scroll_order that form a contiguous set {0, 1, ..., N-1}
     # are considered sticky (they scroll out last and render at fixed positions).
@@ -530,6 +943,17 @@ module CrymbleUI
         end
       end
       count
+    end
+
+    # THE choice between the two sticky passes, in one place: they run either/or per frame, and
+    # which one is picked must not vary by caller — a divergence there is a user-visible jump when
+    # the frame type flips. Three callers had grown their own copy of this if/else.
+    private def run_sticky_pass : Nil
+      if sticky_cells_can_use_blit_plan?
+        compute_sticky_blit_plans
+      else
+        reposition_sticky_cells
+      end
     end
 
     # Derive number of sticky rows from row scroll_order (cached to avoid repeated allocation)
@@ -581,6 +1005,153 @@ module CrymbleUI
 
     # Get bounding box for a cell
     # Non-merged cells return themselves as the bounding box
+    # ONE owner for the ink rule, run once per frame from `run_sticky_pass`.
+    #
+    # Exactly one line straddles the band's leading edge, which is what makes the rule
+    # overlap-free and what bounds its cost: only that line's cells carry a band, so only they
+    # re-render while it straddles. Everything else keeps `nil` and is untouched — no per-frame
+    # scan of the visible set, and no cell that is not moving pays anything.
+    #
+    # Cells on the CONTENT layer take part too. Their BOX stays in content space (that is the
+    # viewport cache's validity condition); only the ink inside it moves, which the layer already
+    # decides per widget. Leaving them out would make the rule depend on stickiness — a
+    # distinction the user cannot see and did not ask for.
+    @ink_bands_changed : Bool = false
+    # The LINE SPAN a COMPOUND cell names, in screen coordinates — nil for a cell that names a
+    # single line, whose region is simply its own box. This is the test for WHICH KIND of region a
+    # cell gets, not for whether it is held: both kinds are, differently (PrimitiveBuilder#
+    # centred_in). Placing a compound's label from the span rather than the box is what keeps it
+    # from inheriting the box's threshold — "a" moved 88px for 1px of scroll before this.
+    #
+    # NOT the same question as "is the box pinned" — that is what `span != box` answers, and it is
+    # true for only the 2 currently-shifted compounds out of 325 live cells, so it silently drops
+    # every unpinned compound header (measured; it broke I2 for `cell:r2c`).
+    private def line_span(key : Tuple(Int32, Int32), w : Widget,
+                          box_top : Float64) : Tuple(Float64, Float64)?
+      bounding = get_bounding_box(key)
+      lo_r, hi_r = bounding[0][0], bounding[1][0]
+      cum = @cached_row_physical_cum
+      return nil unless cum && lo_r != hi_r && hi_r + 1 < cum.size
+      # Minus the gutter, because that is how every BOX in this grid is sized (pitch minus
+      # grid_spacing, see the passes). Without it the span is a gutter taller than the box the
+      # label is drawn in, so the label can land outside that box and be clipped there — measured
+      # on the real pivot at scroll 52: label y=427.4 against a box of 388.4..425.4. Matching the
+      # box's own convention keeps the label inside it without clamping to the box, which would
+      # reimport the very threshold placing from the span exists to escape.
+      {ruler_row_height_pixels + cum[lo_r].to_f64 - scroll_offset.y,
+       (cum[hi_r + 1] - cum[lo_r]).to_f64 - grid_spacing}
+    end
+
+    # nil only when the rule can do NOTHING to this cell, which is a real condition rather than a
+    # perf heuristic: a region wholly inside the band is already visible, so the hold's bounds are
+    # inert and the widget's own answer is the rule's answer. Three earlier gates tried to be
+    # cleverer than this and each broke placement; this one is safe because it withdraws exactly
+    # where withdrawal changes nothing.
+    #
+    # A COMPOUND always carries one wherever it sits: its label is placed from the SPAN it names,
+    # so losing the region would switch it to being placed against its box and jump (I1 caught that
+    # as `cell:r1a`, 6px for 1px of scroll).
+    #
+    # The repaint cost this used to carry is NOT paid here — it is skipped below, per cell that can
+    # show nothing. Keeping the two separate is what let the gate go back to being honest.
+    private def ink_region_for(compound : Bool, span_top : Float64, span_size : Float64,
+                               box_top : Float64, lo : Float64, hi : Float64,
+                               pinned : Bool) : Widget::InkRegion?
+      return nil unless span_size > 0.0
+      inert = span_top >= lo && span_top + span_size <= hi
+      # A COMPOUND keeps its region even when it looks inert. Withdrawing it for one whose box
+      # already IS its span was tried on 2026-09-11 — placement is provably identical there, and
+      # the specs confirmed it — and it bought 0.10ms of a 15.8ms frame, which is noise, while
+      # adding a branch to a per-cell per-frame path. The extra repaints are NOT compounds placing
+      # ink where it already was: primitives were 503 either way. They are cells whose ink genuinely
+      # moves as the band edge crosses them, which is what the rule is for.
+      return nil if inert && !compound
+      Widget::InkRegion.new(span_top - box_top, span_size, lo - box_top, hi - box_top,
+        compound, pinned)
+    end
+
+    # Tell each visible cell which region it places ink in, once per frame.
+    #
+    # A region is relative to a moving box, so every carrier changes on a scroll frame. Only the
+    # ones that can be SEEN are repainted (see the skip below); the off-screen two-thirds are not.
+    # SFML demo, 1400x900 with sticky headers: 18.2ms per scroll frame and 55 widgets, from 31.9ms
+    # and 160 — 55 fps against 31. The rest is visible cells whose ink really did move.
+    protected def update_ink_regions : Bool
+      changed = false
+      lo = ruler_row_height_pixels + sticky_row_height_pixels
+      hi = bounds.height
+
+      @active_cells.each do |key, w|
+        row, col = key
+        content_cell = row >= sticky_row_count && col >= sticky_col_count
+        box_top = w.bounds.y - (content_cell ? scroll_offset.y : 0.0)
+        span = line_span(key, w, box_top)
+        span_top, span_size = span || {box_top, w.bounds.height}
+        # THE FACT, from the grid: a compound on a sticky COLUMN that is not in a sticky row has
+        # its Y box positioned and clipped by StickyMath.compound_axis (sticky_reposition.cr:110),
+        # which is what "pinned" means. Derived here rather than recorded by the sticky pass,
+        # because the two passes interleave — `run_sticky_pass` runs both before and after this one
+        # in different frames, so a set filled by it would be a frame stale half the time.
+        pinned = !span.nil? && col < sticky_col_count && row >= sticky_row_count
+        region = ink_region_for(!span.nil?, span_top, span_size, box_top, lo, hi, pinned)
+        next if w.ink_region == region
+        w.ink_region = region
+        # Assigned always, repainted only when it can be SEEN. A widget renders into a backend
+        # clipped to its own bounds (layer_renderer.cr:1667), so a content cell whose box is
+        # outside the band shows nothing and its stale cache cannot be observed. Safe because
+        # visibility cannot change without the region changing: band_lo/band_hi are both stated
+        # relative to box_top, so a box or band that moved yields a different region and lands
+        # here. Sticky cells are excluded — they are repositioned onto their own layers, so their
+        # box is not where they appear.
+        next if content_cell && (box_top >= hi || box_top + w.bounds.height <= lo)
+        # The transient signal only. Both the blit plan and the layer's per-widget path re-render
+        # on needs_render?, and that render rebuilds the primitives — so the cache never has to be
+        # dropped explicitly, and a dropped cache that nothing repaints is a stranded cell.
+        w.mark_needs_render
+        changed = true
+      end
+
+      log_placement(lo, hi, changed)
+      changed
+    end
+
+    # CRYMBLE_PLACEMENT_LOG=1 — the fingerprint for a placement report no fixture reproduces.
+    # Box top, box height and the ink offset inside it discriminate the three candidates: a
+    # changing box height is auto-size re-fitting, a moving box top with a constant offset is the
+    # row moving, and a changing offset is the rule. It found the resize jump in four seconds
+    # after an hour of guessing.
+    private def log_placement(lo : Float64, hi : Float64, changed : Bool) : Nil
+      return unless ENV["CRYMBLE_PLACEMENT_LOG"]?
+      banded = @active_cells.count { |_, w| w.ink_region }
+      STDERR.puts "[place] cells=#{@active_cells.size} banded=#{banded} changed=#{changed} " \
+                  "band=#{lo.round(1)}..#{hi.round(1)} vp_h=#{bounds.height.round(1)} " \
+                  "scroll=#{scroll_offset.y.round(1)}"
+      # SCREEN y, so these can be compared with what is on the glass: a content cell's bounds are
+      # in the scroll view's content space and a sticky cell's are already the screen.
+      @active_cells.each do |key, w|
+        texts = w.to_primitives(w.bounds).select(DrawText)
+        next if texts.empty?
+        t = texts.first
+        next unless key[0] < 3 || texts.size > 1 || t.text.includes?('\n')
+        content = key[0] >= sticky_row_count && key[1] >= sticky_col_count
+        top = w.absolute_bounds.y - (content ? scroll_offset.y : 0.0)
+        STDERR.puts "  cell #{key[0]},#{key[1]} screen_ink=#{(top + t.position.y).round(1)} " \
+                    "box=(#{top.round(1)},h#{w.bounds.height.round(1)}) ink=+#{t.position.y.round(1)} " \
+                    "lines=#{texts.size} region=#{w.ink_region.inspect} " \
+                    "text=#{t.text.gsub('\n', "\\n")[0, 12].inspect}"
+      end
+      # ...and the RULER's own numbers, half of every "these are not on one line" report and
+      # missing from this log entirely until #88.
+      {row_ruler_widget, col_ruler_widget}.each do |rw|
+        next unless rw
+        rw.to_primitives(rw.bounds).each do |p|
+          next unless p.is_a?(DrawText)
+          next if p.text.empty?
+          STDERR.puts "  ruler #{p.text.inspect} screen_ink=#{(rw.absolute_bounds.y + p.position.y).round(1)}"
+        end
+      end
+    end
+
     def get_bounding_box(cell : Tuple(Int32, Int32)) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
       if adapter = @adapter
         adapter.cell_get_bounding_box(cell[0], cell[1])
@@ -832,7 +1403,13 @@ module CrymbleUI
     # measure-based default IS its min.) Mirrors row_height_pixels' per-row sizing.
     def min_intrinsic_height(width : Float64) : Float64
       return super if @shrink_to_content
-      first_row = @rows > 0 ? grid_spacing + (@row_heights[0]? || DEFAULT_ROW_HEIGHT) * frame_height : 0.0
+      # ONE DEFAULT ROW, never row 0's actual height. The floor exists so a grid cannot collapse to
+      # nothing; reading the real size made it follow CONTENT, and a 60-line value in row 0 then
+      # drove the floor to 888px — WindowPanel grows a panel to its content floor, so the Shape got
+      # taller instead of scrolling and the matrix's own scrollbar went off-screen with it.
+      # A row taller than the viewport is exactly the case that must scroll, not the case that must
+      # fit.
+      first_row = @rows > 0 ? grid_spacing + DEFAULT_ROW_HEIGHT * frame_height : 0.0
       ruler_row_height_pixels + first_row
     end
 
@@ -842,7 +1419,10 @@ module CrymbleUI
     # min's no-sticky-row) and no scrollbar reservation, keeping the dual symmetric.
     def min_intrinsic_width(height : Float64) : Float64
       return super if @shrink_to_content
-      first_col = @cols > 0 ? grid_spacing + (@col_widths[0]? || DEFAULT_COLUMN_WIDTH) * frame_height : 0.0
+      # The dual, same reason: measured 3414px of floor in a 1400px window from one content-sized
+      # first column, which laid the ScrollView out wider than the screen and put its scrollbar
+      # where nothing could click it (hit_test returned nil at the visible bottom edge).
+      first_col = @cols > 0 ? grid_spacing + DEFAULT_COLUMN_WIDTH * frame_height : 0.0
       ruler_col_width_pixels + first_col
     end
 
@@ -890,6 +1470,10 @@ module CrymbleUI
       zoom_ratio = current_zoom / @last_zoom_factor
       @scroll_offset.set(Vec2.new(scroll_offset.x * zoom_ratio, scroll_offset.y * zoom_ratio))
       @last_zoom_factor = current_zoom
+      # Content sizes do not simply scale: a cell's text scales with zoom but its padding and
+      # border do not, so sizes computed at the old zoom no longer fit the content at the new
+      # one — cut markers would reappear under a mode that promises to fit. Re-measure.
+      @auto_size_pending = true if @auto_size
       invalidate_dimension_caches
       @cached_total_width = nil
       @cached_total_height = nil
@@ -1052,6 +1636,9 @@ module CrymbleUI
     private def sync_scroll_offsets
       scroll_view = @content_scroll_view.not_nil!
 
+      # Same reason as in refresh_after_size_change: mid-re-measure the grid is at its default
+      # size, and clamping against that maximum (zero) would throw away where the user was.
+      return if remeasure_pending?
       # Clamp scroll offset to valid range after resize
       clamped_x = scroll_offset.x.clamp(0.0, max_content_scroll_x)
       clamped_y = scroll_offset.y.clamp(0.0, max_content_scroll_y)
@@ -1246,19 +1833,11 @@ module CrymbleUI
     # cells, then invalidate the ruler nodes (sizes aren't Sources — see
     # mark_ruler_widgets_dirty). Coalesced so a fast drag does this ONCE per frame.
     private def flush_resize_update
-      ruler_w = ruler_col_width_pixels
-      ruler_h = ruler_row_height_pixels
-      if crw = @corner_ruler_widget
-        crw.layout(BoxConstraints.tight(Size.new(ruler_w + sticky_col_width_pixels, ruler_h)), Vec2.zero)
-      end
-      if strip = @corner_row_strip_widget
-        strip.layout(BoxConstraints.tight(Size.new(ruler_w, sticky_row_height_pixels)), Vec2.new(0.0, ruler_h))
-      end
-      if sv = @content_scroll_view
-        sv.sticky_row_height = sticky_row_height_pixels + ruler_row_height_pixels
-        sv.sticky_col_width = sticky_col_width_pixels + ruler_col_width_pixels
-        sv.update_sticky_layer_bounds
-      end
+      # The sticky work is the same as every non-gesture path's; the drag's own part is the reflow
+      # and the axis-selective ruler mark below. (The extents are NOT refreshed here: live extents
+      # mid-gesture would make a scrollbar appear under the single-boundary blit-shift, so they land
+      # in the mouse-up layout — see refresh_after_size_change.)
+      refresh_sticky_geometry
       vp_w = @content_layer.try(&.bounds.width) || bounds.width
       vp_h = @content_layer.try(&.bounds.height) || bounds.height
       update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
@@ -1283,6 +1862,7 @@ module CrymbleUI
     # Flushes deferred scroll/invalidation updates so cells are created/destroyed once per frame,
     # not on every mouse event during scrollbar thumb drag.
     def pre_render_flush
+      repositioned = false
       # Deferred scroll flush (5e2f3ee): sync_from_scroll_view only flagged the change and
       # shifted the compositor; run the expensive cell create/destroy here, once per frame —
       # not once per queued mouse event. Must run BEFORE the change-animation scan below so it
@@ -1291,7 +1871,10 @@ module CrymbleUI
         @pending_scroll_update = false
         vp_w = @content_layer.try(&.bounds.width) || bounds.width
         vp_h = @content_layer.try(&.bounds.height) || bounds.height
-        update_visible_cells(vp_w, vp_h) if vp_w > 0 && vp_h > 0
+        if vp_w > 0 && vp_h > 0
+          update_visible_cells(vp_w, vp_h)
+          repositioned = true
+        end
       end
 
       # Deferred resize flush: a resize drag only flagged @pending_resize_update per
@@ -1320,6 +1903,7 @@ module CrymbleUI
         flush_invalidate_all
         # Recreate cells immediately (layout may not run if only mark_needs_render)
         trigger_update_visible_cells
+        repositioned = true
         # Refresh proxy focus: old cell widgets were destroyed, new ones created.
         # Without this, @proxy_focused_widget points to a dead widget.
         update_proxy_focus if focused?
@@ -1327,24 +1911,110 @@ module CrymbleUI
         flush_cell_invalidations
         # Recreate destroyed cells
         trigger_update_visible_cells
+        repositioned = true
         update_proxy_focus if focused?
       end
 
-    end
-
-    # Full invalidation: re-read dimensions, destroy all active cells
-    private def flush_invalidate_all
-      if adapter = @adapter
-        row_order, col_order = adapter.get_scrollorder
-        @rows = row_order.size
-        @cols = col_order.size
-        @row_heights, @col_widths = adapter.get_sizes
+      # Content sizing runs AFTER the invalidation processing, never before: flush_invalidate_all
+      # reinstalls `adapter.get_sizes` over @col_widths/@row_heights, so a re-measure done first
+      # would be silently overwritten and the mode would appear to do nothing after any
+      # structural change. The write ORDER is the whole point.
+      if @fit_pending
+        @fit_pending = false # cleared here, the symmetric counterpart of the drag closing itself
+        flush_fit_cells
       end
 
-      # Invalidate dimension caches (row/col count may have changed)
-      invalidate_dimension_caches
+      if handover = @auto_size_handover
+        @auto_size_handover = nil
+        if adapter = @adapter
+          # The same route a finished drag takes (`on_mouse_up`), for the same reason: sizes the
+          # user owns live in the adapter, or the next rebuild's `get_sizes` would discard them.
+          # The arrays were dup'd at capture, so the adapter gets its own — writing @col_widths
+          # in place later must not edit the stored sizes behind its back.
+          adapter.custom_row_heights, adapter.custom_col_widths = handover
+          # Read straight back rather than assuming: `get_sizes` re-fits the arrays to the
+          # current row/column count, and that fit — not what we just wrote — is what the next
+          # rebuild will produce. Everything below then reconciles to sizes that are already
+          # settled, instead of leaving the surfaces one frame behind a later correction.
+          @row_heights, @col_widths = adapter.get_sizes
+          destroy_active_cells
+          @force_cell_update = true
+          refresh_after_size_change
+          mark_ruler_widgets_dirty_for_axis
+          mark_needs_clear_and_render_all_layers
+          trigger_update_visible_cells
+          repositioned = true
+          update_proxy_focus if focused?
+        end
+      end
 
-      # Destroy all active cells
+      if @auto_size_pending
+        @auto_size_pending = false
+        flush_auto_size
+        # Recreate immediately, for the same reason the invalidation path above does: the cells
+        # were torn down, and a frame that only marks needs_render would otherwise leave the
+        # matrix with no cells at all until some later layout happened to run.
+        trigger_update_visible_cells
+        repositioned = true
+        update_proxy_focus if focused?
+      end
+
+      # LAST: a sticky cell can need a repaint with nothing scheduling one.
+      #
+      # Sticky layers are not viewport_cache — they are painted ONLY by the two passes below, and
+      # every other route to those passes goes through `update_visible_cells`, i.e. a scroll or a
+      # pending update. A cell whose VISUAL state changed IN PLACE therefore marked itself and was
+      # never repainted: leaving an editor drops its caret (needs_render set, primitive cache
+      # dropped — both verified), but the layer kept the texture it last blitted, one drawn while
+      # the caret was showing. The user cleared it by doing something unrelated — Ctrl+0, a click —
+      # because those run a pass (field report 2026-09-05).
+      #
+      # Runs after every flush above so it sees the settled state, and only when sticky lines exist
+      # at all: O(visible) booleans, short-circuited on the first cell that wants painting.
+      # ...unless one of the flushes above already ran a pass for this frame; running it twice is
+      # pure duplicated work on exactly the structural frames that are already the expensive ones.
+      # LAST: a sticky cell can need a repaint with nothing scheduling one.
+      #
+      # Sticky layers are not viewport_cache — they are painted ONLY by the two passes, and every
+      # other route to those goes through `update_visible_cells`, i.e. a scroll or a pending update,
+      # not every frame. A cell whose VISUAL state changed IN PLACE therefore marked itself and was
+      # never repainted: leaving an editor drops its caret, but the layer kept the texture it last
+      # blitted — one drawn while the caret showed. The user cleared it with Ctrl+0 or a click,
+      # because those run a pass (field report 2026-09-05).
+      #
+      # The signal is the LAYER's own flag, not a scan of the cells: `mark_needs_render` already
+      # propagates to the explicit `render_layer` a sticky cell carries (widget.cr propagate_to_layer,
+      # whose comment names this very case), so the mark is O(1) at the source and this is three
+      # boolean reads per frame. Marking alone does not repaint a sticky layer — only a pass
+      # positions and plans its cells — which is why the flag needs answering here rather than
+      # being left to the renderer. Verified: on the frame after an editor closes the row and col
+      # layers read true, and nothing else ran.
+      #
+      # Skipped when a flush above already ran a pass for this frame: doing it twice is duplicated
+      # work on exactly the structural frames that are already the expensive ones.
+      # The ink rule, once per frame and HERE rather than inside a pass: a pass only MARKS its
+      # layers for repaint, so a cache invalidation raised inside one lands after that frame's
+      # paint opportunity and the cell is left waiting — the very defect the block below exists
+      # to prevent. Raised here, the mark reaches the layer through the same route, and the
+      # answering pass runs before the renderer paints.
+      @ink_bands_changed = update_ink_regions
+
+      # ...and an ink-only change must answer even when a flush above already ran a pass: that
+      # pass ran BEFORE the bands were derived, so it cannot have painted them.
+      if @ink_bands_changed || !repositioned
+        sv = @content_scroll_view
+        if sv && (sv.sticky_row_layer.try(&.needs_render?) ||
+                  sv.sticky_col_layer.try(&.needs_render?) ||
+                  sv.sticky_corner_layer.try(&.needs_render?))
+          run_sticky_pass
+        end
+      end
+    end
+
+    # ONE owner of the cell teardown: an in-progress edit is committed before its widget goes,
+    # and proxy focus is dropped so nothing points at a dead cell. Both the full invalidation
+    # and the auto-size re-measure need exactly this.
+    private def destroy_active_cells : Nil
       @active_cells.each do |_key, widget|
         if @proxy_focused_widget == widget
           commit_proxy_edit
@@ -1357,10 +2027,28 @@ module CrymbleUI
         @children.delete(widget)
       end
       @active_cells.clear
+    end
+
+    # Full invalidation: re-read dimensions, destroy all active cells
+    private def flush_invalidate_all
+      if adapter = @adapter
+        row_order, col_order = adapter.get_scrollorder
+        @rows = row_order.size
+        @cols = col_order.size
+        @row_heights, @col_widths = adapter.get_sizes
+      end
+
+      # The adapter's sizes have just been reinstalled; when content sizing is on, the computed
+      # ones must be recomputed on top of them (see the flush order in pre_render_flush).
+      @auto_size_pending = true if @auto_size
+
+      destroy_active_cells
 
       clear_all_vm_layers_for_invalidate
 
       @force_cell_update = true
+
+      refresh_after_size_change
     end
 
     # Clear every VM-owned layer to erase pixels painted under a superseded adapter
@@ -1420,7 +2108,7 @@ module CrymbleUI
 
     private def update_visible_cells(viewport_width : Float64, viewport_height : Float64)
       {% if flag?(:PERF_LOG) || flag?(:CURSOR_PERF) %}
-        _uvc_start = Time.monotonic
+        _uvc_start = Time.instant
       {% end %}
       # === VIEWPORT STICKY MATH with incremental cache ===
       # Strategy: cache cumulative array per-resize (O(n) once), bsearch per-scroll (O(log n)),
@@ -1553,21 +2241,17 @@ module CrymbleUI
       # Early exit if visible indices haven't changed
       unless exact_indices_changed
         {% if flag?(:PERF_LOG) %}
-          _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+          _uvc_elapsed = (Time.instant - _uvc_start).total_milliseconds
           if _uvc_elapsed > 0.1
             File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC EARLY-EXIT: #{_uvc_elapsed.round(2)}ms scroll=#{scroll_offset.x.round(0)},#{scroll_offset.y.round(0)} active=#{@active_cells.size} sync=#{@layer_widgets_need_sync}" }
           end
         {% end %}
         {% if flag?(:CURSOR_PERF) %}
-          _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+          _uvc_elapsed = (Time.instant - _uvc_start).total_milliseconds
           File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(early-exit): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size}" }
         {% end %}
         # Update visual states for cursor/highlight (lightweight, O(active_cells))
-        if sticky_cells_can_use_blit_plan?
-          compute_sticky_blit_plans
-        else
-          reposition_sticky_cells
-        end
+        run_sticky_pass
         # Bug 2 fix: Ensure layer.widgets is synced even on early-exit
         # After rebuild, new layer has empty widgets but active_cells may exist
         ensure_layer_widgets_synced
@@ -1714,6 +2398,9 @@ module CrymbleUI
           end
         end
 
+        if ENV["CRYMBLE_STICKY_LOG"]?
+          STDERR.puts "[sticky] LAYOUT path: handles=#{handle_cells.size} row_shifting=#{row_shifting_index} col_shifting=#{col_shifting_index} scroll=#{scroll_offset}"
+        end
         compound_visible_sizes, compound_clipped_pos = compute_compound_visible_sizes(
           handle_cells, visible_cols, visible_rows,
           col_sizes, row_sizes,
@@ -1927,11 +2614,7 @@ module CrymbleUI
         # texture) is routed to render_list by compute_sticky_blit_plans; every other sticky cell merely
         # moved → its cached texture is blitted at the new position, instead of a full sticky-layer clear
         # + re-render of every header. (reposition_sticky_cells stays the fallback when nothing blits.)
-        if sticky_cells_can_use_blit_plan?
-          compute_sticky_blit_plans
-        else
-          reposition_sticky_cells
-        end
+        run_sticky_pass
 
         # Sync cell widgets to appropriate layers and mark new cells for render
         if cells_created || cells_destroyed || @active_cells.any?
@@ -1946,13 +2629,13 @@ module CrymbleUI
         end
       end
       {% if flag?(:PERF_LOG) %}
-        _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+        _uvc_elapsed = (Time.instant - _uvc_start).total_milliseconds
         if _uvc_elapsed > 0.1
           File.open("/tmp/uvc_perf.txt", "a") { |f| f.puts "UVC FULL: #{_uvc_elapsed.round(2)}ms scroll=#{scroll_offset.x.round(0)},#{scroll_offset.y.round(0)} active=#{@active_cells.size} new=#{new_cells_count || 0}" }
         end
       {% end %}
       {% if flag?(:CURSOR_PERF) %}
-        _uvc_elapsed = (Time.monotonic - _uvc_start).total_milliseconds
+        _uvc_elapsed = (Time.instant - _uvc_start).total_milliseconds
         File.open("/tmp/cursor_perf_tut22.log", "a") { |f| f.puts "  UVC(full): #{_uvc_elapsed.round(2)}ms active=#{@active_cells.size} new=#{new_cells_count || 0} destroyed=#{cells_to_remove.try(&.size) || 0}" }
       {% end %}
       # Cells enter and leave @children here, not via add_child/remove_child, and this runs from
@@ -2346,8 +3029,31 @@ module CrymbleUI
         # the constructor's fresh get_sizes arrays instead: a carried short array would
         # raise IndexError in the scroll clamp below (see fit_custom_sizes' history note).
         if old.rows == @rows && old.cols == @cols
-          @col_widths = old.col_widths
-          @row_heights = old.row_heights
+          # DUP, not the array itself: assigning the reference left both matrices sharing ONE
+          # buffer (measured — `new.@col_widths.same?(old.@col_widths)`, and a write through the old
+          # instance was visible in the new one). Harmless while the old instance is discarded
+          # immediately, and a trap the moment anything writes a size through it.
+          @col_widths = old.col_widths.dup
+          @row_heights = old.row_heights.dup
+          # Carry the MODE with the sizes it produced — but never over a value this instance's
+          # consumer already set: a DSL builds and configures the new widget first, and
+          # reconciliation runs afterwards, so clobbering here would silently undo the
+          # assignment that just turned the mode on.
+          @auto_size = old.auto_size unless @auto_size_explicit
+          # The mode did not change across this rebuild and the sizes came with it, so there is
+          # nothing to recompute; without this every rebuild would pay a full re-measure whose
+          # result the carry above had already provided.
+          @auto_size_pending = false if old.auto_size == @auto_size
+          # The mode was just switched OFF. A DSL consumer expresses that by building a fresh
+          # widget with the property already false, so the setter never runs and cannot schedule
+          # the handover — the sizes carried above would stay on screen but stay unowned, and the
+          # next rebuild's `get_sizes` would drop them. Detect the drop here instead.
+          if old.auto_size && !@auto_size
+            @auto_size_handover = {@row_heights.dup, @col_widths.dup}
+            # Ask for the frame that will process it: the setter is what normally does this, and
+            # it never ran here — the DSL handed us a widget that was already false.
+            mark_needs_layout
+          end
         end
 
         # CLEAR (the invariant: no retained buffer pixel outlives its painter).
@@ -2393,11 +3099,19 @@ module CrymbleUI
         col = rc[1].clamp(0, {@cols - 1, 0}.max)
         self.cursor_rc = {row, col}
 
-        # Clamp scroll offset to new grid bounds (e.g. after switching to smaller adapter)
-        @scroll_offset.set(Vec2.new(
-          scroll_offset.x.clamp(0.0, max_content_scroll_x),
-          scroll_offset.y.clamp(0.0, max_content_scroll_y)
-        ))
+        # Clamp scroll offset to new grid bounds (e.g. after switching to smaller adapter) — but
+        # NOT while a re-measure is queued. A reconciled instance starts at the ADAPTER's sizes and
+        # only gets its content-measured ones in `flush_auto_size`, later in the same frame; the
+        # maximum here is therefore computed from a grid that is briefly its default size (measured:
+        # 89px of content against a 402px viewport where the real content is 654px), so this clamps
+        # every scrolled position to zero. Inserting a record while scrolled threw the view back to
+        # the top (field report). The flush re-clamps against the final geometry.
+        unless remeasure_pending?
+          @scroll_offset.set(Vec2.new(
+            scroll_offset.x.clamp(0.0, max_content_scroll_x),
+            scroll_offset.y.clamp(0.0, max_content_scroll_y)
+          ))
+        end
 
         # Rebind adapter callbacks to this (new) widget instance
         if adapter = @adapter

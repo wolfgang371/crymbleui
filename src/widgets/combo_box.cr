@@ -27,13 +27,14 @@ module CrymbleUI
   # combo_box(items: ["Apple", "Banana", "Cherry"], bind: @pick) # non-editable, index-only
   # ```
   #
-  # ## Editable mode (opt-in)
+  # ## Offering a value the list does not have (opt-in)
   #
   # By default a ComboBox can only commit one of its `items`. Pass
-  # `editable: true` and submitting text that matches no item commits it as a
-  # custom value — `on_select` fires with `ComboBoxPopup::CUSTOM_INDEX` (-1) and
-  # the typed string, and the collapsed cell displays it. Used where the list is
-  # a set of *suggestions* rather than the only valid answers (e.g. resolving a
+  # `allow_custom: true` and a `(custom...)` row is appended below them; choosing it
+  # fires `on_custom_requested` with the filter text as a prefill, and the CONSUMER
+  # supplies the input UI. The filter box stays a filter, and Enter always confirms the
+  # highlighted row. Used where the list is a set of *suggestions* rather than the only
+  # valid answers (e.g. resolving a
   # merge conflict to a value that is neither candidate). Leave it off where the
   # value must be an existing item (e.g. reference cells).
   class ComboBox < Widget
@@ -51,15 +52,16 @@ module CrymbleUI
     # Currently selected index (reactive_property + reconcile for auto state preservation)
     reactive_property selected_index : Int32 = 0, reconcile: true
 
-    # When editable, a committed value not in @items (free-typed) is kept here so
-    # the collapsed cell can display it; reconcile so it survives a DSL
-    # rebuild like selected_index does. nil for a normal item pick.
-    reactive_property custom_text : String? = nil, reconcile: true
+    # Opt-in: when true, the popup appends a `(custom...)` row that ASKS the consumer for
+    # a value instead of selecting one. Default combos — e.g. reference cells, whose value
+    # must be an existing item — stay off, and for those the list really is the whole
+    # answer space.
+    @allow_custom : Bool = false
 
-    # Opt-in: when true, the popup commits free-typed text that matches no item
-    # as a custom value (CUSTOM_INDEX) instead of cancelling. Default combos —
-    # e.g. reference cells, whose value must be an existing item — stay off.
-    @editable : Bool = false
+    # Fired when the `(custom...)` row is chosen, with the filter box's text as a prefill.
+    # The consumer supplies the input UI: converting and validating a typed value against
+    # whatever the list stands for is application knowledge, not widget knowledge.
+    property on_custom_requested : Proc(String, Nil)? = nil
 
     # Popup reference (NOT a child - uses Window.overlays)
     @current_popup : ComboBoxPopup?
@@ -128,12 +130,12 @@ module CrymbleUI
       elsif @items.empty? && (ct = @collapsed_text)
         ct # lazy mode, pre-expand: the caller-supplied display (no item list built yet)
       else
-        custom_text # editable free-typed value committed out of @items range, or nil
+        nil
       end
     end
 
-    def editable? : Bool
-      @editable
+    def allow_custom? : Bool
+      @allow_custom
     end
 
     # Close popup when ComboBox loses focus (e.g., Tab key)
@@ -170,13 +172,13 @@ module CrymbleUI
       text_background_color : Color? = nil,
       text_background_colors : Array(Color)? = nil,
       background_color : Color? = nil,
-      editable : Bool = false,
+      allow_custom : Bool = false,
       bind : Source(Int32)? = nil,
       &block : Int32, String -> Nil
     )
       # bind: adopts a caller-owned index cell (two-way). Index-only: not compatible with an editable
       # combo (free-typed custom_text can't round-trip through an Int32) or a non-default selected: seed.
-      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with editable: or a non-default selected:") if bind && (editable || selected != 0)
+      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with allow_custom: or a non-default selected:") if bind && (allow_custom || selected != 0)
       @text_background_color = Source(Color?).new(text_background_color)
       @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @background_color = Source(Color?).new(background_color)
@@ -186,7 +188,7 @@ module CrymbleUI
       @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
       @_build_selected_index = selected_index
       @explicit_width = width
-      @editable = editable
+      @allow_custom = allow_custom
       @on_select = block
       # NO TextInput child - it's in the popup when expanded
     end
@@ -200,12 +202,12 @@ module CrymbleUI
       text_background_color : Color? = nil,
       text_background_colors : Array(Color)? = nil,
       background_color : Color? = nil,
-      editable : Bool = false,
+      allow_custom : Bool = false,
       on_select : Proc(Int32, String, Nil)? = nil,
       bind : Source(Int32)? = nil,
     )
       # bind: adopts a caller-owned index cell (two-way). Index-only — see the block ctor's note.
-      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with editable: or a non-default selected:") if bind && (editable || selected != 0)
+      raise ArgumentError.new("ComboBox: bind: is index-only — not compatible with allow_custom: or a non-default selected:") if bind && (allow_custom || selected != 0)
       @text_background_color = Source(Color?).new(text_background_color)
       @text_background_colors = Source(Array(Color)?).new(text_background_colors)
       @background_color = Source(Color?).new(background_color)
@@ -215,7 +217,7 @@ module CrymbleUI
       @bind_source = bind if bind # stability guard: hold the adopted Source to detect fresh-per-build
       @_build_selected_index = selected_index
       @explicit_width = width
-      @editable = editable
+      @allow_custom = allow_custom
       @on_select = on_select
       # NO TextInput child - it's in the popup when expanded
     end
@@ -229,6 +231,7 @@ module CrymbleUI
       items_provider : -> LazyItems,
       background_color : Color? = nil,
       id : String? = nil,
+      allow_custom : Bool = false,
       &block : Int32, String -> Nil
     )
       @text_background_color = Source(Color?).new(nil)
@@ -241,6 +244,12 @@ module CrymbleUI
       @selected_index = Source(Int32).new(0)
       @_build_selected_index = 0
       @on_select = block
+      # allow_custom belongs on THIS ctor too, and that is the point of putting it here:
+      # the eager ctor takes a value list but has no collapsed text (selected_value always
+      # returns an item), while this one supplies the collapsed string. A caller that needs
+      # BOTH — a cell showing something of its own AND a way to offer a value the list does
+      # not have — had no constructor to use. Now it does.
+      @allow_custom = allow_custom
     end
 
     # Override label for path_id generation
@@ -248,9 +257,35 @@ module CrymbleUI
       "combo_box"
     end
 
+    # The exact string the collapsed box paints. Two sites built it independently before this
+    # (measure and to_primitives) and content_width would have been a third — and the "»" is
+    # part of the drawn text, so a consumer measuring only the value would come up short.
+    # Reads `selected_value`, which serves lazy mode from @collapsed_text and does NOT touch
+    # items_provider, so asking for a width never builds the dropdown.
+    private def collapsed_display_text : String
+      "»#{selected_value || ""}"
+    end
+
+    # The width this box's collapsed content needs — the drawn string plus the chrome around it.
+    #
+    # Deliberately neither `measure` (which fills its constraint) nor `min_intrinsic_width`
+    # (a resize FLOOR that WindowPanel feeds into panel_min_width). See TextInput#content_width.
+    def content_width : Float64
+      ComboBox.content_width_for(selected_value || "")
+    end
+
+    # The same, for a consumer that knows the value but must not BUILD the widget to measure it —
+    # a matrix adapter measuring a screenful of cells, where constructing each one would pay for
+    # the cell's side effects (embrace's `cell_natural_size`). The prefix,
+    # the font scale and the chrome all belong to this class, so a caller copying them here is the
+    # drift this method exists to prevent.
+    def self.content_width_for(value : String, font_size : Float64 = FontSizing.calculate_size(FONT_SCALE)) : Float64
+      Widget.measure_text("»#{value}", font_size).width + (PADDING + BORDER_WIDTH) * 2
+    end
+
     # Measure collapsed state - text "»{value}" with padding
     def measure(constraints : BoxConstraints) : Size
-      display_text = "»#{selected_value || ""}"
+      display_text = collapsed_display_text
       font_size = FontSizing.calculate_size(FONT_SCALE)
       text_size = Widget.measure_text(display_text, font_size)
 
@@ -287,7 +322,7 @@ module CrymbleUI
 
     # Render collapsed state as primitives
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-      display_text = "»#{selected_value || ""}"
+      display_text = collapsed_display_text
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
       # A disabled combo renders dimmed and does not open (mirrors Button) — for
       # callers that keep the control in place when there's nothing to pick (e.g.
@@ -304,9 +339,28 @@ module CrymbleUI
         # Text (vertically centered in content area, matching TextInput alignment)
         content_y = BORDER_WIDTH + PADDING
         content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
-        text_y = vcentered_text_y(content_height, FONT_SCALE, content_y)
+        # Anchored as a BLOCK. A referenced value can carry line breaks — measure_text now
+        # reserves a slot per line and SFML renders them natively — so at a row dragged tall
+        # enough to read one, a collapsed reference cell centred as a single line would sit
+        # at a different height from the text cell beside it, in the same row. Identical to
+        # vcentered_text_y for a single line, at every box height.
+        text_y = vcentered_block_y(content_height, TextLines.count(display_text), FONT_SCALE, content_y)
         text_pos = Vec2.new(PADDING, text_y)
-        draw_text(display_text, text_pos, txt_color, FONT_SCALE)
+        # Say so where the value is cut, BEFORE the clip so the band sits behind the glyphs.
+        # Derived from the colour actually painted above — callers tint this cell — and
+        # measuring the DRAWN string, since the "»" is part of it here.
+        font_px = FontSizing.calculate_size(FONT_SCALE)
+        mark_clipped_text(
+          clipped_text_bands(Rect.new(PADDING, text_y, bounds.width - PADDING * 2, font_px),
+            0.0, measure_text(display_text, font_px).width),
+          on: background_color || Theme.current.combo_background)
+        # X-only clip to the text's own box, so a long value stops where that box ends
+        # instead of running over the padding and the border ring. Y stays unclipped: a
+        # tight matrix cell centres a full-size font in a shorter box, so the glyphs
+        # legitimately overhang it. The ring above is emitted OUTSIDE the clip and survives.
+        clipped(Rect.new(PADDING, 0.0, bounds.width - PADDING * 2, bounds.height), within: local_bounds) do
+          draw_text(display_text, text_pos, txt_color, FONT_SCALE)
+        end
       end
     end
 
@@ -366,12 +420,16 @@ module CrymbleUI
         max_height: 200.0,
         text_background_color: text_background_color,
         text_background_colors: text_background_colors,
-        editable: @editable
+        allow_custom: @allow_custom
       )
 
       # Wire up callbacks
       popup.on_select = ->(idx : Int32, val : String) {
         select_and_close(idx, val)
+      }
+      popup.on_custom_requested = ->(prefill : String) {
+        collapse
+        @on_custom_requested.try(&.call(prefill))
       }
       popup.on_cancel = -> {
         collapse
@@ -437,13 +495,10 @@ module CrymbleUI
     # Select item and close popup
     def select_and_close(index : Int32, value : String)
       self.selected_index = index
-      # An out-of-@items index marks a free-typed (editable) value: keep it for
-      # the collapsed display since it isn't a list item. A normal pick clears it.
-      self.custom_text = item_index?(index) ? nil : value
       # Lazy mode delivers the item's PAYLOAD (e.g. a reference rank) rather than its list index — the
       # payloads ride reconcile alongside the popup, so this stays correct after a rebuild-while-open.
-      # payloads is item-aligned (asserted in expand) and lazy mode is non-editable, so a real item
-      # index is always in range; a CUSTOM_INDEX only reaches here in editable (non-lazy) mode.
+      # payloads is item-aligned (asserted in expand), and a custom request never reaches here —
+      # it has its own callback — so a real item index is always in range.
       if (payloads = @lazy_payloads) && item_index?(index)
         @on_select.try(&.call(payloads[index], value))
       else

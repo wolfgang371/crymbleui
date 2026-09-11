@@ -134,17 +134,26 @@ module CrymbleUI
       ew = effective_viewport_width
       eh = effective_viewport_height
 
+      # A sticky extent BIGGER than the viewport is possible — the sizes come from the consumer's
+      # grid, and a resize drag has no upper bound. Unclamped it laid these layers outside the
+      # widget, compositing over whatever sits next to it, while the perpendicular subtraction below
+      # went to zero and took the other header strip with it (measured: a tall sticky row collapsed
+      # the sticky COLUMN layer to 0.0 height). Bounding it here, where the value is read, covers
+      # every producer — content sizing, the drag, and any future one.
+      sticky_w = Math.min(@sticky_col_width, Math.max(0.0, ew))
+      sticky_h = Math.min(@sticky_row_height, Math.max(0.0, eh))
+
       natural = case layer
       when @internal_layer
         Rect.new(abs.x, abs.y, Math.max(0.0, ew), Math.max(0.0, eh))
       when @scrollbar_layer
         Rect.new(abs.x, abs.y, Math.max(0.0, @viewport_size.width), Math.max(0.0, @viewport_size.height))
       when @sticky_row_layer
-        Rect.new(abs.x + @sticky_col_width, abs.y, Math.max(0.0, ew - @sticky_col_width), @sticky_row_height)
+        Rect.new(abs.x + sticky_w, abs.y, Math.max(0.0, ew - sticky_w), sticky_h)
       when @sticky_col_layer
-        Rect.new(abs.x, abs.y + @sticky_row_height, @sticky_col_width, Math.max(0.0, eh - @sticky_row_height))
+        Rect.new(abs.x, abs.y + sticky_h, sticky_w, Math.max(0.0, eh - sticky_h))
       when @sticky_corner_layer
-        Rect.new(abs.x, abs.y, @sticky_col_width, @sticky_row_height)
+        Rect.new(abs.x, abs.y, sticky_w, sticky_h)
       else
         abs
       end
@@ -745,6 +754,27 @@ module CrymbleUI
       # Update visibility and render only scrollbar (no layout needed!)
       update_visibility_on_scroll
       mark_scrollbar_needs_render
+    end
+
+    # Adopt new content extents WITHOUT a layout — the entry point a consumer needs when it changes
+    # the size of what it scrolls between layouts (VirtualMatrix content sizing).
+    #
+    # `content_size=` alone is invisible: it is a reconcile_property whose setter is a bare
+    # assignment, so `needs_horizontal_scrollbar?` flips while the scrollbar layer keeps serving its
+    # cached primitives. Marking the widget for render is not enough either — MEASURED: with the
+    # content grown, `content_size=` + `invalidate_primitive_cache` + `mark_needs_render` on both
+    # widgets, over two frames, still left 8320 pixels (a full 16px strip) differing from the same
+    # state after a layout. The scrollbar's chrome GEOMETRY is established in `perform_layout`, so
+    # the layer itself has to be laid out; `Layer#mark_needs_layout` bumps the render rev, which
+    # `layer.cr` documents as kept exactly so a bare call here can never silently no-render.
+    #
+    # The clamp is part of the contract: shrinking the content can strand the offset past its end.
+    def refresh_extents(size : Size) : Nil
+      return if @content_size == size
+      self.content_size = size
+      clamp_scroll_offset
+      mark_scrollbar_needs_render
+      @scrollbar_layer.try(&.mark_needs_layout)
     end
 
     private def clamp_scroll_offset

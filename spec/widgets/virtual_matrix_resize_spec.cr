@@ -81,6 +81,49 @@ end
 
 # Interactive column/row resize via ruler border drag
 describe "VirtualMatrix interactive resize", tags: "slow" do
+  # A consumer that sizes lines to their content must be able to refuse the gesture,
+  # or the user's drag would simply be overwritten by the next re-measure. `detect_resize_edge`
+  # is the single choke point for BOTH the gesture and the cursor, so one gate covers both.
+  # Each example carries its `= true` control, so a mis-computed border coordinate cannot pass
+  # as "refused".
+  describe "interactive_resize = false" do
+    it "refuses the drag: the width does not move" do
+      _renderer, _app, matrix = make_resize_matrix
+      before = matrix.get_col_width(0)
+
+      matrix.interactive_resize = true # control: the gesture is reachable at this coordinate
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
+      matrix.get_col_width(0).should be > before
+
+      widened = matrix.get_col_width(0)
+      matrix.interactive_resize = false
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 40.0, 10.0))
+      matrix.get_col_width(0).should eq(widened)
+      matrix.resize_axis.should eq(CrymbleUI::VirtualMatrix::ResizeAxis::None)
+    end
+
+    it "offers no resize cursor where it would otherwise" do
+      _renderer, app, matrix = make_resize_matrix
+
+      matrix.interactive_resize = true # control
+      app.get_cursor_for_point(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+        .should eq CrymbleUI::CursorType::SizeHorizontal
+
+      matrix.interactive_resize = false
+      app.get_cursor_for_point(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+        .should eq CrymbleUI::CursorType::Arrow
+    end
+
+    it "is on by default" do
+      _renderer, _app, matrix = make_resize_matrix
+      matrix.interactive_resize.should be_true
+    end
+  end
+
   describe "cursor changes on column border hover" do
     it "shows SizeHorizontal cursor near column 0 right border" do
       _renderer, app, _matrix = make_resize_matrix
@@ -610,5 +653,96 @@ describe "VirtualMatrix grow-while-scrolled keeps a whole, fitting content origi
     sticky = matrix.active_cells[{0, 1}]?
     sticky.should_not be_nil
     (sticky.not_nil!.absolute_bounds.y - matrix.absolute_bounds.y).abs.should be < (RULER_ROW_H + ROW_H)
+  end
+  # The drag is the ONE size-changing path that deliberately does NOT refresh the extents
+  # per event. Live extents mid-gesture would make a scrollbar appear while the single-boundary
+  # blit-shift fast path is active, and `set_col_width_for_drag`'s own contract is that the
+  # expensive per-move work is deferred (the 99%-CPU resize bug). Mouse-up runs a full layout and
+  # that is where the extents land. Pinned so the next reader does not "fix" it.
+  it "does NOT update the scroll extents mid-gesture — the deferral is deliberate" do
+    renderer, app, matrix = make_resize_matrix
+    sv = matrix.content_scroll_view.not_nil!
+    before = sv.content_size.width
+
+    matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+    matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 900.0, 10.0))
+    renderer.render_frame(app)
+
+    matrix.get_col_width(0).should be > 20.0            # instrument: the drag really is widening it
+    sv.content_size.width.should eq(before)             # ...and the extents have NOT followed yet
+
+    matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 900.0, 10.0))
+    renderer.render_frame(app)
+    sv.content_size.width.should be > before            # mouse-up's layout is where they land
+  end
+  # The mode's refusal is the LIBRARY's, and it is per line.
+  #
+  # `interactive_resize` stays a hard consumer veto. On top of it the matrix refuses a drag on a
+  # line it would re-measure, because there the drag really would be overwritten — that is
+  # `interactive_resize`'s own stated rationale ("offering it is a lie"). But a STICKY line is never
+  # content-sized, so a drag there sticks, and refusing it was the same lie pointing the
+  # other way: it left the record-label column as the one column no gesture could widen.
+  describe "content sizing refuses the drag per LINE, not per widget" do
+    it "refuses a drag on a content-sized column while the mode is on" do
+      renderer, app, matrix = make_resize_matrix
+
+      # CONTROL FIRST: with the mode off, this very coordinate resizes column 1. Without it,
+      # a border coordinate that simply missed the edge would read as "refused".
+      before = matrix.get_col_width(1)
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_1, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_1 + 60.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_1 + 60.0, 10.0))
+      matrix.get_col_width(1).should be > before
+
+      matrix.auto_size = true
+      renderer.settle_rendering(app)
+      pinned = matrix.get_col_width(1)
+
+      border = COL_BORDER_1 + (matrix.get_col_width(1) - before) * CrymbleUI::VirtualMatrix::FRAME_HEIGHT_BASE
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(border, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(border + 60.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(border + 60.0, 10.0))
+
+      matrix.get_col_width(1).should eq(pinned)
+    end
+
+    it "refuses the pinned column too, because the mode sizes it as well" do
+      # It compacts a pinned line to its content (never grows one past a viewport it cannot
+      # scroll), so a drag there would be overwritten by the next re-measure exactly like any
+      # other line. An earlier version exempted pinned lines from the refusal — correct only
+      # while the mode left them untouched entirely.
+      renderer, app, matrix = make_resize_matrix
+      matrix.sticky_col_count.should be > 0 # instrument: this fixture has one
+
+      before = matrix.get_col_width(0)      # control: the gesture works here with the mode off
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+      matrix.get_col_width(0).should be > before
+
+      matrix.auto_size = true
+      renderer.settle_rendering(app)
+      pinned = matrix.get_col_width(0)
+
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+
+      matrix.get_col_width(0).should eq(pinned)
+    end
+
+    it "the consumer veto still refuses everything, sticky included" do
+      renderer, app, matrix = make_resize_matrix
+      matrix.auto_size = true
+      matrix.interactive_resize = false # the refusal contract, unchanged
+      renderer.settle_rendering(app)
+      before = matrix.get_col_width(0)
+
+      matrix.on_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
+      matrix.on_mouse_move(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+      matrix.on_mouse_up(CrymbleUI::Vec2.new(COL_BORDER_0 + 60.0, 10.0))
+
+      matrix.get_col_width(0).should eq(before)
+    end
   end
 end

@@ -406,6 +406,9 @@ lib LibCSFML
   fun sfRenderTexture_setView(texture : RenderTexture, view : View)
   fun sfRenderTexture_getView(texture : RenderTexture) : View
   fun sfRenderTexture_getDefaultView(texture : RenderTexture) : View
+  # Resolves the view's scissor (stored as 0..1 factors) to device pixels — the readback
+  # oracle the clip-containment witness compares against.
+  fun sfRenderTexture_getScissor(texture : RenderTexture, view : View) : IntRect
   fun sfRenderTexture_getTexture(texture : RenderTexture) : Texture
   fun sfRenderTexture_setSmooth(texture : RenderTexture, smooth : Bool)
   fun sfRenderTexture_isSmooth(texture : RenderTexture) : Bool
@@ -655,6 +658,9 @@ lib LibCSFML
   fun sfView_setSize(view : View, size : Vector2f)
   fun sfView_setRotation(view : View, angle : LibC::Float)
   fun sfView_setViewport(view : View, viewport : FloatRect)
+  # Scissor rectangle, as FACTORS of the target size. The default {(0,0),(1,1)} is
+  # documented as equivalent to disabling the scissor test entirely.
+  fun sfView_setScissor(view : View, scissor : FloatRect)
   fun sfView_reset(view : View, rect : FloatRect)
   fun sfView_getCenter(view : View) : Vector2f
   fun sfView_getSize(view : View) : Vector2f

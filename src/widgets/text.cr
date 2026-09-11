@@ -65,8 +65,35 @@ module CrymbleUI
                 if bg = background_color
                     fill_background(bounds, bg)
                 end
-                text_y = vcentered_text_y(bounds.height - padding * 2, font_scale, padding)
-                draw_text(text, Vec2.new(padding, text_y), color, font_scale)
+                # Anchored as a BLOCK: measure_text reserves a slot per line now, and
+                # anchoring that taller box by a single line's centring would leave a gap
+                # above and hang the last line out of a box exactly tall enough to hold it.
+                # Identical to vcentered_text_y for a single line, at every box height.
+                text_y = vcentered_block_y(bounds.height - padding * 2, TextLines.count(text), font_scale, padding)
+                # Say so where the label is cut, BEFORE the clip so the band sits behind the
+                # glyphs — but ONLY when this Text paints its own background.
+                #
+                # With no background of its own a Text paints nothing and sits on whatever its
+                # parent painted, which it cannot see. Deriving against the panel colour would
+                # be asserting a backdrop rather than measuring one: embrace puts bare Texts
+                # inside DropZoneBoxes filled with the field-class colours, none of which is
+                # panel.background, so the floor would be computed against a colour that is
+                # never on screen and the band could land below 3:1 — invisible, which is worse
+                # than absent. A widget that cannot see its backdrop does not get to claim a
+                # contrast floor, so it draws no marker.
+                if bg = background_color
+                    mark_clipped_text(
+                        clipped_text_bands(Rect.new(padding, text_y, bounds.width - padding * 2, font_size),
+                            0.0, measure_text(text, font_size).width),
+                        on: bg)
+                end
+                # X-only clip to the text's own box. At the default padding of 0.0 the box IS
+                # the bounds and this is a no-op; with padding it stops a long label running
+                # into the gutter it reserved. Y stays unclipped — the glyphs may legitimately
+                # overhang a box shorter than the font. The background above is outside it.
+                clipped(Rect.new(padding, 0.0, bounds.width - padding * 2, bounds.height), within: Rect.new(0.0, 0.0, bounds.width, bounds.height)) do
+                    draw_text(text, Vec2.new(padding, text_y), color, font_scale)
+                end
             end
         end
 

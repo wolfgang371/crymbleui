@@ -77,10 +77,15 @@ module CrymbleUI
     @text_background_color : Color?
     @text_background_colors : Array(Color)?
 
-    # When true, submitting text that matches no item commits it as a custom
-    # value (on_select with CUSTOM_INDEX) instead of cancelling. Opt-in: default
-    # combos stay pick-from-list only.
-    @editable : Bool
+    # When true, a `(custom...)` row is appended below the items; choosing it asks the
+    # CONSUMER for a value (on_custom_requested) instead of selecting anything. Opt-in:
+    # default combos stay pick-from-list only.
+    #
+    # This replaced `editable:`, which made the filter box double as a value box and could
+    # not tell the two apart — any non-empty text won over the highlighted row, so typing a
+    # prefix to narrow the list and pressing Enter committed the PREFIX, and no keyboard
+    # path reached a filtered item at all. One box cannot serve two jobs; two controls can.
+    @allow_custom : Bool
 
     # Flash timer
     @flash_timer_id : Int32?
@@ -107,6 +112,11 @@ module CrymbleUI
 
     # Callbacks
     property on_select : Proc(Int32, String, Nil)?
+
+    # Fired when the `(custom...)` row is chosen, with whatever is in the filter box as a
+    # prefill. The consumer supplies the input UI: converting and validating a typed value
+    # is application knowledge, not widget knowledge.
+    property on_custom_requested : Proc(String, Nil)?
     property on_cancel : Proc(Nil)?
 
     def flash_timer_running? : Bool
@@ -129,8 +139,15 @@ module CrymbleUI
       @filtered_items
     end
 
-    def editable? : Bool
-      @editable
+    def allow_custom? : Bool
+      @allow_custom
+    end
+
+    # The row index that means "(custom...)": one past the filtered items, so arrow
+    # navigation reaches it last and it survives a filter that matches nothing — which is
+    # exactly when the user wants it.
+    private def custom_row_index : Int32?
+      @allow_custom ? @filtered_items.size : nil
     end
 
     def highlighted_index : Int32
@@ -170,7 +187,7 @@ module CrymbleUI
       id : String? = nil,
       @text_background_color : Color? = nil,
       @text_background_colors : Array(Color)? = nil,
-      @editable : Bool = false,
+      @allow_custom : Bool = false,
     )
       # Initialize all instance variables before super
       @all_items = items
@@ -233,7 +250,7 @@ module CrymbleUI
       @scroll_view = ScrollView.new
       @text_background_color = nil
       @text_background_colors = nil
-      @editable = false
+      @allow_custom = false
       @selection_source = nil
       @on_change = nil
       @header_item = nil
@@ -326,8 +343,10 @@ module CrymbleUI
           @highlighted_index = (@highlighted_index + delta).clamp(0, @filtered_items.size - 1)
         end
       else
-        return if @filtered_items.empty?
-        @highlighted_index = (@highlighted_index + delta).clamp(0, @filtered_items.size - 1)
+        last = @filtered_items.size - 1
+        last += 1 if @allow_custom # the `(custom...)` row is navigable, and is the last one
+        return if last < 0
+        @highlighted_index = (@highlighted_index + delta).clamp(0, last)
       end
       update_highlight
       ensure_highlighted_visible
@@ -389,11 +408,15 @@ module CrymbleUI
       end
     end
 
-    # Select the currently highlighted item. In an editable popup, the typed
-    # text takes precedence: text that exactly matches an item picks that item;
-    # any other non-empty text commits as a custom value (CUSTOM_INDEX). Empty
-    # text falls through to the highlighted item — so navigating the list with
-    # arrows and pressing Enter behaves as usual.
+    # Select the currently highlighted item. ENTER ALWAYS CONFIRMS THE HIGHLIGHT — the
+    # filter box only filters.
+    #
+    # It used to check `@editable` first and let any non-empty typed text win, so a user
+    # who typed a prefix to narrow the list and pressed Enter got the PREFIX committed as a
+    # custom value while the row they were looking at flashed as selected. The highlight
+    # was a lie, and no keyboard path reached a filtered item. Choosing a value the list
+    # does not offer is now its own row (`(custom...)`), which is an intention the widget
+    # can see rather than one it has to guess from the presence of text.
     def select_highlighted
       # in a checkable (multi-select) popup, Enter CONFIRMS the selection
       # the user built via toggles and CLOSES — it must NOT collapse the selection
@@ -405,15 +428,11 @@ module CrymbleUI
         return
       end
 
-      if @editable
-        typed = @text_input.value
-        if idx = @all_items.index(typed)
-          @on_select.try(&.call(idx, typed))
-          return
-        elsif !typed.empty?
-          @on_select.try(&.call(CUSTOM_INDEX, typed))
-          return
-        end
+      # The `(custom...)` row sits one past the filtered items and asks the consumer for a
+      # value, carrying the filter text as a prefill.
+      if @highlighted_index == custom_row_index
+        @on_custom_requested.try(&.call(@text_input.value))
+        return
       end
 
       if @filtered_items.empty? || @highlighted_index < 0 || @highlighted_index >= @filtered_items.size
@@ -432,6 +451,11 @@ module CrymbleUI
 
     # Rebuild item widgets from filtered items.
     # In checkable mode the items get ✓/☐ gutters and on_toggle is wired.
+    # The `(custom...)` row's label. ASCII dots ON PURPOSE — the shipped font has no glyph
+    # for U+2026 and it would render as tofu, the same reason Constant::ContestSeparator is
+    # U+00A6 rather than U+2AFD.
+    CUSTOM_ITEM_LABEL = "(custom...)"
+
     private def rebuild_items
       @vstack.children.clear
       @item_widgets.clear
@@ -475,6 +499,19 @@ module CrymbleUI
         item.parent = @vstack
         @vstack.children << item
         @item_widgets << item
+      end
+
+      # The `(custom...)` row, LAST and outside the loop above: @filtered_items must stay a
+      # subset of @all_items (rebuild_items and select_highlighted both map back through it
+      # and raise otherwise), so this row is a widget without an item behind it. Appending
+      # it to @item_widgets is what makes update_highlight and the arrow keys reach it,
+      # since both address rows by their index in that array.
+      if @allow_custom
+        custom = ComboBoxItem.new(CUSTOM_ITEM_LABEL, text_background_color: @text_background_color) do |_value|
+          @on_custom_requested.try(&.call(@text_input.value))
+        end
+        @vstack.children << custom
+        @item_widgets << custom
       end
 
       # Mark children as needing layout

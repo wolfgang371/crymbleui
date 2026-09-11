@@ -1,5 +1,21 @@
 module CrymbleUI
   class VirtualMatrix < Widget
+    # Why the CURSOR cell looks the way it does on a given frame, on demand: CRYMBLE_CARET_LOG=1.
+    # Read once (this sits inside the per-cell loop of every frame). One line per frame, cursor cell
+    # only, recording the blit-vs-render decision ALONGSIDE the caret state and the scroll — the
+    # pair a "caret still visible after leaving" report needs, since a caret that is gone from the
+    # widget but present in a BLITTED texture looks identical on screen and identical to every
+    # state-level assertion.
+    CARET_LOG = !ENV["CRYMBLE_CARET_LOG"]?.nil?
+
+    private def log_caret_frame(key, decision : String, widget : Widget) : Nil
+      return unless CARET_LOG
+      return unless key == cursor_rc
+      STDERR.puts "[caret] #{key} #{decision.ljust(16)} caret=#{cursor_cell_draws_edit_caret?} " \
+                  "needs_render=#{widget.needs_render?} cache=#{widget.has_valid_primitive_cache?} " \
+                  "scroll_y=#{scroll_offset.y.round(1)} y=#{widget.bounds.y.round(1)} " \
+                  "h=#{widget.bounds.height.round(1)}"
+    end
     # Check if sticky cells can use the blit-plan fast path.
     # Returns false on first frame or if any non-compound sticky cell lacks a cached texture.
     # Compound cells and rulers are handled via blit_plan_render_widgets (rendered after blits).
@@ -35,7 +51,15 @@ module CrymbleUI
         # content). The fast path still runs — compute_sticky_blit_plans routes BOTH to blit_plan_render_
         # widgets (rendered normally after the blits), so we don't bail here. This is what enables the
         # blit-plan during a resize (the resized line's header needs_render; the rest just moved → blit).
-        cells_with_backend += 1 if widget.widget_backend && !widget.needs_render?
+        # Counted whether or not it needs render. The comment above says why that is safe: the
+        # fast path routes a dirty cell to blit_plan_render_widgets and renders it normally. But
+        # excluding dirty cells here made PATH SELECTION depend on how many cells happen to be
+        # dirty — so anything that legitimately dirties every visible sticky cell on a frame (the
+        # ink rule does, when their band moves) silently diverted that frame to the reposition
+        # path, which marks layers rather than repainting, and the cell was left waiting for paint.
+        # That is caret_leaves_with_editor_spec: measured with CRYMBLE_CARET_LOG, the closing frame
+        # went from "RENDER fresh" to a bare "LAYOUT" with cache=false and nothing after it.
+        cells_with_backend += 1 if widget.widget_backend
       end
       cells_with_backend > 0  # Need at least one cell with cached texture
     end
@@ -152,11 +176,13 @@ module CrymbleUI
             # diverged at negative fractional coords.
             dest_x = PixelSnap.origin(vm_abs.x + widget.bounds.x - layer.bounds.x)
             dest_y = PixelSnap.origin(vm_abs.y + widget.bounds.y - layer.bounds.y)
+            log_caret_frame(key, "BLIT compound", widget)
             target << BlitEntry.new(wb, dest_x, dest_y)
           else
             # Resized, needs render, or newly created (no wb) — render normally.
             # Without this, new compound cells appear blank until the next frame
             # (visible during scrollbar thumb drag where cell update is deferred).
+            log_caret_frame(key, "RENDER compound", widget)
             render_list << widget unless widget.bounds.x < -100.0  # Skip off-screen
           end
           next
@@ -213,6 +239,7 @@ module CrymbleUI
         # No cached texture yet (newly created after bounds grow / viewport shift) → render at the freshly
         # set bounds; cull only if truly off-screen horizontally.
         unless wb
+          log_caret_frame(key, "RENDER no-tex", widget)
           render_list << widget unless widget.bounds.x < -100.0
           next
         end
@@ -221,12 +248,14 @@ module CrymbleUI
         # lets the blit-plan run during a RESIZE: only the resized line's header re-renders; every other
         # sticky cell merely MOVED → blit its cached texture at the new position below.
         if render_fresh
+          log_caret_frame(key, "RENDER fresh", widget)
           render_list << widget unless widget.bounds.x < -100.0
           next
         end
 
         dest_x = PixelSnap.origin(vm_abs.x + new_x - layer.bounds.x)
         dest_y = PixelSnap.origin(vm_abs.y + new_y - layer.bounds.y)
+        log_caret_frame(key, "BLIT", widget)
         target << BlitEntry.new(wb, dest_x, dest_y)
       end
 
@@ -385,12 +414,18 @@ module CrymbleUI
       new_x = true_x
       new_y = true_y
 
+      # Natural span, positioned like any other cell — see the reposition pass for why the box
+      # is no longer moved to the band edge or clipped to the visible slice. The two passes run
+      # either/or per frame and must still agree, so this mirrors it exactly.
       if !is_sticky_col
+        # X keeps the box-level pin — see the reposition pass: the ink rule has no horizontal
+        # counterpart, so removing this scrolls column headers out with their span.
         new_x, compound_w = Widgets::VirtualMatrix::StickyMath.compound_axis(
           col_view, bounding[0][1], bounding[1][1], true_x)
       end
 
       if !is_sticky_row
+        # Mirrors the reposition pass — see there for why a span keeps compound_axis on Y.
         new_y, compound_h = Widgets::VirtualMatrix::StickyMath.compound_axis(
           row_view, bounding[0][0], bounding[1][0], true_y)
       end

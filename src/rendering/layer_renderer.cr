@@ -107,6 +107,14 @@ module CrymbleUI
     # anti-aliased edge can never expose a sliver of what is behind it.
     OCCLUDER_INSET = 3.0
 
+    # The widest or tallest a single widget can be RENDERED. Not a policy — it is the driver's
+    # texture limit, and the span arithmetic below would overflow on an INFINITY/MAX bound
+    # besides. A widget larger than this is drawn truncated, so anything that CHOOSES a size
+    # (content sizing, a resize gesture) should stop here rather than ask for pixels that will
+    # never appear: past this point a cell would lose content while its cut marker, which
+    # compares text against the box it was given, still reported everything as fitting.
+    MAX_WIDGET_SPAN = 16384.0
+
     private def covers?(occluder : Rect, target : Rect) : Bool
       ox = occluder.x + OCCLUDER_INSET
       oy = occluder.y + OCCLUDER_INSET
@@ -765,8 +773,9 @@ module CrymbleUI
 
         # Push scissor clip for layer bounds to clip widgets at layer edges
         # This allows smooth clipping of partially-visible widgets (e.g., ScrollView content)
-        # Note: scissor is suspended during background capture/restore in render_single_widget
-        # because OpenGL scissor is global state and would affect draws to other textures
+        # Note: this clip is lifted during background capture/restore in
+        # render_single_widget — not because the scissor is global (it is per-target), but
+        # as a guard against a clear on THIS backend, which SFML would scissor.
         #
         # IMPORTANT: For viewport_cache layers, clip to BUFFER size not viewport size!
         # Viewport_cache buffers are larger than viewport (viewport + 2*cache_extent), and widgets
@@ -778,34 +787,44 @@ module CrymbleUI
                             # Normal: clip to viewport (layer bounds)
                             Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
                           end
+        # BALANCE IS LOAD-BEARING. The clip now lives on the target's view, so it survives
+        # every render-target re-activation for the life of the backend — a push left
+        # unpopped by an exception would leave this layer permanently part-blank, where the
+        # old raw-GL scissor happened to self-heal at the next cold draw. Unwind to the
+        # ENTRY depth, not by one: a cell clip (:1413) or a PushClip primitive (:1790)
+        # pushes onto this same stack, so a raise mid-widget can leave several live.
+        entry_clip_depth = backend.clip_depth
         backend.push_clip(layer_clip_rect)
+        begin
+          # Render each widget using per-widget texture approach
+          widgets_to_render.each do |widget|
+            render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
+          end
 
-        # Render each widget using per-widget texture approach
-        widgets_to_render.each do |widget|
-          render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
-        end
-
-        # Second pass: render foreground primitives for DecoratedContainers
-        # Foreground renders AFTER all children, on top of everything
-        # IMPORTANT: Must iterate ALL widgets, not just dirty ones — foreground
-        # primitives (e.g., connecting lines) span multiple children and get
-        # overwritten when any child re-renders its background
-        all_layer_widgets = if full_render
-                              widgets_to_render
-                            else
-                              all_fg = [] of Widget
-                              layer.widgets.each do |w|
-                                collect_all_widgets_recursive(w, all_fg, layer)
+          # Second pass: render foreground primitives for DecoratedContainers
+          # Foreground renders AFTER all children, on top of everything
+          # IMPORTANT: Must iterate ALL widgets, not just dirty ones — foreground
+          # primitives (e.g., connecting lines) span multiple children and get
+          # overwritten when any child re-renders its background
+          all_layer_widgets = if full_render
+                                widgets_to_render
+                              else
+                                all_fg = [] of Widget
+                                layer.widgets.each do |w|
+                                  collect_all_widgets_recursive(w, all_fg, layer)
+                                end
+                                all_fg
                               end
-                              all_fg
-                            end
-        all_layer_widgets.each do |widget|
-          if widget.responds_to?(:has_foreground?) && widget.has_foreground?
-            render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
+          all_layer_widgets.each do |widget|
+            if widget.responds_to?(:has_foreground?) && widget.has_foreground?
+              render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
+            end
+          end
+        ensure
+          while backend.clip_depth > entry_clip_depth
+            backend.pop_clip
           end
         end
-
-        backend.pop_clip
         backend.display
       {% end %}
 
@@ -991,13 +1010,13 @@ module CrymbleUI
       #   1. Copy current viewport surface at widget position into a temp backend
       #      → gives correct background (parent content already painted)
       #   2. Render to_primitives() at (0,0) on temp backend
-      #      → matches cached pipeline's coordinate space (SFML edge-clip compat)
+      #      → matches the cached pipeline's coordinate space
       #   3. Blit temp backend back to viewport surface
       #   4. Dispose temp backend
       #
       # Why to_primitives(): bypasses primitive cache (get_primitives returns stale)
-      # Why temp backends: draw_rect edge-clip simulation is position-dependent;
-      #   rendering at (0,0) on a widget-sized backend matches the cached pipeline
+      # Why temp backends: the CLIP is position-dependent, so rendering at (0,0) on a
+      #   widget-sized backend clips against the same extent the cached pipeline did
       # Why painter's algorithm: parent paints first so children copy correct
       #   background from the viewport surface, not a flat layer.background_color
       private def render_layer_immediate(layer : Layer,
@@ -1160,13 +1179,13 @@ module CrymbleUI
       # stale background capture (earlier sibling captures panel bg at overlap
       # pixel before later sibling renders → "white line" on selective re-render).
       # Clamp to prevent arithmetic overflow from INFINITY/MAX bounds
-      if widget_abs.width > 16384.0 || widget_abs.height > 16384.0
+      if widget_abs.width > MAX_WIDGET_SPAN || widget_abs.height > MAX_WIDGET_SPAN
         {% if flag?(:DEBUG_RENDER) %}
           STDERR.puts "[OVERFLOW_GUARD] #{widget.class.name}##{widget.path_id} bounds=#{widget_abs.width}x#{widget_abs.height} - clamped"
         {% end %}
       end
-      clamped_w = widget_abs.width.clamp(0.0, 16384.0)
-      clamped_h = widget_abs.height.clamp(0.0, 16384.0)
+      clamped_w = widget_abs.width.clamp(0.0, MAX_WIDGET_SPAN)
+      clamped_h = widget_abs.height.clamp(0.0, MAX_WIDGET_SPAN)
       widget_width = device_pixel_span(adjusted_x - offset_x, clamped_w)
       widget_height = device_pixel_span(adjusted_y - offset_y, clamped_h)
 
@@ -1477,9 +1496,10 @@ module CrymbleUI
       # Track that background was restored (for invariant f check)
       background_restored = false
 
-      # CRITICAL: Suspend scissor clipping during background operations
-      # OpenGL scissor is global state - if active on layer backend, it would incorrectly
-      # clip draws to widget_backend and background_backend (different textures!)
+      # Lift the layer's clip across the background capture/restore. The other backends
+      # touched in that window carry their OWN views, so they were never governed by this
+      # clip — this is a contract guard for a future clear issued on THIS backend (SFML
+      # scissors `clear` too). A no-op at every current call site; see CrSFMLBackend.
       backend.suspend_clip
 
       # When buffer was just cleared (full render after rebuild/recenter),
@@ -2169,7 +2189,7 @@ module CrymbleUI
                      next true if dirty_set.includes?(w)
                      next false unless w.widget_backend.nil?
                      # Skip widgets with overflow bounds
-                     next false if w.bounds.width > 16384.0 || w.bounds.height > 16384.0
+                     next false if w.bounds.width > MAX_WIDGET_SPAN || w.bounds.height > MAX_WIDGET_SPAN
                      # Check if widget is within buffer bounds — CONSERVATIVE: origin (floor)
                      # for position, cover (ceil) for extent, so a fractional edge that
                      # covers a pixel can never be dropped (trunc under-included before).

@@ -1,13 +1,13 @@
 require "spec"
 require "../../src/rendering/fbo_math"
 
-# FboMath is the pure Int32/Float32 algebra of the two Y-flip sites that make a
+# FboMath is the pure Int32/Float32 algebra of the Y-flip site that makes a
 # CrSFMLBackend faithful to the top-down logical coordinate system despite the
 # FBO's bottom-up sampled texture:
 #   - blit_region_flip: texture_rect Y, scale sign, and draw Y for a partial
 #     GPU→GPU region blit (crsfml_backend.cr#blit_region).
-#   - scissor_gl_y: the OpenGL scissor origin for a top-down clip band
-#     (crsfml_backend.cr#apply_clip).
+# (Clipping used to be a second site. It is not any more: the clip is the target
+# view's scissor and SFML performs that flip itself.)
 #
 # WHAT THESE SPECS PROVE (and their LIMIT):
 #   They prove the flip algebra is SELF-CONSISTENT with the documented
@@ -62,24 +62,6 @@ describe CrymbleUI::FboMath do
       flip = CrymbleUI::FboMath.blit_region_flip(64, 10, 8, 25)
       flip.draw_y.should eq(25 + 8)
       flip.scale_y.should eq(-1.0_f32)
-    end
-  end
-
-  describe ".scissor_gl_y" do
-    # Anchored endpoints of gl_y = H - (top + h). A top-anchored clip band lands
-    # at gl origin H-h; a bottom-anchored band lands at gl origin 0.
-    it "maps a top-anchored band (top=0) to gl origin H-h" do
-      h = 20
-      CrymbleUI::FboMath.scissor_gl_y(100, 0, h).should eq(100 - h)
-    end
-
-    it "maps a bottom-anchored band (top=H-h) to gl origin 0" do
-      h = 20
-      CrymbleUI::FboMath.scissor_gl_y(100, 100 - h, h).should eq(0)
-    end
-
-    it "maps a full-height band to gl origin 0" do
-      CrymbleUI::FboMath.scissor_gl_y(100, 0, 100).should eq(0)
     end
   end
 

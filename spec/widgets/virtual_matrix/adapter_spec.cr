@@ -65,6 +65,26 @@ private def setup_rendered_matrix(adapter, viewport_width = 400.0, viewport_heig
 end
 
 describe CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter do
+  describe "get_sizes ownership" do
+    it "hands back a COPY, so the matrix cannot rewrite the user's persisted sizes" do
+      # VirtualMatrix owns the arrays get_sizes returns and mutates them in place — drag resize
+      # does, content sizing does. Returning the stored array itself made every such write reach
+      # through and overwrite `custom_col_widths`; the drag path hid it by re-persisting the same
+      # values immediately, and it surfaced only when content sizing wrote different ones and a
+      # user's dragged widths vanished the moment the mode switched on.
+      adapter = TestMatrixAdapter.new(4, 3)
+      adapter.custom_col_widths = [7.0, 7.0, 7.0]
+      adapter.custom_row_heights = [2.0, 2.0, 2.0, 2.0]
+
+      rows, cols = adapter.get_sizes
+      cols[0] = 99.0
+      rows[0] = 99.0
+
+      adapter.custom_col_widths.should eq([7.0, 7.0, 7.0])
+      adapter.custom_row_heights.should eq([2.0, 2.0, 2.0, 2.0])
+    end
+  end
+
   describe "Basic Interface" do
     it "provides row and column counts via get_scrollorder" do
       adapter = TestMatrixAdapter.new(10, 5)

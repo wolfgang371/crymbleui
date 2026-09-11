@@ -26,8 +26,8 @@ module CrymbleUI
     @@path : String? = ENV["CRYMBLE_INPUTLOG"]?
     @@io : File? = nil
     @@buffer = [] of String
-    @@t0 : Time::Span = Time.monotonic
-    @@last_event_at : Time::Span? = nil
+    @@t0 : Time::Instant = Time.instant
+    @@last_event_at : Time::Instant? = nil
 
     # Running totals, printed in the trailer so the headline question is answered without
     # post-processing.
@@ -64,7 +64,7 @@ module CrymbleUI
     # test per frame. (The previous attempt at this sampled the layer buffer with get_pixels, which
     # does a full GPU->CPU texture copy PER CALL; twenty-four of those per layer per frame made the
     # app unusable. Never read pixels back to answer a timing question.)
-    @@last_write_at : Time::Span? = nil
+    @@last_write_at : Time::Instant? = nil
     @@lag_max = 0.0
     @@lag_slow = 0
 
@@ -73,15 +73,15 @@ module CrymbleUI
       return if @@path.nil?
       if matrix_rendered && (wrote_at = @@last_write_at)
         @@last_write_at = nil
-        lag = (Time.monotonic - wrote_at).total_milliseconds
+        lag = (Time.instant - wrote_at).total_milliseconds
         @@lag_max = lag if lag > @@lag_max
         @@lag_slow += 1 if lag > 400.0
-        @@buffer << ["%.1f" % (Time.monotonic - @@t0).total_milliseconds, "REPAINT", "matrix",
+        @@buffer << ["%.1f" % (Time.instant - @@t0).total_milliseconds, "REPAINT", "matrix",
                      lag > 400.0 ? "SLOW" : "ok", "lag=#{lag.round(1)}ms",
                      "frame=#{total_ms.round(1)}ms", "-", "-"].join('\t')
       end
       return if total_ms < 5.0 # idle vsync frames would drown the trace
-      @@buffer << ["%.1f" % (Time.monotonic - @@t0).total_milliseconds, "FRAME", "-", "-", "-",
+      @@buffer << ["%.1f" % (Time.instant - @@t0).total_milliseconds, "FRAME", "-", "-", "-",
                    (rebuilt ? "rebuilt" : (did_layout ? "laid_out" : "-")),
                    "%.1f" % total_ms, "-"].join('\t')
       flush if @@buffer.size >= 64
@@ -92,7 +92,7 @@ module CrymbleUI
     def self.record(kind : String, label : String, outcome : Bool?, focused : Widget?,
                     pending_rebuild : Bool, frame_ms : Float64) : Nil
       return if @@path.nil?
-      now = Time.monotonic
+      now = Time.instant
       gap = @@last_event_at.try { |t| (now - t).total_milliseconds } || 0.0
       @@last_event_at = now
 
@@ -132,12 +132,21 @@ module CrymbleUI
     @@paint_match = 0
     @@paint_stale = 0
 
+    # A traced cell value is FOREIGN TEXT: it can hold a tab or a hard line break, and this
+    # file is tab-separated with one record per line. An unescaped multi-line value therefore
+    # splits into bogus records and silently corrupts every later reader of the trace — the
+    # instrument reporting a phenomenon it caused. Escaped at the two sites that embed a
+    # value, not at the call sites, so a new tracer cannot forget.
+    private def self.escape_trace(value : String) : String
+      value.gsub('\\', "\\\\").gsub('\t', "\\t").gsub('\r', "\\r").gsub('\n', "\\n")
+    end
+
     def self.record_write(row : Int32, col : Int32, value : String) : Nil
       return if @@path.nil?
-      @@last_write_at = Time.monotonic
+      @@last_write_at = Time.instant
       @@pending_writes[{row, col}] = value
-      @@buffer << ["%.1f" % (Time.monotonic - @@t0).total_milliseconds, "WRITE", "#{row},#{col}",
-                   value, "-", "-", "-", "-"].join('\t')
+      @@buffer << ["%.1f" % (Time.instant - @@t0).total_milliseconds, "WRITE", "#{row},#{col}",
+                   escape_trace(value), "-", "-", "-", "-"].join('\t')
       flush if @@buffer.size >= 64
     end
 
@@ -148,8 +157,9 @@ module CrymbleUI
       return if expected.nil?
       ok = value == expected
       ok ? (@@paint_match += 1) : (@@paint_stale += 1)
-      @@buffer << ["%.1f" % (Time.monotonic - @@t0).total_milliseconds, "PAINT", "#{row},#{col}",
-                   ok ? "match" : "STALE", "wrote=#{expected}", "painted=#{value}", "-", "-"].join('\t')
+      @@buffer << ["%.1f" % (Time.instant - @@t0).total_milliseconds, "PAINT", "#{row},#{col}",
+                   ok ? "match" : "STALE", "wrote=#{escape_trace(expected)}",
+                   "painted=#{escape_trace(value)}", "-", "-"].join('\t')
       flush if @@buffer.size >= 64
     end
 
@@ -173,7 +183,7 @@ module CrymbleUI
       @@pixel_sig[layer_id] = sig
       return if previous.nil?   # first sight is not a change
       @@pixel_changes += 1
-      @@buffer << ["%.1f" % (Time.monotonic - @@t0).total_milliseconds, "PIXELS", "changed", "-",
+      @@buffer << ["%.1f" % (Time.instant - @@t0).total_milliseconds, "PIXELS", "changed", "-",
                    layer_id, "-", "-", "-"].join('\t')
       flush if @@buffer.size >= 64
     end

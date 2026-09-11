@@ -203,3 +203,31 @@ class TestVisibleCell < CrymbleUI::Widget
     end
   end
 end
+
+# SPEC_TIMING=1 — the WHOLE ranking of example durations, where `--profile` shows only ten.
+# Inert unless asked for, so it costs nothing in a normal run. The array is declared at top level
+# because a constant cannot be declared inside an `if`.
+SPEC_TIMINGS = [] of Tuple(String, Float64)
+
+if ENV["SPEC_TIMING"]?
+  Spec.around_each do |example|
+    started = Time.instant
+    example.run
+    SPEC_TIMINGS << {example.example.description, (Time.instant - started).total_seconds}
+  end
+
+  # after_suite, not at_exit: at_exit handlers run in REVERSE registration order, so one
+  # registered here fires BEFORE the specs do and reports an empty list.
+  Spec.after_suite do
+    total = SPEC_TIMINGS.sum { |(_, s)| s }
+    next if total <= 0.0
+    STDERR.puts "\n[timing] #{SPEC_TIMINGS.size} examples, #{total.round(1)}s of example time"
+    cum = 0.0
+    SPEC_TIMINGS.sort_by { |(_, s)| -s }.each_with_index do |(name, s), i|
+      cum += s
+      break if i >= 30
+      STDERR.puts "  #{s.round(2).to_s.rjust(7)}s #{(100 * s / total).round(1).to_s.rjust(5)}% " \
+                  "cum #{(100 * cum / total).round(0).to_s.rjust(3)}%  #{name[0, 88]}"
+    end
+  end
+end

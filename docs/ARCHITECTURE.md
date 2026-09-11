@@ -1,3 +1,17 @@
+**It is a structural test, never a widget-type test.** The questions asked are *how many lines does
+this region's content occupy* and *does this cell name more than one line*. Nothing asks whether a
+cell is a header, a ruler, a rank or a value, and nothing asks whether it is multiline —
+`is_multiline` is not a term in the rule. That is what lets it survive a cell factory returning an
+arbitrary `Widget`.
+
+**Beware the near-miss predicates.** Three have cost a day each. "Does the span differ from the box"
+is not the compound test — it is true only while `StickyMath.compound_axis` has PINNED the box, 2 of
+325 live cells, so it silently unheld every unpinned compound header (I2, `cell:r2c`). "How tall is
+the row's content in pixels" is not `cell_natural_size[:height]` — that includes the widget's own
+padding, and using it shifted every row at once (I1, I5, I6 and I9 together). And a THRESHOLD on
+box-versus-content ("is this row tall?") is not a substitute for the row's line count: every value
+of that constant is wrong for someone.
+
 # CrymbleUI Architecture
 
 ## The Core Problem
@@ -283,6 +297,11 @@ module PrimitiveBuilder
   # vcentered_text_y: returns the local Y that vertically centres one text line
   # in a band by the real ink height (reference_height), not the em size.
   def vcentered_text_y(band_height : Float64, font_scale : Int32 = 0, band_top : Float64 = 0.0) : Float64 ...
+  # vcentered_block_y: the same for a BLOCK of `line_count` lines — centred when the block
+  # fits, and anchored exactly where a single line would sit when it does not, so a
+  # multi-line cell keeps its row's shared baseline. Identical to vcentered_text_y at
+  # line_count == 1, at every band height. Prefer it wherever the text may contain '\n'.
+  def vcentered_block_y(band_height : Float64, line_count : Int32, font_scale : Int32 = 0, band_top : Float64 = 0.0) : Float64 ...
   def draw_line(from : Vec2, to : Vec2, color : Color, width : Float64 = 1.0) ...
   def draw_circle(center : Vec2, radius : Float64, color : Color, fill : Bool = true) ...
   def fill_triangle(p1 : Vec2, p2 : Vec2, p3 : Vec2, color : Color) ...
@@ -294,6 +313,173 @@ module PrimitiveBuilder
   def draw_check_glyph(state : CheckState, rect : Rect, box_color : Color, check_color : Color, ...) ...
 end
 ```
+
+### Where content sits in a band
+
+One rule governs every label, number and value the library places vertically, and it is stated
+here because it is the thing three separate mechanisms used to answer differently:
+
+> **Content is CENTRED in the part of its region you can SEE, then confined to its own box.**
+
+A region is the cell's own row for an ordinary cell and for a ruler number; the whole SPAN for a
+compound. That is the entire rule — no conditions, no thresholds, and no distinction between a row
+and a span:
+
+```
+lo      = max(region.lo, band.lo)
+hi      = min(region.hi, band.hi)
+natural = lo + (hi - lo - content) / 2       # a MULTI-LINE block anchors at lo instead
+```
+
+It reached this form on 2026-09-11, after two days of branches that each served one field report and
+broke another. What made them look necessary was a WRONG READING of the oldest of them: "sticky"
+(#93-#96) was taken to mean "the label's offset inside its own span changes", so the rule grew
+clauses to hold that offset rigid. Sticky means STOPPED — the label halting at the band edge while
+the rows keep scrolling — and that is what a POSITION clamp does. Clamping the REGION never halts
+anything. Measured on the reporting fixture: 84 steps while a group leaves, none of them stalled,
+the label moving at half the scroll throughout and landing within 1.5px of its last visible row.
+
+Everything else the reports asked for falls out of the one line, rather than being asked for:
+
+| behaviour | why it happens |
+|---|---|
+| a fully visible region centres plainly | the slice IS the region |
+| a region taller than the band centres in the BAND | the slice is the band; it stays there however the row grows |
+| a group leaving takes its label with it, never stalling | the slice shrinks continuously; no position is ever pinned |
+| ...and the label lands on the group's last visible row | with one row left, the slice IS that row (#93-#96) |
+| a group arriving shows its label at once | the slice grows from the far edge, the mirror of leaving (#45/#50) |
+| both edges move a label at the same rate | one moving end, so half the scroll, whichever end (#105-#108) |
+| a ruler number and its cell never part | they share a region, so they share a slice, so they share a centre |
+| adjacent labels never converge and stack | each is clamped into its OWN region, never into a shared band |
+
+**Levelness is not a second rule — it is what centring produces when two cells share a region.**
+Enforcing it directly is what broke this arc: `docs/PLACEMENT_CASES.md` has the table that answers
+"should these two be level?" by asking whether they name the same region.
+
+In one expression:
+
+```
+THREE STEPS, three jobs, in this order:
+
+  centred_in       where it WANTS to be   — centred in `region ∩ band`, except that a compound's
+                                            leading end yields only by its overflow past the band
+  held_in_region   keep it in its REGION  — plus a floor at the band for a PINNED clone, a fact the
+                                            matrix TELLS the rule (its Y box comes from
+                                            StickyMath.compound_axis, so it is held while the span
+                                            scrolls); inferred from the geometry until 2026-09-11,
+                                            which misjudged 5861 samples and was right anyway
+  confine          keep it in its BOX     — the box as it is NOW, which the region's copy may not
+                                            be: auto-size can re-fit a row in the same frame
+
+A MULTI-LINE block anchors at the slice's start instead of centring in it; that is the rule's one
+asymmetry and the row's quantised height is what forces it (see below).
+```
+
+The clamp is on the SLICE, never on the position: that is what keeps a line together, because every
+cell of a line shares a region and therefore a slice. A `band_lo + padding` floor measured in each
+cell's own glyph — which is what stood here until 2026-09-10 — moves a ruler number and its cell by
+different amounts, and it has no counterpart at the far edge at all.
+
+**A multi-line block anchors at its region's top rather than centring**, and this is the rule's one
+asymmetry. Auto-size fits a row to the block's NATURAL height, which carries the block's own leading
+and padding — the row ends up some 40px taller than the ink in it. Centred, that slack splits and the
+row's text starts 24.5px below its top grid line where every ordinary row starts 3px below it: "more
+space to the upper grid than other rows" (#79). Reading starts at line 1, so the slack belongs after
+the text. Both placement paths — the one for a cell with an ink region and the plain one for a cell
+without — must anchor the same way, or the seam shows: letting only one of them centre made a block
+reverse direction mid-scroll at the frame its region appeared.
+
+**BOUNDING BY THE REGION IS WHAT MAKES THIS SETTLE.** Everything that thrashed through 2026-09-08
+came from content that could be pulled arbitrarily far to chase the viewport's edge: it tracked that
+edge 1:1 while the panel resized (#74/#75), reversed direction when a second clamp took over
+(#69-#73), and needed a taper to hand back continuously — a taper that went slack exactly when the
+panel collapsed and dropped a label out through the bottom border (#80/#81). Clamped to a SLICE of
+its own region, content can never travel further than that region does: it moves at half the input's
+rate at most, stops when the slice stops shrinking, and leaves with its own line when the slice can
+no longer hold it. Nothing left to track, reverse, or taper. Wolfgang stated the bound himself:
+*"every cell should be visible as long as possible, but not scrolled more to the top or left than
+normal top/left aligned; except compound cells"* — and `slice.lo >= region.lo` is exactly that.
+
+**Everything below falls OUT of that expression rather than being asked for**, which is why it
+replaced a three-term formula, an arrival clause and a separate box-clipping mechanism:
+
+| behaviour | why it happens |
+|---|---|
+| a fully visible region centres plainly | the slice IS the region; every clamp is inert |
+| a region taller than the band centres in the BAND | the slice is the band, so its centre is the band's centre — and it stays there however the row grows, because both ends are clamped |
+| a region on its way out takes its content with it | the slice shrinks from the leading edge; when it can no longer hold the content, the content leaves with the line |
+| a region arriving from below shows its content at once | the slice shrinks from the far edge instead, the mirror of the same clause |
+| a ruler number and its cell never part | they share a region, so they share a slice, so they share a centre — whatever their glyph sizes |
+| adjacent labels never converge and stack | each is clamped into its OWN region, never into a shared band |
+| a group you can see all of leaves with its group | its slice is the whole span at the leading edge: a compound is held there only by its overflow past the band, and there is none |
+| a group hanging off the bottom keeps moving as the panel grows | its slice grows with the panel, so its centre moves at HALF the panel's rate and settles when the whole span is on screen — never riding the edge 1:1 (#103/#104) |
+
+**Continuity is the property, not a nicety.** Swept across `region_size == band` the anchor holds a
+constant slope with no step. A placement written as separate formulas either side of "does it fit"
+made text jump a whole line in the running app, and every threshold since has produced the same
+class of report — a label jumping 1-3px as some branch engaged.
+
+**The one clause that is NOT continuous, and why it stays:** content that cannot be shown whole AND
+is more than one line is not moved at all — it stays where its widget put it, scrolls with its box
+and is clipped by it, because otherwise a long value would be pinned to the viewport and you could
+never read past its first screenful (core `doc/08-shapes.md`, UC-3). That steps slightly when a
+resize grows the band past the content's extent. It is the least visible discontinuity available: it
+bites on a value you are scrolling through, never on a label. A SINGLE line never takes the exit
+however thin the band — it has no second screenful to reach, and opting it out cost a 198.5px jump
+for 1px of resize at the frame the band passed one line's height.
+
+**Deliberately given up (2026-09-07):** an arriving region's label parks at the trailing edge instead
+of riding in with its rows at content speed. While a region arrives, the near edge of its visible
+part moves with the rows and the far edge is the viewport, so anything centred in that window moves
+at HALF the region's speed — visibility and content-speed arrival cannot both hold. Visibility was
+judged worth more; the history is in
+`spec/widgets/virtual_matrix/compound_enters_at_content_speed_spec.cr`.
+
+**It is a structural test, never a widget-type test.** The one question asked is *does this cell
+name more than one line* (`line_span`: `lo_r != hi_r`). Nothing asks whether a cell is a header, a
+ruler, a rank or a value, and nothing asks whether it is multiline — `is_multiline` is not a term in
+the rule. A multiline block is simply *taller*, so it is more often the one that does not fit the
+band and is therefore left to scroll. That is what lets the rule survive a cell factory returning an
+arbitrary `Widget`.
+
+**Beware the near-miss predicate.** "Does the span differ from the box" looks like the same question
+and is not: it is true only while `StickyMath.compound_axis` has PINNED the box, which was 2 of 325
+live cells in the demo. Using it silently unheld every compound header that happened not to be
+shifted (caught by I2 on `cell:r2c`, 2026-09-08).
+
+**Composition with the block regimes.** When the content does not fit, the fallback is
+`vcentered_block_y`'s own answer, which top-aligns an overflowing block so line 1 — what you read
+first — is never the cut one. The holding rule therefore never overrides that property; it only ever
+applies to content small enough to be shown whole.
+
+**What a single line does (2026-09-08).** It sits on its row's line and moves only downward, when
+that line has gone above the band. It is never pulled up off the viewport's bottom edge: a row
+leaving at the bottom clips its labels exactly as it clips its backgrounds (#74/#75, UC-5).
+
+**What a COMPOUND does, and why it differs.** Its label names a span that can be many times the
+viewport's height, so the middle of that span — where the label naturally sits — is routinely below
+the fold. It alone may be pulled up, as far as its span's top. Without that it simply vanishes while
+its group is plainly on screen (#80/#81: `a` dropping out through the bottom border; and I2 caught
+the same thing at y=648 against a band ending at 600).
+
+**The paragraph that used to be here was wrong**, and it is worth recording why: it claimed a short
+value in a tall row is held, and that this is what makes a ruler number, a row header and the value
+beside it land on one line instead of three. Those three name the SAME LINE — they agree because
+they share an extent, not because they are displaced together. Holding merely displaced all three
+equally, so it did not break the alignment it was credited with creating. The alignment is now
+asserted directly (I9) rather than assumed, and asserting it found two real defects the old
+explanation had hidden: the ruler centred its number in the full row PITCH while every cell is laid
+out at pitch MINUS the gutter (a constant 1.5px, every row, every scroll position), and the hold
+clamped each item by its OWN content height, so a small ruler glyph and a full-height cell glyph
+were pushed by different amounts and parted company by up to 4.2px on a cut row.
+
+**Two harnesses, and they catch different things.** `placement_invariants_spec` holds the named
+cases, each written after a field report. `placement_sweep_spec` is the general one: five fixtures
+by four inputs, a pixel at a time, checking jump, velocity, reversal, both bounds, visibility and
+box containment on every label in every frame. The named cases cannot find what nobody thought to
+look for — the sweep found a compound label jumping 198.5px for one pixel of resize, at a single
+panel height, in one fixture, because the not-moved exit for long values was also swallowing
+single-line labels when the band passed one line's height.
 
 **Usage**:
 ```crystal
@@ -866,7 +1052,9 @@ SFML text has built-in padding/offsets that must be handled consistently between
      key = {text, size}
      return cached if cached = @@measure_text_cache[key]?  # per-{text,size} memoization
      result = font.measure_text(text, size)
-     # SFMLFont: width = local_bounds.width, height = font.get_line_spacing (consistent across glyphs)
+     # SFMLFont: width = local_bounds.width (the WIDEST line), height = get_line_spacing
+     # (consistent across glyphs) x the LINE COUNT — SFML renders '\n' natively, so a
+     # measurement of one line would reserve a third of what a 3-line string paints
      @@measure_text_cache[key] = result
      result
    end
@@ -893,19 +1081,23 @@ SFML text has built-in padding/offsets that must be handled consistently between
 
 3. **Clipping** (explicit `PushClip`/`PopClip` primitives in the draw list):
 
-   Clipping is not applied automatically by the renderer — widgets that need to clip their content emit `PushClip`/`PopClip` structs via the `push_clip(rect)` / `pop_clip` DSL helpers in `PrimitiveBuilder`:
+   Clipping is not applied automatically by the renderer — widgets that need to clip their content emit `PushClip`/`PopClip` structs via `PrimitiveBuilder#clipped`:
 
    ```crystal
    # In a widget's to_primitives:
-   push_clip(clip_rect)
-   # ... primitives that must be clipped ...
-   pop_clip
+   clipped(clip_rect, within: local_bounds) do
+     # ... primitives that must be clipped ...
+   end
    ```
 
-   The renderer executes `PushClip`/`PopClip` in the primitive stream as a scissor stack. The `rendering_leaf?` method exists on `Widget` but is not part of the clipping pipeline.
+   `clipped` owns the pair: its `ensure` makes an unbalanced emission unrepresentable, so an early return or a conditional branch inside the block cannot leak a clip into the rest of the list. `push_clip`/`pop_clip` are **private** to `PrimitiveBuilder` precisely so that guarantee holds rather than being a convention. `within:` is the widget's own local bounds — when the rect covers them the clip is a no-op *given* the renderer's widget-bounds clip (pushed on all three execution paths), so it is not emitted at all and a widget that clips nothing costs no primitives.
+
+   Shared helpers build on it for the cut-content marker. On X, `clipped_text_bands(text_row, offset, text_width)` returns the left/right marker rects (or nil per edge) — pass the *same* rect to `clipped` and to `clipped_text_bands`, since that identity is what stops "is this cut?" and "where do we cut it?" disagreeing. A multi-line widget passes the whole value box, so the bar spans the cell: per-line segments were tried and read as artifacts beside a block, and `measure_text(value).width` is the widest line, so one bar lights whenever ANY line overflows. On Y, `clipped_block_bands(box, ink_top, ink_bottom, content_above, content_below)` returns the top/bottom bands; its predicate is the caller's: a line counts as cut until its ink is COMPLETELY inside the box (a bar that goes out when a line merely STARTS to appear claims the value is whole while half of it is missing), and the caller must gate it on `line_count > 1` — a single line's glyphs legitimately overhang a tight cell, so an ungated ink test marks every cell in every table. It is the exact transposition of the horizontal bar — same nominal thickness, same third-of-the-box cap, same backdrop, drawn behind the glyphs — so the two axes are one cue rather than two that merely sit near each other. `mark_clipped_text(bands, on: backdrop)` takes any `Enumerable(Rect?)` — a two-Tuple satisfies it — and fills them in a colour derived from the backdrop the widget actually paints, derived lazily and ONCE per call, since the derivation costs four `pow` and most cells fit: hand it all of a block's bands in one call rather than calling it per line.
+
+   The renderer executes `PushClip`/`PopClip` in the primitive stream as a clip stack, and **nested clips INTERSECT** — an inner clip can only ever shrink the region an outer one allows, never widen it. (It used to be inner-replaces-outer, which let an inner rect paint outside its parent.) The clip itself is not a `glScissor` the renderer issues: it is the render target's view scissor, so it survives SFML re-activating that target — see `docs/LAYER_RENDERING_ARCHITECTURE.md`, "Clipping (who owns the scissor)". Note `SFMLRenderer#execute_primitive` currently no-ops these two primitives. The `rendering_leaf?` method exists on `Widget` but is not part of the clipping pipeline.
 
 **How it works**:
-- `measure_text` returns visual size: width from `local_bounds.width`, height from `font.get_line_spacing` (consistent across glyphs); results are memoized
+- `measure_text` returns visual size: width from `local_bounds.width` — which for a multi-line string is the WIDEST line — and height from `font.get_line_spacing` (consistent across glyphs) **times the line count**, since SFML renders `\n` natively; results are memoized. A string with no break measures exactly as it always did.
 - Widget.bounds is sized using measured size plus padding
 - `draw_text` calls `font.get_text_offsets`: left comes from the text's `local_bounds.left`; top comes from a per-size reference glyph ("Ag") so all text at the same size shares the same baseline
 - Visual glyphs render exactly at the requested position
