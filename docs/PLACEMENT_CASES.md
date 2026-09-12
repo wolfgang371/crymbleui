@@ -31,7 +31,8 @@ Rules for this file:
 | UC-10 | Any cell | Content is never displaced outside its own box | Field reports #55, #58–#60 | sweep X |
 | UC-11 | The band crosses the content's own extent | No step as it crosses | Reported as 6px of ink for 1px of panel height | I6 |
 | UC-12 | The panel is resized a pixel at a time | Content does not step inside its box | Field reports of text jumping a line on resize | I5 |
-| UC-13 | A cell that can show nothing | Is not repainted | Perf: 22.4ms/frame, two-thirds of it invisible cells | I7 + `placement_cost_spec` |
+| UC-13 | A cell whose ink did not move | Is not repainted | Perf: 22.4ms/frame, two-thirds of it invisible cells. Was "a cell that can show nothing is not repainted" until 2026-09-12: true of the SCREEN, false of the CACHE, because the viewport cache blit-shifts a cell's pixels back into view without re-rendering it (UC-27) | I7 + `placement_cost_spec` |
+| UC-27 | A cell leaves the band and its ink moves in the same frame | It is repainted anyway | The 2026-09-10 rendering glitch. `handle_viewport_cache_scroll` blit-shifts the content layer's buffer, so pixels of cells outside the band come back into view unrendered; a cell that took its ink with it on the way out shows the old position. Only expressible at WHEEL-SIZED steps -- swept 3px at a time the ink reaches its clamp before the cell leaves, and 1100+ moves produced 0 of this class (step 50: 253) | I7 + `cache_validation_spec` (-Dcache_validation) |
 | UC-14 | A held label whose visible slice has room for it | Is not clipped | The `slack` CAP dragged labels out of the band; 8.5px of 14 shown with 27px of room | sweep S |
 
 | UC-15 | A ruler number and a cell on the same line, that line cut by the viewport | They stay on one line | They are different glyph sizes, so a hold that clamps each by its OWN height pushes them by different amounts — measured at up to 4.2px apart on a cut row | I9 |

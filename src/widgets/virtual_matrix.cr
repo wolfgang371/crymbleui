@@ -1096,14 +1096,25 @@ module CrymbleUI
         region = ink_region_for(!span.nil?, span_top, span_size, box_top, lo, hi, pinned)
         next if w.ink_region == region
         w.ink_region = region
-        # Assigned always, repainted only when it can be SEEN. A widget renders into a backend
-        # clipped to its own bounds (layer_renderer.cr:1667), so a content cell whose box is
-        # outside the band shows nothing and its stale cache cannot be observed. Safe because
-        # visibility cannot change without the region changing: band_lo/band_hi are both stated
-        # relative to box_top, so a box or band that moved yields a different region and lands
-        # here. Sticky cells are excluded — they are repositioned onto their own layers, so their
-        # box is not where they appear.
-        next if content_cell && (box_top >= hi || box_top + w.bounds.height <= lo)
+        # Repainted when the cell's INK ACTUALLY MOVES A PIXEL -- not when its region changes.
+        #
+        # A region is restated against a moving box on every frame of a scroll, so it differs for
+        # almost every carrier; the placement derived from it usually does not, because it is
+        # clamped. Measured on one scroll frame of the 100-row fixture: 126 active cells, 96 with a
+        # changed region and unmoved ink, 12 moved and in the band, 6 moved while OUTSIDE it.
+        #
+        # Those 6 are the defect this replaces. The test was "outside the band, so it shows nothing
+        # and a stale cache cannot be observed" -- true of the SCREEN, false of the CACHE. The
+        # content layer is a viewport cache whose buffer is the viewport plus `cache_extent` on
+        # each side, and `handle_viewport_cache_scroll` BLIT-SHIFTS that buffer on a recenter,
+        # preserving pixels without re-rendering the cells they came from. A cell that left the
+        # band with its ink moved keeps the old pixels, and they come back into view.
+        #
+        # Asking the WIDGET is what makes this affordable: only it knows its content height, and
+        # the answer is one pixel comparison rather than a repaint. `nil` means it cannot say (no
+        # ink yet, or no region), and then the cell is repainted -- the safe direction.
+        moved = w.responds_to?(:ink_moves_under?) ? w.ink_moves_under?(region) : nil
+        next if moved == false
         # The transient signal only. Both the blit plan and the layer's per-widget path re-render
         # on needs_render?, and that render rebuilds the primitives — so the cache never has to be
         # dropped explicitly, and a dropped cache that nothing repaints is a stranded cell.

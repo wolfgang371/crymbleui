@@ -89,10 +89,11 @@ module CrymbleUI
       # local because `responds_to?` narrows a variable, not an implicit self.
       me = self
       if me.responds_to?(:ink_region) && (r = me.ink_region)
-        held = held_in_region(natural_in(r, ref_h), r.pos, r.size, ref_h, r.band_lo,
-          r.band_hi, ref_h, r.pinned)
-        return confine(held, ref_h)
+        placed = place_ink(r, ref_h, ref_h, false, band_top)
+        remember_ink(ref_h, ref_h, false, band_top, placed)
+        return placed
       end
+      remember_ink(ref_h, ref_h, false, band_top, anchor)
       anchor
     end
 
@@ -141,12 +142,79 @@ module CrymbleUI
         # answer differently puts a step at the frame a region appears — measured as a block
         # reversing direction mid-scroll, -1.0px then +0.5px at scroll 24 (sweep R), when this
         # branch alone was changed.
-        start = line_count > 1 ? r.pos + band_top : natural_in(r, block_extent)
-        held = held_in_region(start, r.pos, r.size, block_extent, r.band_lo, r.band_hi, ref_h,
-          r.pinned)
-        return confine(held, block_extent)
+        placed = place_ink(r, block_extent, ref_h, line_count > 1, band_top)
+        remember_ink(block_extent, ref_h, line_count > 1, band_top, placed)
+        return placed
       end
+      remember_ink(block_extent, ref_h, line_count > 1, band_top, anchor)
       anchor
+    end
+
+    # WHERE THIS WIDGET'S INK LANDED LAST TIME, and where it would land under another region.
+    #
+    # The matrix needs this to decide what to REPAINT. Marking on a changed region is far too
+    # coarse: a region is restated against a moving box every frame, so on one scroll frame of a
+    # 100-row grid 96 of 126 cells get a different region and place their ink in exactly the same
+    # place (their position is clamped, so the change is absorbed). Repainting on the region
+    # repaints all 96; skipping by the band misses the 6 whose ink DID move while off-band, whose
+    # stale pixels the viewport cache then blits back into view. Only the ink itself is the truth.
+    #
+    # Every INPUT the placement consumed is remembered, not just the content, because the answer
+    # must be REPLAYED exactly rather than approximated. A first version kept only the content and
+    # re-derived the rest: it passed the content where the block passes one LINE, and centred a
+    # multi-line block that is anchored at its top. Both are invisible on a single-line cell, which
+    # is most of a grid, so it measured as a working cache right up to the cells that matter.
+    #
+    # Recorded on the anchor path as well as the held one. Only the held path recorded at first,
+    # and a cell that scrolled through a frame with NO region drew its anchor while the memory
+    # still held the last held value — so the next frame compared against ink the cell never drew
+    # and skipped the repaint. That is a stale cache produced BY the mechanism meant to prevent it
+    # (cell {2,2} at scroll 0 -> 50, ink -83 -> -80, unmarked). The rule is simply: whatever this
+    # widget places, it remembers.
+    @ink_content : Float64? = nil
+    @ink_line : Float64? = nil
+    @ink_top_anchored : Bool = false
+    @ink_band_top : Float64 = 0.0
+    @ink_placed : Float64? = nil
+
+    # WHERE INK GOES WHEN A REGION HOLDS IT -- the only copy of that answer.
+    #
+    # Both placement methods and the repaint predictor call this one. They used to spell it out
+    # separately, and the predictor's spelling drifted: it passed the block's whole extent where
+    # the placement passes one LINE, and centred a block the placement anchors at its top. The
+    # cost of a second copy here is not a wrong pixel, it is a cell reported as NOT MOVED whose
+    # cache is then never rebuilt -- the disagreement is invisible until it shows as a stale
+    # rendering on screen, which is the most expensive way to learn of it.
+    private def place_ink(region, content : Float64, line : Float64, top_anchored : Bool,
+                          band_top : Float64) : Float64
+      start = top_anchored ? region.pos + band_top : natural_in(region, content)
+      confine(held_in_region(start, region.pos, region.size, content, region.band_lo,
+        region.band_hi, line, region.pinned), content)
+    end
+
+    private def remember_ink(content : Float64, line : Float64, top_anchored : Bool,
+                             band_top : Float64, placed : Float64) : Nil
+      @ink_content = content
+      @ink_line = line
+      @ink_top_anchored = top_anchored
+      @ink_band_top = band_top
+      @ink_placed = placed
+    end
+
+    # nil until the widget has placed ink once, and whenever it has none to place.
+    def ink_moves_under?(region) : Bool?
+      content = @ink_content
+      line = @ink_line
+      placed = @ink_placed
+      return nil unless content && line && placed
+      return nil unless region # the widget's own anchor, which this cannot reproduce here
+      # Byte-identical to the held branch of vcentered_text_y / vcentered_block_y, which is the
+      # whole contract of this method: a prediction that merely resembles the placement reports a
+      # cell as unmoved and leaves its cache showing the old position.
+      would = place_ink(region, content, line, @ink_top_anchored, @ink_band_top)
+      # A PIXEL is the unit that matters: ink is snapped at draw, so a sub-pixel difference paints
+      # the same and a repaint would be waste.
+      would.round != placed.round
     end
 
     # Confine placed ink to the widget's CURRENT box.

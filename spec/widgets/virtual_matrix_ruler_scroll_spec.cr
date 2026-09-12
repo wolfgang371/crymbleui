@@ -116,10 +116,9 @@ describe "VirtualMatrix ruler scroll update (headerless adapter)" do
       renderer, app, matrix = make_ruler_scroll_dsl
 
       ruler = matrix.row_ruler_widget.not_nil!
-      prims_before = ruler.to_primitives(ruler.bounds)
-      r1_before = prims_before.select(CrymbleUI::DrawText).find { |t| t.text == "1" }
-      r1_before.should_not be_nil
-      r1_y_before = r1_before.not_nil!.position.y
+      before = ruler.to_primitives(ruler.bounds)
+        .select(CrymbleUI::DrawText).to_h { |t| {t.text, t.position.y} }
+      before.should_not be_empty
 
       # Small vertical scroll
       scroll_point = CrymbleUI::Vec2.new(400.0, 200.0)
@@ -130,10 +129,22 @@ describe "VirtualMatrix ruler scroll update (headerless adapter)" do
       matrix.scroll_offset.y.should be > 0.0
 
       ruler_after = matrix.row_ruler_widget.not_nil!
-      prims_after = ruler_after.to_primitives(ruler_after.bounds)
-      r1_after = prims_after.select(CrymbleUI::DrawText).find { |t| t.text == "1" }
-      r1_after.should_not be_nil
-      r1_after.not_nil!.position.y.should be < r1_y_before
+      after = ruler_after.to_primitives(ruler_after.bounds)
+        .select(CrymbleUI::DrawText).to_h { |t| {t.text, t.position.y} }
+
+      # Judged on the numbers STILL ON SCREEN, not on a hand-picked one. This used to assert that
+      # "1" survived the scroll and moved up; one wheel notch is 30px here against a 23px row, so
+      # row 1 ends up entirely above the band, behind the ruler strip. The ruler no longer emits a
+      # label for a line outside the band at all -- it used to emit one for every line and let the
+      # widget clip it -- so "1" is legitimately absent and the old assertion pinned the earlier
+      # behaviour. What the example is actually for is that the ruler RE-RENDERS against the new
+      # scroll offset, which every surviving number shows.
+      common = before.keys & after.keys
+      common.should_not be_empty, "no ruler number survived the scroll: #{before.keys} -> #{after.keys}"
+      common.each do |label|
+        after[label].should be < before[label],
+          "ruler number #{label} did not move up: #{before[label]} -> #{after[label]}"
+      end
     end
   end
 end

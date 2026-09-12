@@ -400,37 +400,75 @@ describe "placement invariants, swept one pixel at a time" do
       "content stepped as the band crossed its extent:\n  #{offenders.first(6).join("\n  ")}"
   end
 
-  it "I7: a cell entering the band is repainted on the frame it enters" do
-    # The licence for update_ink_regions skipping the repaint of an invisible content cell. That
-    # skip leaves a stale cache behind on purpose — sound only if nothing can become visible while
-    # still holding one. So this asserts the entry frame itself, which is where it would break:
-    # every content cell whose box was outside the band and now is not must be marked.
+  it "I7: ink that moved since the last frame is repainted on the frame it moves" do
+    # The licence for update_ink_regions NOT repainting a cell. Until 2026-09-12 this asserted the
+    # MECHANISM of the day -- "every cell entering the band is marked" -- which the pass no longer
+    # does, and correctly: a cell can enter the band with ink that never moved, and repainting it
+    # is waste. (Measured before weakening the claim: cell {25,2} enters at scroll 18 having held
+    # local ink 0.0 since scroll 0.) So this asserts the property underneath both mechanisms.
+    #
+    # A cell's cached pixels are its own rendering. If its ink sits somewhere new this frame, the
+    # cache drawn last frame shows the old place, and only `mark_needs_render` rebuilds it -- so
+    # ink that moved unmarked is a stale cache, wherever the box happens to be. Visibility is
+    # deliberately NOT a condition: `handle_viewport_cache_scroll` blit-shifts the content layer's
+    # buffer, carrying pixels of cells outside the band back into view without re-rendering them.
+    #
+    # THE STEP SIZE IS PART OF THE FIXTURE. Swept 3px at a time this guard is green against the
+    # very defect it exists for, because a cell reaches its clamp while still in the band and its
+    # ink is already at rest by the time it leaves: measured over four sweep shapes, 0 off-band
+    # moves in ~1100 moves. One wheel event is ~50px, and a cell crossing out in a single frame
+    # takes its ink with it -- same fixture, step 50: 253 off-band moves. The pixel gate
+    # (cache_validation_spec, -Dcache_validation) found the 2026-09-10 defect for exactly this
+    # reason: it scrolls by wheel events. So the sweep below mixes both, and the counters at the
+    # end fail the test if a future change flattens either class back to zero.
+    #
+    # Compared frame-to-frame, never against a re-render, so it cannot be satisfied by recomputing
+    # both sides -- which left two earlier drafts green with `mark_needs_render` deleted outright.
     renderer, app, matrix = demo_matrix
+    steps = [] of Tuple(Float64, Float64)
+    (0..60).each { |i| steps << {0.0, i.to_f64 * 3.0} }          # fine: in-band movement
+    (0..18).each { |i| steps << {0.0, i.to_f64 * 50.0} }         # wheel-sized: crossings
+    (0..18).each { |i| steps << {i * 50.0, 900.0 - i * 50.0} }   # diagonal, and back up
     offenders = [] of String
-    seen_before = {} of Tuple(Int32, Int32) => Bool
-    (0..60).each do |i|
-      matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, i.to_f64 * 3.0)
+    previous = {} of Tuple(Int32, Int32) => Float64
+    moved_in_band = 0
+    moved_off_band = 0
+
+    steps.each do |(sx, sy)|
+      matrix.scroll_offset = CrymbleUI::Vec2.new(sx, sy)
       matrix.pre_render_flush # marks; the render below then consumes them, as a real frame does
       lo = matrix.ruler_row_height_pixels + matrix.sticky_row_height_pixels
       hi = matrix.bounds.height
       matrix.active_cells.each do |key, w|
         row, col = key
         next unless row >= matrix.sticky_row_count && col >= matrix.sticky_col_count
-        # Only cells the rule HOLDS are marked by this pass, so only they can be left stale by
-        # the skip it guards. An unheld cell's placement does not depend on the band at all.
-        next unless w.ink_region || seen_before.has_key?(key)
-        top = w.bounds.y - matrix.scroll_offset.y
-        visible = top < hi && top + w.bounds.height > lo
-        if visible && seen_before[key]? == false && w.ink_region && !w.needs_render?
-          offenders << "cell #{key} entered the band at scroll #{(i * 3)} carrying a stale cache"
+        marked = w.needs_render? # BEFORE to_primitives, which rebuilds and clears it
+        ink = w.to_primitives(w.bounds).select(CrymbleUI::DrawText).first?.try(&.position.y)
+        next unless ink
+        ink -= w.bounds.y # local to the cell: what its own cached surface holds
+        box_top = w.bounds.y - sy
+        if (was = previous[key]?) && (was - ink).abs > 0.5
+          if box_top >= hi || box_top + w.bounds.height <= lo
+            moved_off_band += 1
+          else
+            moved_in_band += 1
+          end
+          unless marked
+            offenders << "cell #{key} moved its ink #{was.round(1)} -> #{ink.round(1)} at scroll " \
+                         "#{sx.to_i},#{sy.to_i} (box_top #{box_top.round(1)}) without being repainted"
+          end
         end
-        seen_before[key] = visible
+        previous[key] = ink
       end
       renderer.render_frame(app)
     end
 
+    moved_in_band.should be > 100, "no ink moved inside the band -- the sweep stopped exercising it"
+    moved_off_band.should be > 20,
+      "no ink moved OUTSIDE the band: the sweep can no longer express the defect this guards " \
+      "(a cell leaving with its ink, whose pixels the viewport cache blits back into view)"
     offenders.should be_empty,
-      "a cell became visible without being repainted:\n  #{offenders.first(6).join("\n  ")}"
+      "a cell kept a cache of ink it no longer draws:\n  #{offenders.first(6).join("\n  ")}"
   end
 
   it "I9: a ruler number and the cells of the line it names sit on one line" do

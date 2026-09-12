@@ -30,7 +30,38 @@ class VirtualMatrixDemoApp < CrymbleUI::App
     end
   end
 
+  {% if flag?(:scroll_autotest) %}
+    # IN-PROCESS scroll driver, for measuring REAL SFML frame cost (build with
+    # -Dscroll_autotest -DPERF_LOG -DPROFILE and run under DISPLAY=:0; read /tmp/perf_log.txt).
+    #
+    # It drives the app's OWN wheel entry point on the renderer's own loop, which is what makes the
+    # numbers real: the frames are rendered by SFML, through the same event path a hand-scroll takes.
+    # Never a desktop tool -- nothing outside this process touches the window.
+    @autotest_started : Bool = false
+    @autotest_frames : Int32 = 0
+
+    private def start_autotest
+      return if @autotest_started
+      return unless sched = CrymbleUI::Widget.scheduler? # nil on the pre-renderer build
+      @autotest_started = true
+      limit = (ENV["AUTOTEST_FRAMES"]? || "150").to_i
+      at = CrymbleUI::Vec2.new(700.0, 450.0)
+      sched.schedule(8.milliseconds, repeating: true) do
+        if @autotest_frames >= limit
+          quit
+        else
+          @autotest_frames += 1
+          handle_mouse_wheel(CrymbleUI::Vec2.new(0.0, -1.0), at, false)
+          update_hover(at)
+        end
+      end
+    end
+  {% end %}
+
   def build : CrymbleUI::Widget
+    {% if flag?(:scroll_autotest) %}
+      start_autotest
+    {% end %}
     adapter = ensure_adapter
 
     window("VirtualMatrix Demo", 1400, 900) do
