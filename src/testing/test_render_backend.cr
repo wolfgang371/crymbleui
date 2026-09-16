@@ -591,34 +591,50 @@ module CrymbleUI
           return if dx0 >= dx1 || dy0 >= dy1
 
           cols = dx1 - dx0
-          (dy0...dy1).each do |ty|
-            src_offset = (ty - offset_y) * @width + (dx0 - offset_x)
-            dst_offset = ty * target.width + dx0
+          # Row POINTERS, not indices. Both rows are already known to be inside both buffers —
+          # that is what the clipping above establishes — so re-deriving and bounds-checking the
+          # index for every pixel is pure overhead, and this is the hottest loop in the headless
+          # renderer by a wide margin: one idle frame of a real app composites ~3.6M pixels here
+          # (measured 2026-09-12: 183ms of a 290ms frame, 63%, while painting nothing at all).
+          # Arithmetic below is byte-for-byte what it was, floats included, so no pixel moves.
+          src_base = @pixels.to_unsafe
+          dst_base = target.@pixels.to_unsafe
+          ty = dy0
+          while ty < dy1
+            src_row = src_base + ((ty - offset_y) * @width + (dx0 - offset_x))
+            dst_row = dst_base + (ty * target.width + dx0)
 
             if use_alpha_blend
-              # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent
-              cols.times do |j|
-                src_color = @pixels[src_offset + j]
+              # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent.
+              # `while`, not `cols.times do |j|`: the specs build in DEBUG mode, where the block
+              # is a real closure call per pixel rather than an inlined loop body — and this runs
+              # millions of times a frame. Same arithmetic, same order.
+              j = 0
+              while j < cols
+                src_color = src_row[j]
                 if src_color.a == 255
-                  target.@pixels[dst_offset + j] = src_color
+                  dst_row[j] = src_color
                 elsif src_color.a > 0
-                  bg = target.@pixels[dst_offset + j]
+                  bg = dst_row[j]
                   a = src_color.a / 255.0
-                  target.@pixels[dst_offset + j] = Color.new(
+                  dst_row[j] = Color.new(
                     ((src_color.r * a + bg.r * (1 - a)).to_i).clamp(0, 255).to_u8,
                     ((src_color.g * a + bg.g * (1 - a)).to_i).clamp(0, 255).to_u8,
                     ((src_color.b * a + bg.b * (1 - a)).to_i).clamp(0, 255).to_u8,
                     255_u8
                   )
                 end
+                j += 1
               end
             else
-              # COPY mode: direct copy, no alpha check. Indexed rather than
-              # `@pixels[src_offset, cols]` — that slice allocates a fresh Array per ROW,
-              # and this is the architecture's main path (every widget texture into its
-              # layer, every frame).
-              cols.times { |j| target.@pixels[dst_offset + j] = @pixels[src_offset + j] }
+              # COPY mode: one memcpy per row. Color is a 4-byte struct, the rows cannot overlap
+              # (distinct backends), and every pixel is written unconditionally — so the loop was
+              # only ever a slow way of spelling this. The previous comment rejected
+              # `@pixels[src_offset, cols]` because a slice allocates an Array per row; copy_from
+              # allocates nothing.
+              dst_row.copy_from(src_row, cols)
             end
+            ty += 1
           end
           return
         end

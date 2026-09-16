@@ -94,14 +94,32 @@ end
 
 describe CrymbleUI::Widgets::DirBrowser::MatrixAdapter do
     describe "click navigation" do
-        it "clicking a directory entry calls on_navigate with the name stripped of trailing '/'" do
+        # Changed 2026-09-12: one click SELECTS a directory, two ENTER it. It used to navigate on
+        # the first click, so the same gesture meant different things one row apart — a file needed
+        # two clicks to be taken, a directory acted on one. This example asserted the old rule.
+        it "clicking a directory entry selects it, and does not navigate yet" do
+            adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
+            adapter.items = [{"../", "", "", dir_info}]
+            navigated_to : String? = nil
+            selected : String? = nil
+            adapter.on_navigate = ->(name : String) { navigated_to = name; nil }
+            adapter.on_select_dir = ->(name : String) { selected = name; nil }
+
+            btn = adapter.cell_paint(1, 0).as(CrymbleUI::Button)
+            btn.on_click
+
+            navigated_to.should be_nil, "a single click walked into the directory"
+            selected.should eq("../"), "a single click must select it, trailing slash and all"
+        end
+
+        it "clicking a directory TWICE navigates, with the name stripped of trailing '/'" do
             adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
             adapter.items = [{"../", "", "", dir_info}]
             navigated_to : String? = nil
             adapter.on_navigate = ->(name : String) { navigated_to = name; nil }
 
-            btn = adapter.cell_paint(1, 0).as(CrymbleUI::Button)
-            btn.on_click
+            adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
+            adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
 
             navigated_to.should eq("..")
         end
@@ -145,26 +163,51 @@ describe CrymbleUI::Widgets::DirBrowser::MatrixAdapter do
             accepted.should eq("hello.txt")
         end
 
-        it "two clicks far apart in time do NOT fire on_accept" do
+        # RED FIRST: activation must not expire. The rule is "the first click
+        # SELECTS and the second ACTS" — a two-step activation, not a double-click — so a user who
+        # selects a row, looks at it, and clicks again must still get the action. This example
+        # SLEEPS on purpose and that cannot make it flaky: more delay only makes the assertion
+        # more true. It was RED while the predicate consulted the clock.
+        it "a second click on the same row acts however long the user took over it" do
             adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
-            adapter.items = [{"hello.txt", "", "", file_info}]
-            accepted : String? = nil
-            adapter.on_accept = ->(n : String) { accepted = n; nil }
+            adapter.items = [{"subdir/", "", "", dir_info}]
+            nav_calls : Array(String) = [] of String
+            adapter.on_navigate = ->(n : String) { nav_calls << n; nil }
 
-            btn1 = adapter.cell_paint(1, 0).as(CrymbleUI::Button)
-            btn1.on_click
+            adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
+            sleep 0.6.seconds # longer than the 500 ms window this used to be gated on
+            adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
 
-            # Simulate the threshold expiring by rewinding the adapter's
-            # internal last-click stamp far enough into the past.
-            adapter.expire_last_click_for_test!
-
-            btn2 = adapter.cell_paint(1, 0).as(CrymbleUI::Button)
-            btn2.on_click
-
-            accepted.should be_nil
+            nav_calls.should eq(["subdir"]),
+              "the second click did not act — activation is still expiring on wall clock"
         end
 
-        it "double-clicking a DIRECTORY navigates (does not fire on_accept)" do
+        # This example is RESTATED rather than deleted. It pinned "two clicks far apart in
+        # TIME do not accept" — the old double-click rule for files, the half left behind when
+        # activation became a two-step gesture. Time is no longer what separates two clicks;
+        # the ROW is. So the surviving contract is the one that still protects the user from an
+        # accidental accept: a click that lands somewhere else moves the selection instead of
+        # completing the previous one.
+        it "a click on a DIFFERENT row does not accept — selection moves, it does not accumulate" do
+            adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
+            adapter.items = [{"hello.txt", "", "", file_info}, {"other.txt", "", "", file_info}]
+            accepted : String? = nil
+            selected : Array(String) = [] of String
+            adapter.on_accept = ->(n : String) { accepted = n; nil }
+            adapter.on_select_file = ->(n : String) { selected << n; nil }
+
+            adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click # select hello.txt
+            adapter.cell_paint(2, 0).as(CrymbleUI::Button).on_click # a DIFFERENT row
+
+            accepted.should be_nil, "clicking a different row completed the previous row's activation"
+            selected.should eq(["hello.txt", "other.txt"]), "the second click did not re-select"
+
+            # ...and the row now selected still accepts on ITS second click.
+            adapter.cell_paint(2, 0).as(CrymbleUI::Button).on_click
+            accepted.should eq("other.txt")
+        end
+
+        it "double-clicking a DIRECTORY navigates ONCE (does not fire on_accept)" do
             adapter = CrymbleUI::Widgets::DirBrowser::MatrixAdapter.new
             adapter.items = [{"subdir/", "", "", dir_info}]
             accepted : String? = nil
@@ -175,8 +218,10 @@ describe CrymbleUI::Widgets::DirBrowser::MatrixAdapter do
             adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
             adapter.cell_paint(1, 0).as(CrymbleUI::Button).on_click
 
-            accepted.should be_nil
-            nav_calls.size.should eq(2)
+            accepted.should be_nil, "a directory is never ACCEPTED as the chosen file"
+            # Was 2, when every click navigated. The first click now selects, so a double-click
+            # enters the directory exactly once — which is what the gesture means everywhere else.
+            nav_calls.size.should eq(1)
             nav_calls.first.should eq("subdir")
         end
     end

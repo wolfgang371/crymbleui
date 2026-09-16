@@ -189,6 +189,14 @@ module CrymbleUI
     #
     # The refusal is the LIBRARY's, not the consumer's: `interactive_resize` stays a separate hard
     # veto for a consumer that wants no resizing whatsoever.
+    #
+    # DECIDED 2026-09-13, do not re-propose: letting a drag mark that line "manual" and exempting
+    # it from sizing thereafter was offered and DECLINED. It would lift this refusal, at the price
+    # of a per-line manual flag to persist and a mode that silently stops following some lines.
+    # What made the refusal hurt was never the refusal — it was that a pinned line could not grow
+    # and a spanning cell sized nothing, so a cut label had no way out at all. Both are fixed
+    # (bounded pinned growth, and spans sizing the lines they cover), and the mode is a toggle:
+    # switch it off and every line drags again.
     private def line_is_content_sized?(axis : ResizeAxis, index : Int32) : Bool
       @auto_size
     end

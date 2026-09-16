@@ -6,7 +6,7 @@ require "../rendering/layer_renderer"
 require "../rendering/render_trigger"
 require "./test_render_backend"
 require "../rendering/pixel_snap"
-require "./test_shortcut_manager"
+require "../input/shortcut_manager"
 require "./test_clipboard"
 
 module CrymbleUI
@@ -20,7 +20,7 @@ module CrymbleUI
 
       getter backend : TestRenderBackend  # Main window buffer
       getter scheduler : Scheduler
-      getter shortcut_manager : TestShortcutManager
+      getter shortcut_manager : ShortcutManager
 
       # Tracking
       getter render_frame_count : Int32 = 0
@@ -75,7 +75,7 @@ module CrymbleUI
       def initialize(width : Int32 = 800, height : Int32 = 600)
         @backend = TestRenderBackend.new(width, height)  # Window buffer
         @scheduler = Scheduler.new
-        @shortcut_manager = TestShortcutManager.new
+        @shortcut_manager = ShortcutManager.new
 
         # Set global scheduler for widgets (shortcut manager not set in headless mode)
         Widget.scheduler = @scheduler
@@ -93,7 +93,15 @@ module CrymbleUI
         # the behaviour under test. CONDITIONAL so it cannot clobber the instance
         # crymbleui's own spec_helper installs and its specs hold references to.
         Widget.clipboard = TestClipboard.new unless Widget.clipboard?
-        # Note: Widget.shortcut_manager not set - headless tests don't test keyboard shortcuts
+        # The REAL ShortcutManager, not a stub. `register_shortcut` in the DSL returns early when
+        # none is installed, so with the stub in place NO shortcut in a headless test was ever
+        # registered — a dialog's Escape, a confirm box's Enter and every panel binding were
+        # unreachable, and a spec could only assert that the code calling register_shortcut ran.
+        # The manager is pure lookup over SF key enums and needs no window, so headless can have
+        # the real thing; fire one with `Widget.shortcut_manager.trigger("Escape", panel.path_id)`.
+        # CONDITIONAL for the same reason as the focus manager above: never clobber an instance a
+        # suite's spec_helper installed and holds a reference to.
+        Widget.shortcut_manager = @shortcut_manager unless Widget.shortcut_manager?
 
         # Baseline for the per-frame zoom-epoch check (see render_frame). Seed to the
         # current epoch so a fresh renderer only reacts to zoom changes during its life

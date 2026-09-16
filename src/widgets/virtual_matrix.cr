@@ -381,12 +381,12 @@ module CrymbleUI
     @cached_row_scroll_rank : Array(Int32)? = nil
 
     # -- Group 4: Creation/destruction region caches --
-    @last_creation_col_key : Tuple(Int32, Int32?)? = nil
-    @last_creation_row_key : Tuple(Int32, Int32?)? = nil
+    @last_creation_col_key : Tuple(Int32, Int32?, Int32?, Int32?)? = nil
+    @last_creation_row_key : Tuple(Int32, Int32?, Int32?, Int32?)? = nil
     @last_creation_col_result : Array(Int32)? = nil
     @last_creation_row_result : Array(Int32)? = nil
-    @last_destruction_col_key : Tuple(Int32, Int32?)? = nil
-    @last_destruction_row_key : Tuple(Int32, Int32?)? = nil
+    @last_destruction_col_key : Tuple(Int32, Int32?, Int32?, Int32?)? = nil
+    @last_destruction_row_key : Tuple(Int32, Int32?, Int32?, Int32?)? = nil
     @last_destruction_col_result : Array(Int32)? = nil
     @last_destruction_row_result : Array(Int32)? = nil
 
@@ -553,40 +553,91 @@ module CrymbleUI
       widest = Array.new(col_order.size, 0.0)
       tallest = Array.new(row_order.size, 0.0)
       multiline = Array.new(row_order.size, false)
+      fh = frame_height
+      # PASS 1 — every cell votes on the lines it does NOT span.
+      #
+      # A spanning cell still cannot vote on one line: a grouped header across eight columns would
+      # dump its whole width into the first, and a row-header across eight records would make all
+      # eight that tall. That is why such cells used to be skipped altogether, which left a cluster
+      # header simply cut with content sizing having nothing to say about it. They are collected
+      # here instead and settled in pass 2, against the lines they actually cover.
+      spans = [] of Tuple(Int32, Int32, Int32, Int32, Float64, Float64, Int32)
       row_order.size.times do |r|
         col_order.size.times do |c|
-          # A cell that SPANS several lines does not vote on any one of them: a grouped header
-          # covering eight columns would otherwise dump its whole width into the first, and a
-          # row-header spanning eight records would make all eight that tall. Its own fit is not
-          # guaranteed here — it may show its cut marker — which is the honest trade until the
-          # deficit is distributed across the lines it covers.
           bounding = adapter.cell_get_bounding_box(r, c)
-          spans_cols = bounding[1][1] != bounding[0][1]
-          spans_rows = bounding[1][0] != bounding[0][0]
-          next if spans_cols && spans_rows
+          r0, c0 = bounding[0]
+          r1, c1 = bounding[1]
+          spans_cols = c1 != c0
+          spans_rows = r1 != r0
           natural = adapter.cell_natural_size(r, c)
           widest[c] = natural[:width] if !spans_cols && natural[:width] > widest[c]
           if !spans_rows && natural[:lines] > 1 && natural[:height] > tallest[r]
             tallest[r] = natural[:height]
             multiline[r] = true
           end
+          # Once per span, at its origin: every covered cell reports the same box.
+          if (spans_cols || spans_rows) && r == r0 && c == c0
+            spans << {r0, r1, c0, c1, natural[:width], natural[:height], natural[:lines]}
+          end
         end
       end
 
-      # A STICKY line is sized to its content like any other — but it may only SHRINK.
+      # PASS 2 — a span must FIT across the lines it covers, so any shortfall is shared out.
       #
-      # The hazard is one-directional. GROWING a pinned line past the viewport promises what the
-      # layout cannot keep: it never scrolls, so the overflow is unreachable by any gesture AND
-      # unmarked, because the cell fits its own text and it is the VIEWPORT that clips it, one level
-      # above where the cut marker looks. SHRINKING cannot do that — a line narrower than it was
-      # hides nothing that was not already hidden — and refusing it made the mode leave a wide,
-      # empty record-label column beside compacted data columns, which is not "sized to content" by
-      # any reading (field report).
+      # Shortest span first: a narrow group settles before a wider one that contains it, and the
+      # wider one then measures against what the narrow one already secured — otherwise the outer
+      # group would pay for width its own children are about to add.
       #
-      # So: never wider than the user already had it, never narrower than its ruler label (the ruler
-      # strip paints no cut marker, so a cut label would be a silent loss). Per AXIS — a cell in a
-      # pinned column still votes its line count to its own row, which scrolls normally.
-      fh = frame_height
+      # Crossing a line boundary is worth one grid_spacing plus the pixel auto_col_units adds, so a
+      # span gets that much for free per boundary; without it a span across k lines would demand k
+      # times more than it needs.
+      per_boundary = grid_spacing + 1.0
+      spans.sort_by! { |span| span[3] - span[2] }
+      spans.each do |(r0, r1, c0, c1, width, _height, _lines)|
+        next unless c1 > c0 && c1 < widest.size
+        covered = c1 - c0 + 1
+        have = (c0..c1).sum { |c| widest[c] } + (covered - 1) * per_boundary
+        deficit = width - have
+        next unless deficit > 0.0
+        share = deficit / covered
+        (c0..c1).each { |c| widest[c] += share }
+      end
+      spans.sort_by! { |span| span[1] - span[0] }
+      spans.each do |(r0, r1, c0, c1, _width, height, lines)|
+        # Height follows the same rule as an ordinary cell: only genuinely multi-line content grows
+        # a row, because a single line's natural height already exceeds the box it paints in.
+        next unless r1 > r0 && lines > 1 && r1 < tallest.size
+        covered = r1 - r0 + 1
+        single = DEFAULT_ROW_HEIGHT * fh - 1.0
+        have = (r0..r1).sum { |r| multiline[r] ? tallest[r] : single } + (covered - 1) * per_boundary
+        deficit = height - have
+        next unless deficit > 0.0
+        share = deficit / covered
+        (r0..r1).each do |r|
+          tallest[r] = (multiline[r] ? tallest[r] : single) + share
+          multiline[r] = true
+        end
+      end
+
+      # A STICKY line is sized to its content like any other, and may GROW — but the pinned strip
+      # as a whole is BOUNDED.
+      #
+      # It was shrink-only until 2026-09-13, to stop a pinned line growing past a viewport it
+      # cannot scroll: pinned lines do not move, so anything pushed beyond the edge is unreachable
+      # by any gesture. True, but it banned growth outright and that made a too-narrow row-header
+      # column a dead end — the mode would not widen it, and the drag is refused while the mode is
+      # on, so the label stayed cut with no way out at all (field report: "I cannot resize c1 and
+      # c2 if auto-size is active", where c1/c2 are exactly the pinned columns).
+      #
+      # The invariant worth keeping is not "never grow", it is "the pinned strip must not swallow
+      # the viewport". So each pinned line is sized to its content, and if the strip then exceeds
+      # PINNED_MAX_SHARE of the visible grid the pinned lines are scaled back into that budget
+      # (never below the floor). A line that still cannot fit shows its cut marker, which is honest
+      # and, unlike the old rule, escapable.
+      #
+      # Floor unchanged: never narrower than its ruler label — the ruler strip paints no cut
+      # marker, so a cut label would be a silent loss. Per AXIS — a cell in a pinned column still
+      # votes its line count to its own row, which scrolls normally.
       floor = auto_col_floor_units(fh)
       sticky_cols = sizing_sticky_col_count
       sticky_rows = sizing_sticky_row_count
@@ -603,13 +654,9 @@ module CrymbleUI
       end
       col_order.size.times do |c|
         wanted = auto_col_units(widest[c], fh)
-        @col_widths[c] = if c < sticky_cols
-                           # shrink-only, and never below the label floor
-                           Math.max(Math.min(wanted, @col_widths[c]? || wanted), floor)
-                         else
-                           wanted
-                         end
+        @col_widths[c] = c < sticky_cols ? Math.max(wanted, floor) : wanted
       end
+      fit_pinned_cols(fh)
       if ENV["CRYMBLE_AUTOSIZE_LOG"]?
         STDERR.puts "[autosize] widths AFTER =#{@col_widths.map(&.round(2))}"
       end
@@ -619,8 +666,9 @@ module CrymbleUI
         # viewport it cannot scroll. Its floor is DEFAULT_ROW_HEIGHT, which `auto_row_units`
         # already applies — there is no label-width counterpart, because the row ruler's label
         # is bounded by the ruler's WIDTH, not by the row's height.
-        @row_heights[r] = r < sticky_rows ? Math.min(wanted, @row_heights[r]? || wanted) : wanted
+        @row_heights[r] = wanted
       end
+      fit_pinned_rows(fh)
 
       destroy_active_cells
       @force_cell_update = true
@@ -733,19 +781,20 @@ module CrymbleUI
       return unless @auto_size
       fh = frame_height
       changed = false
-      # Sticky lines are not content-sized (see flush_auto_size): per axis, and here too — this is
-      # the per-keystroke path, and it writes the arrays directly.
-      if col >= sizing_sticky_col_count
-        wanted_col = auto_col_units(content_width, fh)
-        if wanted_col > (@col_widths[col]? || 0.0)
-          @col_widths[col] = wanted_col
-          changed = true
-        end
+      # Sticky lines grow here too, under the same budget as flush_auto_size — this is the
+      # per-keystroke path and it writes the arrays directly, so leaving it out would re-cut the
+      # very column the toggle had just fitted, the moment the user typed into it.
+      wanted_col = auto_col_units(content_width, fh)
+      if wanted_col > (@col_widths[col]? || 0.0)
+        @col_widths[col] = wanted_col
+        fit_pinned_cols(fh) if col < sizing_sticky_col_count
+        changed = true
       end
-      if lines > 1 && row >= sizing_sticky_row_count
+      if lines > 1
         wanted_row = auto_row_units(content_height, fh)
         if wanted_row > (@row_heights[row]? || 0.0)
           @row_heights[row] = wanted_row
+          fit_pinned_rows(fh) if row < sizing_sticky_row_count
           changed = true
         end
       end
@@ -827,6 +876,41 @@ module CrymbleUI
     # navigable — and a cut LABEL is invisible, because the ruler strip is the one place that
     # paints no cut marker, so the user would get no signal at all. With rulers hidden there is
     # no label to protect and the floor is the ordinary minimum.
+    # The most of the visible grid the PINNED strip may occupy. Half: enough for a row-header
+    # column to state itself, never enough to leave the scrolling content without room.
+    PINNED_MAX_SHARE = 0.5
+
+    # That share expressed in the units sizes are stored in. Each line also costs one grid_spacing
+    # of box inset, which is part of the strip on screen and so comes out of the budget.
+    private def pinned_budget_units(visible_px : Float64, pinned_count : Int32, fh : Float64) : Float64
+      budget_px = Math.max(visible_px, 0.0) * PINNED_MAX_SHARE - pinned_count * grid_spacing
+      Math.max(budget_px, 0.0) / fh
+    end
+
+    private def fit_pinned_cols(fh : Float64) : Nil
+      count = sizing_sticky_col_count
+      fit_pinned_strip(@col_widths, count,
+        pinned_budget_units(bounds.width - ruler_col_width_pixels, count, fh), auto_col_floor_units(fh))
+    end
+
+    private def fit_pinned_rows(fh : Float64) : Nil
+      count = sizing_sticky_row_count
+      fit_pinned_strip(@row_heights, count,
+        pinned_budget_units(bounds.height - ruler_row_height_pixels, count, fh), DEFAULT_ROW_HEIGHT)
+    end
+
+    # Scale the pinned lines back into their budget, proportionally, never below `floor`. A pinned
+    # line that cannot fit its content then shows its cut marker — which is the honest outcome, and
+    # one the user can act on: shrink a neighbour, or turn the mode off and drag.
+    private def fit_pinned_strip(sizes : Array(Float64), pinned_count : Int32,
+                                 budget_units : Float64, floor : Float64) : Nil
+      return if pinned_count <= 0 || budget_units <= 0.0
+      total = (0...pinned_count).sum { |i| sizes[i]? || 0.0 }
+      return if total <= budget_units
+      scale = budget_units / total
+      (0...pinned_count).each { |i| sizes[i] = Math.max((sizes[i]? || 0.0) * scale, floor) }
+    end
+
     private def auto_col_floor_units(fh : Float64) : Float64
       return MIN_COL_WIDTH unless show_rulers
       label_px = Widget.measure_text("c99", FontSizing.calculate_size(RULER_LABEL_FONT_SCALE)).width
@@ -2777,15 +2861,28 @@ module CrymbleUI
         buffer : Float64, viewport_size : Float64, scroll_pos : Float64,
         cumulative : Array(Int32), physical_cum : Array(Int32),
         scroll_rank : Array(Int32), sticky_count : Int32,
-        last_key : Tuple(Int32, Int32?)?, last_result : Array(Int32)?,
-        & : Tuple(Int32, Int32?), Array(Int32) ->
+        last_key : Tuple(Int32, Int32?, Int32?, Int32?)?, last_result : Array(Int32)?,
+        & : Tuple(Int32, Int32?, Int32?, Int32?), Array(Int32) ->
     ) : Array(Int32)
       min_pos = (scroll_pos - buffer).floor.to_i32.clamp(0, Int32::MAX)
       max_pos = (scroll_pos + viewport_size + buffer).ceil.to_i32
 
       ns = cumulative.bsearch_index { |p| p >= min_pos } || scroll_rank.size
       ib = cumulative.bsearch_index { |p| p > max_pos }
-      key = {ns, ib}
+      # The key has to capture everything the RESULT depends on, and the result is decided in two
+      # different spaces: `ns`/`ib` index `cumulative`, built in SCROLL order, while the select
+      # below compares `physical_cum`, in PHYSICAL order. A sticky line is moved to the tail of the
+      # scroll order, so every other line sits one sticky-width earlier in scroll space than it is
+      # physically — and in that window the two disagree. With one line wide enough to span a whole
+      # viewport move, `ib` then cannot change while the select's answer does: the key stays put and
+      # a stale region is returned, so a line that has just come into view never gets cells
+      # (a pasted sheet's last column went blank when the window was widened).
+      # These two indices close that: they move exactly when the edges cross a PHYSICAL boundary,
+      # which is precisely what the select asks. The cache stays as coarse as it was — this is not
+      # keyed on the viewport size, which would recompute on every pixel of a scroll drag.
+      ip_max = physical_cum.bsearch_index { |p| p >= max_pos }
+      ip_min = physical_cum.bsearch_index { |p| p > min_pos }
+      key = {ns, ib, ip_min, ip_max}
 
       if last_key == key && last_result
         return last_result

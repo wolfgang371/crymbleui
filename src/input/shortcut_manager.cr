@@ -88,19 +88,25 @@ module CrymbleUI
                 event.system,
                 event.code
             )
+            dispatch(shortcut, active_panel.try &.path_id)
+        end
 
-            # 1. Try active panel shortcuts first (if panel active)
-            if active_panel
-                panel_id = active_panel.path_id
-                if panel_map = @panel_shortcuts[panel_id]?
-                    if handler = panel_map[shortcut]?
-                        handler.call
-                        return true
-                    end
+        # Fire a registered shortcut by the string it was registered with, exactly as a key press
+        # would — same lookup, same order, same handler. Headless tests have no key events, so
+        # without this a panel shortcut can only be proven to REGISTER, never to do anything.
+        def trigger(shortcut_str : String, panel_id : String? = nil) : Bool
+            dispatch(Shortcut.parse(shortcut_str), panel_id)
+        end
+
+        # The active panel wins over global, so a dialog's Escape does not reach the app's.
+        private def dispatch(shortcut : Shortcut, panel_id : String?) : Bool
+            if panel_id && (panel_map = @panel_shortcuts[panel_id]?)
+                if handler = panel_map[shortcut]?
+                    handler.call
+                    return true
                 end
             end
 
-            # 2. Try global shortcuts
             if handler = @global_shortcuts[shortcut]?
                 handler.call
                 return true

@@ -3,12 +3,6 @@ require "./virtual_matrix"
 module CrymbleUI
   module Widgets
     module DirBrowser
-      # Mouse-click double-click window. A second click on the SAME file
-      # within this many milliseconds fires `on_accept` (auto-close the
-      # dialog with that file). Matches the convention used elsewhere in
-      # the framework (TextInput::DOUBLE_CLICK_THRESHOLD_MS = 500).
-      DOUBLE_CLICK_THRESHOLD_MS = 500
-
       # VirtualMatrix adapter for file browser table
       # Row 0 = sticky header (Filename, Size, Date)
       # Rows 1..N = file/directory entries
@@ -19,33 +13,34 @@ module CrymbleUI
         property items : Array({String, String, String, File::Info}) = [] of {String, String, String, File::Info}
         property sort_column : Int32 = 0
         property sort_ascending : Bool = true
-        property selected_filename : String = ""
+        # The highlighted row, file OR directory — a directory is selected by one click and
+        # entered by the second, so it has to be able to show as selected in between.
+        property selected_name : String = ""
 
         # Callbacks
         property on_navigate : Proc(String, Nil)? = nil
         property on_select_file : Proc(String, Nil)? = nil
+        # First click on a directory. The second, inside the double-click window, navigates.
+        property on_select_dir : Proc(String, Nil)? = nil
         property on_sort : Proc(Int32, Nil)? = nil
-        # Fired when the user double-clicks a file row (two clicks on the
-        # same file name within DOUBLE_CLICK_THRESHOLD_MS). Hosts wire
+        # Fired by the SECOND click on an already-selected file row. Hosts wire
         # this to "accept the dialog with this file selected".
         property on_accept : Proc(String, Nil)? = nil
 
-        # Double-click bookkeeping — exposed as properties because the
-        # host (a dialog/window panel) typically recreates the adapter on
-        # every render frame, so state can't live on the adapter alone.
-        # Host pattern:
+        # Which row the previous click landed on — the whole of the activation
+        # bookkeeping. Exposed as a property because the host (a dialog/window
+        # panel) typically recreates the adapter on every render frame, so the
+        # state can't live on the adapter alone. Host pattern:
         #   adapter.last_click_file = dialog.last_click_file
-        #   adapter.last_click_time = dialog.last_click_time
-        # and in `on_select_file` / `on_accept`, the host writes the
-        # values back to the dialog so the NEXT frame re-seeds correctly.
+        # and in `on_select_file` / `on_select_dir` / `on_accept`, the host writes
+        # the value back to the dialog so the NEXT frame re-seeds correctly.
+        #
+        # There is deliberately no timestamp beside it. Activation here is a
+        # two-step gesture, not a double-click: the second click acts whenever it
+        # comes, and clicking a DIFFERENT row moves the selection instead. A wall
+        # clock would make the rule depend on how long the host took to draw —
+        # which it did, and which no test could reach through a real click.
         property last_click_file : String? = nil
-        property last_click_time : Time::Instant = Time::Instant.new(0_i64, 0_u32)
-
-        # Test seam: rewind the last-click stamp so the next click is
-        # outside the double-click window without sleeping.
-        def expire_last_click_for_test! : Nil
-          @last_click_time = Time::Instant.new(0_i64, 0_u32)
-        end
 
         def get_scrollorder : {Array(Int32), Array(Int32)}
           n = @items.size + 1
@@ -91,7 +86,7 @@ module CrymbleUI
 
           case col
           when 0
-            selected = @selected_filename == name && !info.directory?
+            selected = @selected_name == name
             # Live theme refs (input_background/text_default), except the selected highlight (a real override).
             btn_bg = selected ? Color.new(60_u8, 100_u8, 180_u8, 255_u8) : Theme.ref(&.input_background)
             captured_name = name
@@ -101,22 +96,22 @@ module CrymbleUI
               text_color: Theme.ref(&.text_default),
               text_align: TextAlign::Left,
               id: "dirbrowser_item_#{index}") do
-              if captured_is_dir
-                # Directory click is always a navigation, never a double-click
-                # accept. Reset the file-side tracker so a stray prior file
-                # click can't double-fire after intervening dir navigation.
-                @last_click_file = nil
-                @on_navigate.try &.call(captured_name.rstrip('/'))
-              else
-                # File click: check for double-click on the same name.
-                now = Time.instant
-                if @last_click_file == captured_name &&
-                   (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
-                  @last_click_file = nil  # prevent triple-click → re-fire
-                  @on_accept.try &.call(captured_name)
+              # ONE activation rule for both kinds: the first click selects, the second acts.
+              # Directories used to navigate on a single click while files needed two, so the same
+              # gesture meant different things one row apart.
+              second = @last_click_file == captured_name
+              if second
+                @last_click_file = nil # prevent a triple click from re-firing
+                if captured_is_dir
+                  @on_navigate.try &.call(captured_name.rstrip('/'))
                 else
-                  @last_click_file = captured_name
-                  @last_click_time = now
+                  @on_accept.try &.call(captured_name)
+                end
+              else
+                @last_click_file = captured_name
+                if captured_is_dir
+                  @on_select_dir.try &.call(captured_name)
+                else
                   @on_select_file.try &.call(captured_name)
                 end
               end

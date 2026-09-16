@@ -346,12 +346,15 @@ describe "VirtualMatrix auto-size" do
     matrix.get_col_width(0).should be >= 1.0   # ...but not past its own ruler label
   end
 
-  it "does not size a STICKY column — it could never be scrolled to" do
-    # A sticky line never scrolls, so sizing it past the viewport promises what the layout cannot
-    # keep: the overflow is unreachable by any gesture AND unmarked, because the CELL fits its own
-    # text — it is the viewport that clips it, one level above where the cut marker looks. Left
-    # unsized, content > box, so the band lights and Enter reveals the value through the editor's
-    # own scrolling.
+  it "sizes a STICKY column to its content, BOUNDED so the strip cannot swallow the viewport" do
+    # Changed 2026-09-13. This asserted that a sticky line is never sized at all, because sizing it
+    # past the viewport would put content where no gesture can reach — a pinned line does not
+    # scroll. True, but banning growth made a too-narrow header column a DEAD END: the mode would
+    # not widen it and the drag is refused while the mode is on, so the label stayed cut with no
+    # way out ("I cannot resize c1 and c2 if auto-size is active").
+    #
+    # The invariant that actually mattered is kept, and asserted below: the pinned strip may not
+    # take more than its share of the grid. Within that, it fits its content like any other line.
     adapter = StickyAutoSizeAdapter.new(6, 3)
     adapter.set(0, 0, "a very long record label that would swallow the whole viewport")
     matrix, app, renderer = rendered_matrix(adapter)
@@ -362,13 +365,17 @@ describe "VirtualMatrix auto-size" do
     matrix.auto_size = true
     renderer.settle_rendering(app)
 
-    matrix.get_col_width(0).should eq(sticky_before)       # the sticky line is left alone...
-    matrix.get_col_width(1).should_not eq(neighbour_before) # ...and the control moved
+    matrix.get_col_width(0).should be > sticky_before, "the header column stayed cut"
+    matrix.get_col_width(1).should_not eq(neighbour_before) # the control moved too
+    grid = 700.0 - matrix.ruler_col_width_pixels
+    matrix.sticky_col_width_pixels.should be <= grid * 0.5 + 1.0,
+      "the pinned strip took more than its share of the grid, so the content lost its room"
   end
 
-  it "does not size a sticky column while TYPING either" do
-    # The per-keystroke path is the one the field report came from, and it writes @col_widths
-    # directly — gating only the toggle path would leave the reported case unfixed.
+  it "sizes a sticky column while TYPING too, under the same bound" do
+    # The per-keystroke path writes @col_widths directly, so it needs the same rule as the toggle:
+    # were it left refusing, typing into a header cell would re-cut the very column the toggle had
+    # just fitted.
     adapter = StickyAutoSizeAdapter.new(6, 3)
     matrix, app, renderer = rendered_matrix(adapter)
     matrix.auto_size = true
@@ -380,24 +387,32 @@ describe "VirtualMatrix auto-size" do
     matrix.fit_cell_to_content(0, 1, 900.0, 20.0, 1) # the same into an ordinary column: the control
     matrix.pre_render_flush
 
-    matrix.get_col_width(0).should eq(sticky_before)
+    matrix.get_col_width(0).should be > sticky_before
     matrix.get_col_width(1).should be > neighbour_before
+    grid = 700.0 - matrix.ruler_col_width_pixels
+    matrix.sticky_col_width_pixels.should be <= grid * 0.5 + 1.0,
+      "900px of typed content pushed the pinned strip past its share of the grid"
   end
 
-  it "does not size a STICKY ROW, on either path" do
+  it "sizes a STICKY ROW on both paths, bounded by its share of the grid" do
+    # Same change as the column above, on the other axis: 40 lines in a pinned header row used to
+    # be left cut with no way to reveal them.
     adapter = StickyRowAutoSizeAdapter.new(6, 3)
     adapter.set(0, 1, (1..40).map { |i| "line#{i}" }.join("\n"))
     matrix, app, renderer = rendered_matrix(adapter)
     matrix.sticky_row_count.should eq(1) # instrument
     sticky_before = matrix.get_row_height(0)
+    grid = 400.0 - matrix.ruler_row_height_pixels
 
     matrix.auto_size = true
     renderer.settle_rendering(app)
-    matrix.get_row_height(0).should eq(sticky_before)
+    matrix.get_row_height(0).should be > sticky_before, "the pinned header row stayed one line tall"
+    matrix.sticky_row_height_pixels.should be <= grid * 0.5 + 1.0
 
     matrix.fit_cell_to_content(0, 1, 60.0, 900.0, 40)
     matrix.pre_render_flush
-    matrix.get_row_height(0).should eq(sticky_before)
+    matrix.sticky_row_height_pixels.should be <= grid * 0.5 + 1.0,
+      "the typing path grew the pinned row past its share of the grid"
   end
 
   it "a sticky column's cell still votes its LINE COUNT to its own row" do
