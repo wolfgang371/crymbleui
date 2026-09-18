@@ -50,7 +50,11 @@ CELL_INK = CrymbleUI::Color.new(45, 50, 55, 255)
 private def sticky_col_ink_outside_cells(matrix, renderer) : Array(Tuple(Int32, Int32))
   sv = matrix.content_scroll_view.not_nil!
   layer = sv.sticky_col_layer.not_nil!
-  backend = layer.backend.not_nil!
+  # `.as(TestRenderBackend)`, not the bare union: get_pixel exists only on the headless backend, and
+  # `layer.backend` is typed (CrSFMLBackend | TestRenderBackend). Crystal 1.21 let the call through;
+  # `latest`, which CI compiles with, rejects it — so this spec passed here and broke the public CI
+  # build. The same cast is the established idiom in virtual_matrix/drag_highlight_spec.cr.
+  backend = layer.backend.as(CrymbleUI::Testing::TestRenderBackend)
   vm_abs = matrix.absolute_bounds
   dx = vm_abs.x - layer.bounds.x
   dy = vm_abs.y - layer.bounds.y
