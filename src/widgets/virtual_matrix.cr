@@ -663,7 +663,14 @@ module CrymbleUI
     # Rebuild one line's two largest by measuring just that line — O(cells on the line), and only
     # when the runner-up was consumed. This is the whole cost of the fallback: one column, never
     # the table.
-    private def rescan_col_extent(col : Int32) : Nil
+    # `live_*` is the value of the cell being EDITED RIGHT NOW, which the adapter does not have.
+    #
+    # A rescan asks the adapter for every cell on the line, and the adapter answers from the MODEL.
+    # The live path runs on every keystroke, long before the edit is committed, so for the edited
+    # cell the model still holds the OLD text — rescanning would re-measure the very value the user
+    # just changed and conclude nothing had. The caller has the fresh numbers; it passes them in for
+    # its own cell and lets the adapter speak for the rest.
+    private def rescan_col_extent(col : Int32, live_row : Int32? = nil, live_width : Float64? = nil) : Nil
       adapter = @adapter
       return unless adapter
       row_order, col_order = adapter.get_scrollorder
@@ -675,12 +682,18 @@ module CrymbleUI
       row_order.size.times do |r|
         bounding = adapter.cell_get_bounding_box(r, col)
         next if bounding[1][1] != bounding[0][1] # a spanning cell does not vote on one column
-        offer_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at,
-                     col, r, adapter.cell_natural_size(r, col)[:width])
+        width = (live_width && r == live_row) ? live_width : adapter.cell_natural_size(r, col)[:width]
+        offer_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at, col, r, width)
       end
     end
 
-    private def rescan_row_extent(row : Int32) : Nil
+    # See rescan_col_extent for why the caller's own cell is passed in rather than read back.
+    # This axis is where it MATTERS: a cell losing its last line break always lands here, so the
+    # stale read made a row that had grown tall stay tall for good, while columns (which rescan only
+    # when the runner-up has been consumed) usually shrank anyway. Wolfgang: "it's not working for
+    # row heights".
+    private def rescan_row_extent(row : Int32, live_col : Int32? = nil,
+                                  live_height : Float64? = nil, live_lines : Int32? = nil) : Nil
       adapter = @adapter
       return unless adapter
       row_order, col_order = adapter.get_scrollorder
@@ -693,11 +706,17 @@ module CrymbleUI
       col_order.size.times do |c|
         bounding = adapter.cell_get_bounding_box(row, c)
         next if bounding[1][0] != bounding[0][0]
-        natural = adapter.cell_natural_size(row, c)
-        next unless natural[:lines] > 1
+        if live_lines && c == live_col
+          lines = live_lines
+          height = live_height || 0.0
+        else
+          natural = adapter.cell_natural_size(row, c)
+          lines = natural[:lines]
+          height = natural[:height]
+        end
+        next unless lines > 1
         multi = true
-        offer_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at,
-                     row, c, natural[:height])
+        offer_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at, row, c, height)
       end
       @as_multiline[row] = multi if row < @as_multiline.size
     end
@@ -954,7 +973,7 @@ module CrymbleUI
         col_moved = update_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at,
                                   col, row, content_width)
         if col_moved == :rescan
-          rescan_col_extent(col)
+          rescan_col_extent(col, row, content_width)
           col_moved = true
         end
         row_moved = false
@@ -963,7 +982,7 @@ module CrymbleUI
           moved = update_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at,
                                 row, col, content_height)
           if moved == :rescan
-            rescan_row_extent(row)
+            rescan_row_extent(row, col, content_height, lines)
             row_moved = true
           else
             row_moved = moved
@@ -971,7 +990,7 @@ module CrymbleUI
         elsif row < @as_row_best.size && @as_row_best_at[row] == col
           # The cell that made this row tall is no longer multi-line, so the row may fall back to a
           # single line — but only a rescan can say whether another cell still holds it tall.
-          rescan_row_extent(row)
+          rescan_row_extent(row, col, content_height, lines)
           row_moved = true
         end
         if col_moved || row_moved

@@ -1195,8 +1195,24 @@ module CrymbleUI
 
         # In FullEdit, Up moves one LINE up — which for a single-line value is the start,
         # exactly as before.
-        clear_selection
-        move_caret_by_line(-1)
+        #
+        # SHIFT EXTENDS, as it does on Left/Right. This branch did not exist: the handler called
+        # clear_selection unconditionally, so Shift+Up moved the caret a line AND destroyed the
+        # selection — worse than ignoring the key (Wolfgang, 2026-09-18: "holding shift and cursor
+        # left/right works, but not w/ cursor up/down").
+        #
+        # The QuickEntry early-return above is deliberately NOT given the `&& !shift` that Left and
+        # Right carry. In QuickEntry a cell inside a VirtualMatrix never receives these keys anyway
+        # (wants_arrow_keys? is false, so the matrix keeps them), and there shift+vertical is the
+        # grid's own range selection over CELLS. Consuming it here would take that away to fix
+        # something that is not broken.
+        if shift
+          start_selection_if_needed
+          move_caret_by_line(-1)
+        else
+          clear_selection
+          move_caret_by_line(-1)
+        end
         reset_cursor_blink
         true
       when SF::Keyboard::Key::Down
@@ -1212,9 +1228,14 @@ module CrymbleUI
         return false if edit_mode == TextInputMode::QuickEntry
 
         # In FullEdit, Down moves one LINE down — which for a single-line value is the end,
-        # exactly as before.
-        clear_selection
-        move_caret_by_line(1)
+        # exactly as before. Shift extends; see the Up case for why the QuickEntry return stays.
+        if shift
+          start_selection_if_needed
+          move_caret_by_line(1)
+        else
+          clear_selection
+          move_caret_by_line(1)
+        end
         reset_cursor_blink
         true
       when SF::Keyboard::Key::Home, SF::Keyboard::Key::End

@@ -1,4 +1,4 @@
-require "spec"
+require "../spec_helper"
 
 # CLAIMING REPAIR REQUIRES IMPLEMENTING IT.
 #
@@ -42,8 +42,12 @@ EXPECTED_REPAIR_CLAIMANTS = {
 # DEFINES the mechanism rather than using it.
 REPAIR_MECHANISMS = ["mark_needs_resize_shift("]
 
+# src_glob, not a bare Dir.glob: spec_helper's version normalises the separator
+# (`Dir.glob(...).map(&.gsub('\\', '/'))`), and without it this spec passes everywhere except
+# Windows, where the glob yields `src\widgets\virtual_matrix.cr` and the comparison against the
+# reviewed list fails on the slashes alone. That is exactly how it broke the public CI.
 private def repair_lint_sources : Array(String)
-  Dir.glob("src/**/*.cr").sort
+  src_glob("src/**/*.cr")
 end
 
 private def strip_comment(line : String) : String

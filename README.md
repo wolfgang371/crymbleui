@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.4.1**
+**Version 1.4.2**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,20 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~37709 LOC
-- spec/: ~72944 LOC
+- src/: ~37749 LOC
+- spec/: ~73103 LOC
+
+## Used by
+
+[**H3O Embrace**](https://github.com/holistic3fficientsolutions/embrace) is built entirely on
+CrymbleUI: a data application whose grid is one big `VirtualMatrix`, with pinned headers, content
+sizing and live editing over tables of thousands of records.
+
+It is worth naming because most of this library's harder machinery exists for it. The virtual
+matrix, the sticky row and column layers, content auto-sizing, the viewport cache and the
+blit-shift scrolling path were all built against a real application under real load, and the bugs
+that shaped them -- stale pixels after a fast scroll, a column that would not narrow again, a
+ghosted logo behind a resized panel -- were found by using it, not by testing it.
 
 ## Features
 
