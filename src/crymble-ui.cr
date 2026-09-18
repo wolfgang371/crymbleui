@@ -36,6 +36,7 @@ require "./layout/decorated_container"
 require "./rendering/sfml_paint_context"
 require "./rendering/sfml_renderer"
 require "./rendering/cache_validation"
+require "./rendering/blit_probe"
 
 # DSL and testing
 require "./dsl/builder"

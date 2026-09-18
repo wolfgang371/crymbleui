@@ -231,6 +231,21 @@ module CrymbleUI
     # Without this, app.rebuild clears ALL layers including overlays (expensive, unnecessary).
     property skip_rebuild_clear : Bool = false
 
+    # "I repair my own geometry — do not clear me when a child moves."
+    #
+    # note_position_change clears the layer holding a moved widget's vacated pixels, because nothing
+    # else repaints where a widget WAS. A layer that translates its own buffer instead must opt out,
+    # or the clear throws away the shift it was about to perform.
+    #
+    # This used to be implied by `viewport_cache`, which was too broad: the repair it assumed is
+    # mark_needs_resize_shift, and the ONLY callers of that are VirtualMatrix's two (column resize,
+    # row resize). A plain ScrollView's content layer is viewport_cache with no such mechanism, so it
+    # was exempted from the clear while having nothing to repair itself with — and content that
+    # reflowed inside one left its old pixels behind. That is embrace's About dialog: narrow it and
+    # the logo's footer was stamped at every size it had passed through (Wolfgang, 2026-09-17).
+    # Opt IN, so a layer claims repair only if it actually implements it.
+    property owns_geometry_repair : Bool = false
+
     property viewport_cache : Bool = false
     # Opt-in: this layer's top-level widgets are a grid of TILING cells (adjacent, gaps filled by grid
     # lines, over a uniform background). Only such a layer is eligible for the direct-to-layer cell render

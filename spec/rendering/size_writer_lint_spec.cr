@@ -31,14 +31,24 @@ LINT_SIZE_WRITER_HELP = <<-HELP
   Then add the site to EXPECTED_SIZE_WRITERS below, in the same commit as its refresh.
   HELP
 
-# file => number of size-array write sites. Reviewed baseline, 2026-09-02. The count is SITES, not
+# file => number of size-array write sites. Reviewed baseline, 2026-09-02; re-reviewed
+# 2026-09-17 when auto-size gained its shrink (same count: the shared write-back replaced
+# flush_auto_size's own). The count is SITES, not
 # methods: several methods write both arrays. The reviewed set is
 #   :403,:420   ctors                    — nothing (no ScrollView, no layer yet)
-#   :606,:622   flush_auto_size          — refresh_after_size_change. One assignment per axis:
-#                                          a pinned line takes min(content, current) so it can
-#                                          compact but never grow past a viewport it cannot scroll
-#   :722,:729   fit_cell_to_content      — refresh_after_size_change(sticky: false) (flush_fit_cells
-#                                          does the sticky work once, at the end of the same frame)
+#   :746,:754   apply_line_extents       — the ONE write-back, shared by the full sweep and the
+#                                          per-keystroke path (they must agree about what a line is
+#                                          owed, and duplicating it is how they would stop). Its
+#                                          callers own the refresh: flush_auto_size does the full
+#                                          refresh_after_size_change, fit_cell_to_content does
+#                                          refresh_after_size_change(sticky: false). Both re-apply
+#                                          the pinned budget afterwards — this rewrites EVERY line,
+#                                          so a pinned column's bounded width would otherwise come
+#                                          back unbounded
+#   :994,:1001  fit_cell_to_content      — refresh_after_size_change(sticky: false) (flush_fit_cells
+#                                          does the sticky work once, at the end of the same frame).
+#                                          The grow-only fallback, used only before any full sweep
+#                                          has recorded line extents to shrink back to
 #   :836,:848   row_height / col_width   — invalidate_dimension_caches only; they schedule a
 #                                          LAYOUT, which is what publishes the extents there
 #   :859,:868   the two drag setters     — invalidate_dimension_caches only, deferred by design

@@ -33,6 +33,7 @@ crystal spec -Dcache_validation -Dverify_bounds \
   spec/rendering/cache_validation_widen_spec.cr \
   spec/rendering/cv_non_matrix_oracle_spec.cr \
   spec/rendering/scroll_view_resize_cv_spec.cr \
+  spec/rendering/image_shrink_ghost_cv_spec.cr \
   spec/autotest/ \
   spec/widgets/virtual_matrix_rendering_spec.cr \
   spec/widgets/virtual_matrix_black_rows_spec.cr \

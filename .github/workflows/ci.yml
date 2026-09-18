@@ -6,6 +6,13 @@ name: CI
 # needed, and run in a single `crystal spec` (unlike embrace, crymble-ui has no GUI/non-GUI
 # fiber split). Slow specs (tag "slow", ~10 min) are skipped to keep CI fast — run the full
 # suite locally before a release.
+#
+# ONE EXCEPTION, added 2026-09-17: the scroll-cost budgets. They are tagged "slow" and were
+# therefore excluded, and that exclusion is exactly why they sat red for eight days after the
+# placement rule landed, without anyone noticing. They cost ~1 min, they assert COUNTERS
+# rather than timings — so they are deterministic and need only one platform — and a scroll that
+# starts repainting the whole viewport instead of its edge bands is precisely the regression CI
+# should be catching rather than a human noticing months later.
 
 on:
   push:
@@ -46,6 +53,13 @@ jobs:
         run: |
           source setup.sh
           crystal spec -- --tag '~slow'
+
+      # Deliberately NOT excluded by the ~slow filter above: see the note at the top of this file.
+      # Linux only — these are counters, so a second platform buys nothing.
+      - name: Scroll-cost budgets (tagged slow, run anyway)
+        run: |
+          source setup.sh
+          crystal spec spec/widgets/virtual_matrix_cursor_scroll_perf_spec.cr
 
   # Cache-coherency gate: build the matrix/ScrollView coherency specs with
   # -Dcache_validation, which re-renders each content layer from scratch and pixel-compares it

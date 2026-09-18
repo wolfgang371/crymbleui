@@ -366,6 +366,9 @@ lib LibCSFML
   fun sfRenderWindow_getSize(window : RenderWindow) : Vector2u
   fun sfRenderWindow_setSize(window : RenderWindow, size : Vector2u)
   fun sfRenderWindow_setTitle(window : RenderWindow, title : LibC::Char*)
+  # UTF-32 title. The char* overload above decodes with the LOCAL 8-BIT encoding, so a UTF-8
+  # "\u00AE" arrives as two characters. Anything non-ASCII in a title must go through this one.
+  fun sfRenderWindow_setUnicodeTitle(window : RenderWindow, title : UInt32*)
   fun sfRenderWindow_setIcon(window : RenderWindow, size : Vector2u, pixels : UInt8*)
   fun sfRenderWindow_setVisible(window : RenderWindow, visible : Bool)
   fun sfRenderWindow_setVerticalSyncEnabled(window : RenderWindow, enabled : Bool)

@@ -314,6 +314,49 @@ def last_visible_col(matrix)
   (vp_w + scroll_x - ruler_col_w - col_w) // col_w
 end
 
+# THE SCROLL-FRAME BUDGET, DERIVED (restated 2026-09-17).
+#
+# Before the placement rule (eef1017, "content is centred in the part you can see") a scroll frame
+# could repaint NOTHING: the layer buffer is larger than the viewport, so scrolling inside the cache
+# margin was a pure compositor shift, with an occasional recenter. Both budgets below were written
+# in that world — "<=10 edge cells, observed ~4", and "at least some frames render overlay only".
+#
+# The placement rule ends that by design. A partially-visible cell centres its content in the part
+# you can SEE, so when the visible part moves the content must move with it: the cell is repainted
+# although its value never changed. There is no longer any such thing as a scroll frame that
+# repaints no cells, and no amount of narrowing brings one back.
+#
+# What survives — and is what these specs exist to protect — is that the cost is bounded by the
+# EDGE, not by the grid or even by the viewport height. MEASURED on the 1200x800 drag fixture:
+# 3 rows of the 33 visible repaint, and they are the top band, the bottom band, and the row the step
+# crosses. So the honest bound is
+#
+#     cells = (rows the step crosses + one partial row at each edge) * columns in play
+#     frame = cells + CHROME_WIDGETS
+#
+# which is O(1) in the number of rows and in the grid size. Derived, not fitted: on the 400x300
+# Y-step fixture it predicts 3*6+4 = 22 against an observed 16, and on the drag 4*14+4 = 60 against
+# observed ordinary frames of 46 and 60, with real recenters standing clear at 160..186.
+CHROME_WIDGETS = 4 # column ruler, row ruler, ScrollView, cursor overlay
+# A repainted cell draws its background, its text and its grid edges. Measured 3.7 per widget on the
+# Y-step fixture; the bound exists to catch a widget that starts emitting per-ROW or per-CELL
+# primitives, not to pin today's number.
+MAX_PRIMITIVES_PER_WIDGET = 5
+
+def scroll_frame_budget(matrix, scrolled_px : Float64) : Int32
+  row_h = CrymbleUI::VirtualMatrix::GRID_SPACING + CrymbleUI::VirtualMatrix::DEFAULT_ROW_HEIGHT * 20
+  cols_in_play = matrix.active_cells.keys.map { |k| k[1] }.uniq.size
+  rows_touched = (scrolled_px.abs / row_h).ceil.to_i + 2
+  rows_touched * cols_in_play + CHROME_WIDGETS
+end
+
+# Which ROWS a frame repainted. The shape matters more than the count: the placement rule costs the
+# EDGE BANDS, so a frame that repaints rows spread through the middle is a different bug from one
+# that repaints a few more columns.
+def repainted_rows(names : Array(String)) : Array(Int32)
+  names.compact_map { |n| n =~ /\/(\d+),(\d+)$/ ? $1.to_i : nil }.uniq.sort
+end
+
 describe "VirtualMatrix single-step cursor scroll cost", tags: "slow" do
   it "Y-step (cursor-down-scroll): bounded rendering cost" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
@@ -352,19 +395,37 @@ describe "VirtualMatrix single-step cursor scroll cost", tags: "slow" do
 
     # Pull/SlotBuffer model: a viewport_cache layer VISITS every visible cell each frame and
     # slot-skips the unchanged ones by a {rev, buffer_pos} key (correct-by-construction — a changed cell
-    # can't be missed). So the real perf metric is RE-RENDERED cells, not VISITED cells. The blit-shift
-    # repaints only the newly-exposed edge band (a vertical step ≈ 4 cells); the ~135 overlap cells are
-    # visited (a cheap O(1) slot-check → return nil) but never reach to_primitives or a blit.
-    # TIGHT guarantee — actual re-renders are the edge strip only:
-    lr.frame_widget_count.should be <= 10,
-      "Y-step RE-RENDERED #{lr.frame_widget_count} cells (expected <=10 edge cells, observed ~4)"
+    # can't be missed). So the real perf metric is RE-RENDERED cells, not VISITED cells; the overlap
+    # cells are visited (a cheap O(1) slot-check → return nil) but never reach to_primitives or a blit.
+    #
+    # TIGHT guarantee — the re-renders are the EDGE BANDS, and the budget is derived from the step
+    # rather than pinned to a number (see scroll_frame_budget). Measured here: 12 cells over exactly
+    # two rows, the top edge and the bottom edge, plus four chrome widgets.
+    scrolled = matrix.scroll_offset.y - old_scroll_y
+    budget = scroll_frame_budget(matrix, scrolled)
+    lr.frame_widget_count.should be <= budget,
+      "Y-step RE-RENDERED #{lr.frame_widget_count} widgets after a #{scrolled.round(1)}px step " \
+      "(budget #{budget} = edge bands x columns in play + chrome)"
+    # ...and the SHAPE: only edge rows, never the middle of the viewport. This is the assertion that
+    # would catch the placement rule being applied to fully-visible cells, which the count alone
+    # cannot distinguish from a slightly wider viewport.
+    rows = repainted_rows(lr.rendered_widgets)
+    rows.size.should be <= 3,
+      "Y-step repainted #{rows.size} distinct rows #{rows} — expected the edge bands only "
     # LOOSE sanity guard — iteration is O(visible buffer cells) (~137 here), bounded by the viewport,
     # NOT the 1M-cell grid. This only catches a regression to O(total content); the line above is the
     # real cost bound.
     lr.frame_widgets_iterated.should be <= 300,
       "Y-step VISITED #{lr.frame_widgets_iterated} cells (expected O(visible) ~137, must stay << O(total)=1M)"
-    lr.frame_primitive_count.should be <= 55,
-      "Y-step drew #{lr.frame_primitive_count} primitives (expected <=50, observed 11)"
+    # Primitives follow the repainted widgets, so this is stated PER WIDGET rather than as a total:
+    # the invariant worth protecting is that no widget explodes into an unbounded number of
+    # primitives, not that a frame happens to draw 11 of them. The old total (<=55, "observed 11")
+    # was the pre-placement cell count in disguise and went red for the same reason as the budget
+    # above — more cells repaint, each drawing its own handful.
+    lr.frame_primitive_count.should be <= lr.frame_widget_count * MAX_PRIMITIVES_PER_WIDGET,
+      "Y-step drew #{lr.frame_primitive_count} primitives for #{lr.frame_widget_count} widgets " \
+      "(#{(lr.frame_primitive_count / lr.frame_widget_count.to_f).round(1)} each, budget " \
+      "#{MAX_PRIMITIVES_PER_WIDGET})"
     lr.frame_layer_count.should be <= 10,
       "Y-step rendered #{lr.frame_layer_count} layers (expected <=10, observed 4)"
     lr.frame_layers_needing_render.should be <= 10,
@@ -829,19 +890,30 @@ describe "VirtualMatrix scrollbar thumb drag cost" do
     renderer.layout_count.should eq(0),
       "Slow vthumb drag triggered #{renderer.layout_count} layout passes"
 
-    # Non-recenter frames should render at most a few overlay widgets (scrollbar + cursor),
-    # NOT full cell re-renders. Count frames with high widget count as "recenter spikes".
-    recenter_frames = per_step_widgets.count { |w| w > 10 }
-    non_recenter_frames = drag_steps - recenter_frames
+    # ORDINARY frames versus RECENTERS. This used to read "at least some frames should render
+    # overlay only (<=10 widgets)", which was true before the placement rule and cannot be again:
+    # every frame now repaints the partially-visible edge bands. The old threshold also made the
+    # test's own diagnosis wrong — it inferred "a recenter" from a widget count, so it reported
+    # "cache_extent too small for scroll ratio" for frames that never recentered.
+    #
+    # Note the drag is NOT sub-row, whatever the comment above says: one THUMB pixel is
+    # #{(total_scroll / drag_steps).round(1)} content pixels on a 1000-row grid, more than a 23px
+    # row, so every step necessarily crosses a row boundary. A genuinely sub-row drag is not
+    # expressible on this fixture.
+    step_px = total_scroll / drag_steps
+    budget = scroll_frame_budget(matrix, step_px)
+    ordinary = per_step_widgets.select { |w| w <= budget }
+    ordinary.size.should be > 0,
+      "No frame stayed inside the edge-band budget of #{budget} widgets — counts were " \
+      "#{per_step_widgets} for #{step_px.round(1)}px steps"
 
-    # At least SOME frames should be cheap (non-recenter)
-    non_recenter_frames.should be > 0,
-      "Every frame triggered a full recenter — cache_extent too small for scroll ratio"
-
-    # Non-recenter frames should render very few widgets (overlay only, not cells)
-    non_recenter_max = per_step_widgets.select { |w| w <= 10 }.max? || 0
-    non_recenter_max.should be <= 10,
-      "Non-recenter frames rendered #{non_recenter_max} widgets — expected <=10 (overlay only)"
+    # A recenter repaints the whole buffer, so it must stand CLEAR of the ordinary frames rather
+    # than being read off an arbitrary threshold — and it must still be bounded by what is visible,
+    # never by the 1000x1000 grid.
+    visible_cells = matrix.active_cells.size
+    per_step_widgets.max.should be <= visible_cells + CHROME_WIDGETS,
+      "A frame rendered #{per_step_widgets.max} widgets, more than the #{visible_cells} cells the " \
+      "buffer holds — that is an O(grid) regression, not a recenter"
 
     # Recenter frames are bounded by visible cells (~11 cols × ~34 rows ≈ 374 at 1200×800)
     # plus creation_buffer cells. Allow generous headroom.

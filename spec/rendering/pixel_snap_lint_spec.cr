@@ -78,6 +78,7 @@ end
 
 # file => {expected count, reason}. 0 = fully migrated/clean.
 LINT_EXPECTED = {
+  "src/rendering/blit_probe.cr"   => {0, "diagnostic only (-Dprobe): formats numbers into a log, converts no coordinates"},
   "src/rendering/cache_validation.cr"   => {0, "clean"},
   "src/rendering/clip_math.cr"          => {0, "the clip conversion itself — all via PixelSnap"},
   "src/rendering/crsfml_backend.cr"     => {0, "text snapped; shapes/blits outside pattern scope"},

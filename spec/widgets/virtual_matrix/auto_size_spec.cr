@@ -189,22 +189,46 @@ describe "VirtualMatrix auto-size" do
     matrix.active_cells[{0, 0}].bounds.width.should be > before_width
   end
 
-  it "grows only — a narrower content does not shrink the line mid-edit" do
-    # Shrinking per keystroke would either cost a full-column rescan every time or narrow the
-    # column below what OTHER rows hold, banding cells the user is not editing. The shrink
-    # belongs to the next structural re-measure.
+  it "never narrows a line below what its OTHER cells still hold" do
+    # This was "grows only" until 2026-09-17, and its rationale was that shrinking per keystroke
+    # would "narrow the column below what OTHER rows hold, banding cells the user is not editing".
+    # That concern is exactly right and is now enforced directly rather than by refusing to shrink
+    # at all: the matrix records the two largest cells per line, so a line falls back to the
+    # RUNNER-UP and never below it. The other half of the old rationale — "a full-column rescan
+    # every time" — costs nothing now either, since the runner-up is already known.
+    #
+    # Column 1 is wide in EVERY row of this fixture, so shortening one row's cell must move nothing.
     adapter = AutoSizeAdapter.new(6, 3)
     matrix, app, renderer = rendered_matrix(adapter)
     matrix.auto_size = true
     renderer.settle_rendering(app)
+    wide = matrix.active_cells[{0, 1}].bounds.width
+
+    matrix.fit_cell_to_content(0, 1, 20.0, 20.0, 1)
+    renderer.settle_rendering(app)
+
+    matrix.active_cells[{0, 1}].bounds.width.should eq(wide),
+      "the five other rows still hold the wide value, so the column must not have narrowed"
+  end
+
+  it "does narrow the line when the cell that was holding it wide is the one edited down" do
+    # The counterpart, and the report that prompted the change: a column widened by one long value
+    # stayed wide forever after that value was shortened, because the shrink was left to a
+    # structural re-measure that an ordinary edit never triggers.
+    adapter = AutoSizeAdapter.new(6, 3)
+    matrix, app, renderer = rendered_matrix(adapter)
+    matrix.auto_size = true
+    renderer.settle_rendering(app)
+    narrow = matrix.active_cells[{1, 0}].bounds.width # a neighbour row in the same column
+
     matrix.fit_cell_to_content(0, 0, 300.0, 20.0, 1)
     renderer.settle_rendering(app)
-    grown = matrix.active_cells[{0, 0}].bounds.width
+    matrix.active_cells[{0, 0}].bounds.width.should be > narrow
 
     matrix.fit_cell_to_content(0, 0, 20.0, 20.0, 1)
     renderer.settle_rendering(app)
 
-    matrix.active_cells[{0, 0}].bounds.width.should eq(grown)
+    matrix.active_cells[{0, 0}].bounds.width.should be_close(narrow, 1.0)
   end
 
   it "the incremental path leaves gesture state and dragged sizes alone" do

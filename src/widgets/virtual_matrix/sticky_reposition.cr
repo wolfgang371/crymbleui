@@ -13,7 +13,7 @@ module CrymbleUI
     # - sticky_col cells: x = true_x (fixed horizontally), y = true_y - scroll_offset.y
     # - sticky_corner cells: x = true_x, y = true_y (fixed both ways)
     # - content cells: not touched (viewport_cache handles scroll)
-    private def reposition_sticky_cells
+    private def reposition_sticky_cells(cells_destroyed : Bool = false)
       sticky_rows = sticky_row_count
       sticky_cols = sticky_col_count
       return if sticky_rows == 0 && sticky_cols == 0
@@ -169,7 +169,30 @@ module CrymbleUI
       # no sibling validation, NeedsRender semantics, but still clears old pixels.
       # This is the FALLBACK path (a sticky cell has no cached texture yet); the common scroll/resize
       # case goes through compute_sticky_blit_plans, which is per-layer (only touches changed layers).
-      if any_changed
+      {% if flag?(:probe) %}
+        # Which pass moved the sticky cells this frame? The code says the two run either/or, so a
+        # frame served by NEITHER is a third case worth seeing.
+        if CrymbleUI::BlitProbe.on?
+          CrymbleUI::BlitProbe.emit("reposition pass ran, any_changed=#{any_changed}")
+        end
+      {% end %}
+      # Clear when a cell MOVED (its old pixels are stale where it used to be) or when a sticky cell
+      # was DESTROYED. A destroyed cell leaves its ink behind and the cell created in its place
+      # paints only its own box — and between every pair of rows there is a grid_spacing strip that
+      # NO cell ever paints (row_height_pixels is `grid_spacing + content`, while the cell is laid
+      # out at `row_sizes[row] - grid_spacing`). Those strips are the clear's share of the layer, so
+      # skipping the clear leaves the old rows' glyphs sitting in them: "each number with remnants of
+      # other numbers under it" (Wolfgang, 2026-09-16), reproduced 4 times out of 4 by slamming the
+      # scrollbar to the very top, where 137 of 341 sampled strip pixels held old ink.
+      #
+      # `any_changed` alone could not see it, because on such a jump NOTHING MOVES: every sticky cell
+      # is destroyed and recreated, and a brand-new cell is laid out at its final position.
+      #
+      # This costs nothing in the common case. A scroll that recycles cells a row at a time leaves
+      # most sticky cells holding a cached texture, so it is served by compute_sticky_blit_plans,
+      # whose fast path clears the buffer anyway; we only land here when NO sticky cell has a texture,
+      # which is precisely the frame that replaced all of them at once.
+      if any_changed || cells_destroyed
         sv = @content_scroll_view
         sv.try(&.sticky_row_layer).try(&.mark_needs_clear_and_render)
         sv.try(&.sticky_col_layer).try(&.mark_needs_clear_and_render)

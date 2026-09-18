@@ -68,6 +68,42 @@ Constants:
 - `MIN_COL_WIDTH = 0.5`, `MIN_ROW_HEIGHT = 0.5`
 - `RESIZE_TOLERANCE = 4.0` pixels from border to trigger resize
 
+### Content sizing (`auto_size`), and how a line can SHRINK
+
+`flush_auto_size` is the full sweep: it measures every cell (`cell_natural_size`), settles grouped
+headers across the lines they span, and writes the sizes. It is the only pass that can measure, and
+it is expensive — **273–625 ms** on a 2561 x 7 table, measured in the field.
+
+That cost is why a line used to grow and never shrink. `fit_cell_to_content` runs on every
+keystroke, and one cell's measurement can prove a column must get *wider*, never that it may get
+*narrower* — another row may still hold the widest value. The shrink was deferred to "the next
+structural re-measure", which for an ordinary edit never arrives: embrace announces an in-place
+write with `invalidate_cell!`, and only `flush_invalidate_all` and a zoom change arm
+`@auto_size_pending`. So a column widened by a long value stayed wide after the value was shortened.
+
+**The two largest cells per line** close that (`@as_col_best` and friends). Pass 1 already visits
+every cell to take the maximum, so recording the runner-up is free, and it makes the shrink O(1):
+
+| edit | cost |
+|---|---|
+| a cell that is not the largest | O(1), nothing moves |
+| the largest, growing | O(1) |
+| the largest, shrinking but still above the runner-up | O(1) |
+| the largest, dropping BELOW the runner-up | O(1) now; the runner-up goes *unknown* |
+| the largest again, while the runner-up is unknown | one line rescanned — never the table |
+
+The runner-up goes unknown rather than being replaced by a guess because the new runner-up is the
+*third* largest, which nobody recorded. An underestimate there would size a line **narrower than a
+cell it still has to hold** — a cut value, not a cosmetic gap.
+
+Invariants worth keeping:
+- a line never narrows below what its other cells hold. That was the original reason for growing
+  only; it is now enforced directly instead of by refusing to shrink.
+- `apply_line_extents` is the ONE write-back, shared by the sweep and the per-keystroke path — if
+  they were separate they would drift on what a span is owed.
+- it rewrites **every** line, so both callers must re-apply the pinned budget (`fit_pinned_cols` /
+  `fit_pinned_rows`) afterwards, not only when the edited line was itself pinned.
+
 ## Five-Layer Architecture
 
 VirtualMatrix uses five rendering layers, each with different scroll behavior:
@@ -114,6 +150,29 @@ ScrollView provides 3 sticky sub-layers (VM passes base_z+2 as parent_z; SV adds
 **content_layer**: Owned directly by VirtualMatrix (via LayerOwner). Uses `viewport_cache = true` with `cache_extent = 100.0` for smooth scrolling. Cell widgets are registered to `layer.widgets` and rendered at fixed content-space positions; the compositor handles the viewport shift via `layer.scroll_offset`. The layer is rendered with a **Pull/SlotBuffer** model (see "Content-Layer Render Model" below): each frame it visits every visible cell and slot-skips the ones whose buffer already holds their current pixels.
 
 **Sticky layers**: Owned by the child ScrollView. Cells on sticky layers are repositioned to screen-space coordinates every frame (via `reposition_sticky_cells` or the fast-path `compute_sticky_blit_plans`), because these layers do NOT use viewport_cache.
+
+**Who paints the grid lines, and therefore who must clear.** `row_height_pixels` is
+`grid_spacing + content`, while a cell is laid out at `row_sizes[row] - grid_spacing`
+(`sticky_reposition.cr`, `blit_plan.cr`). So between every pair of rows — and every pair of columns —
+there is a `grid_spacing` strip that **no cell ever paints**. Those strips are the layer clear's
+share of the buffer, which makes "was this layer cleared?" a question with visible consequences.
+
+The invariant: **a sticky layer must be cleared on any frame that changes which cells are on it.**
+The two passes divide that between them:
+
+| frame | pass | clears? |
+|---|---|---|
+| ordinary scroll (cells recycled a row at a time, cached textures alive) | `compute_sticky_blit_plans` | yes — its fast path clears the buffer, then re-blits |
+| a cell moved or resized but nothing blits | `reposition_sticky_cells`, `any_changed` | yes |
+| **every sticky cell destroyed and recreated at once** (thumb slammed to the end stop) | `reposition_sticky_cells`, `cells_destroyed` | yes — *this case was missing until 2026-09-16* |
+
+The third row is the subtle one and was the bug fixed on 2026-09-17: on such a frame nothing *moves* — the cells
+are new and are laid out at their final position, so `any_changed` is false — and nothing has a
+cached texture, so `sticky_cells_can_use_blit_plan?` bails and the clearing fast path never runs.
+`sync_cells_to_layers` then marks only the new cells for render, each paints its own box, and the
+strips keep the previous rows' glyphs. Hence `run_sticky_pass(cells_destroyed)`: destruction is the
+precise trigger, because a cell that went away leaves ink with nothing obliged to paint over it,
+while creation alone cannot leave any.
 
 **cursor_overlay_layer**: Owned directly by VirtualMatrix. Renders cross-hair highlight bands via CursorOverlayWidget using additive blend (dark themes, positive `cursor_highlight_delta`) or subtractive blend (light themes, negative delta). Transparent background color `(0,0,0,0)`.
 

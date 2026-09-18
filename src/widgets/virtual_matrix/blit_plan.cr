@@ -226,6 +226,15 @@ module CrymbleUI
         # content) OR that MOVED means its layer must clear + repaint this frame. A cell that did NEITHER
         # contributes nothing — its pixels are already correct, so it must not activate (wake) its layer.
         render_fresh = size_changed || widget.needs_render? || !widget.has_valid_primitive_cache?
+        {% if flag?(:probe) %}
+          # Per-cell, only when something actually changed, so an idle app logs nothing.
+          if (moved || size_changed) && CrymbleUI::BlitProbe.on?
+            CrymbleUI::BlitProbe.emit(
+              "blit cell #{row},#{col} sticky=#{is_sticky_row ? "row" : ""}#{is_sticky_col ? "col" : ""} " \
+              "moved=#{moved} size_changed=#{size_changed} render_fresh=#{render_fresh} " \
+              "cached_texture=#{!wb.nil?} to=(#{new_x.round(1)},#{new_y.round(1)},#{new_w.round(1)}x#{new_h.round(1)})")
+          end
+        {% end %}
         if wb.nil? || render_fresh || moved
           if is_sticky_row && is_sticky_col
             corner_active = true
@@ -256,6 +265,24 @@ module CrymbleUI
         dest_x = PixelSnap.origin(vm_abs.x + new_x - layer.bounds.x)
         dest_y = PixelSnap.origin(vm_abs.y + new_y - layer.bounds.y)
         log_caret_frame(key, "BLIT", widget)
+        {% if flag?(:probe) %}
+          # render_layer's fast path does a FULL-TEXTURE blit: backend.blit(entry.source, ...). So the
+          # painted extent is the SOURCE TEXTURE's size, not the cell's box. If a cached texture is
+          # smaller than the box it now occupies, the remainder keeps whatever the layer clear left -
+          # which is what a strip of bare layer background inside a cell's own box looks like.
+          if CrymbleUI::BlitProbe.on?
+            sw = wb.width
+            sh = wb.height
+            bw = widget.bounds.width.round(1)
+            bh = widget.bounds.height.round(1)
+            mismatch = (sw - bw).abs > 1.0 || (sh - bh).abs > 1.0
+            if mismatch
+              CrymbleUI::BlitProbe.emit(
+                "blit SIZE MISMATCH cell #{row},#{col} texture=#{sw}x#{sh} box=#{bw}x#{bh} " \
+                "dest=(#{dest_x},#{dest_y}) render_fresh=#{render_fresh} moved=#{moved}")
+            end
+          end
+        {% end %}
         target << BlitEntry.new(wb, dest_x, dest_y)
       end
 
@@ -266,6 +293,19 @@ module CrymbleUI
       row_active ||= resize_axis.col?
       col_active ||= resize_axis.row?
       corner_active ||= (resize_axis.col? && resize_index < sticky_cols) || (resize_axis.row? && resize_index < sticky_rows)
+
+      {% if flag?(:probe) %}
+        # The verdict. A cell that moved while its layer stayed INACTIVE is candidate (i): the
+        # activation test missed a case, and nothing will clear what it left behind.
+        if CrymbleUI::BlitProbe.on? && (row_active || col_active || corner_active ||
+                                        !row_entries.empty? || !col_entries.empty? || !corner_entries.empty?)
+          CrymbleUI::BlitProbe.emit(
+            "blit actives row=#{row_active} col=#{col_active} corner=#{corner_active} " \
+            "entries row=#{row_entries.size} col=#{col_entries.size} corner=#{corner_entries.size} " \
+            "render row=#{row_render.size} col=#{col_render.size} corner=#{corner_render.size} " \
+            "scroll=#{scroll_offset.x.round(1)},#{scroll_offset.y.round(1)}")
+        end
+      {% end %}
 
       # Set blit plans ONLY on ACTIVE layers (triggers the fast path in render_layer: clear the buffer,
       # blit the moved data cells, then render the rulers + size-changed cells). An INACTIVE layer keeps

@@ -306,6 +306,30 @@ module CrymbleUI
       pixels
     end
 
+    {% if flag?(:probe) %}
+      # DIAGNOSTIC ONLY (-Dprobe). Read a SCATTERED set of points with ONE GPU->CPU copy.
+      # #get_pixels above takes a rectangle, and its per-pixel FFI over a whole layer is what turned
+      # an instrumented build into a black window (embrace src/gui/probe.cr says the arithmetic).
+      # An oracle that compares a layer against its own widgets needs a few thousand scattered
+      # points, not a rectangle, so it would otherwise pay one copy_to_image per point.
+      # Points outside the texture come back fully transparent rather than raising: the caller is an
+      # instrument, and a clamped sample is a better failure than a crashed diagnostic build.
+      def get_pixels_at(points : Array(Tuple(Int32, Int32))) : Array(Color)
+        assert_live("get_pixels_at")
+        image = @texture.texture.copy_to_image
+        w = width
+        h = height
+        points.map do |(px, py)|
+          if px < 0 || py < 0 || px >= w || py >= h
+            Color.new(0_u8, 0_u8, 0_u8, 0_u8)
+          else
+            c = image.get_pixel(px, py)
+            Color.new(c.r, c.g, c.b, c.a)
+          end
+        end
+      end
+    {% end %}
+
     # Set pixels in rectangular region (for background restoration)
     # Creates Image from pixel array, then draws to RenderTexture via sprite
     # Can't use texture.update() on RenderTexture - causes upside-down rendering

@@ -115,6 +115,25 @@ module CrymbleUI
     # sfml-graphics-s.lib MUST be used for Windows builds.
     EMBEDDED_FONT = {{ read_file(__DIR__+"/../../resources/Cousine-Regular.ttf") }}
 
+    # WHAT AN APP SHIPPING THIS LIBRARY HAS TO SAY ABOUT THE FONT.
+    #
+    # The notice belongs here because the font does: EMBEDDED_FONT is a compile-time read_file, so
+    # every consumer's binary contains our modified Cousine and owes the notice whether or not it
+    # ever draws with it. resources/FONTS.md has the full text and the reasoning; this is the line
+    # an About box shows, so that a consumer is not left composing a licence notice about a file it
+    # does not own — embrace hardcoded its own and it went stale the day the font was modified.
+    #
+    # NOT derived from @font_path, deliberately. A consumer may load its own font, and it would be
+    # tempting to return nothing then — but the obligation attaches to DISTRIBUTION, not to what is
+    # on screen: the modified Cousine is still inside their binary. An attribution that went silent
+    # exactly when a custom font was loaded would go silent while the notice was still owed. An app
+    # that loads its own font must additionally attribute THAT font, which this library cannot do
+    # for it because it does not know what was loaded.
+    FONT_ATTRIBUTION = [
+      "Google Cousine-Regular font (version 1.21, modified, Apache 2.0 license)",
+      "  incl. one glyph (U+21BA) from DejaVu Sans Mono, Bitstream Vera license",
+    ]
+
     def initialize(
       width : Int32 = 800,
       height : Int32 = 600,

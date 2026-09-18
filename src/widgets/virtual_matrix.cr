@@ -508,6 +508,33 @@ module CrymbleUI
     # this runs — reading then would hand over the adapter's own defaults, and the measured
     # layout would be gone (probe: custom=[5,5,5] where it had measured [1.09, 1.39, 18.61]).
     @auto_size_handover : Tuple(Array(Float64), Array(Float64))? = nil
+
+    # THE TWO WIDEST CELLS IN EACH COLUMN, AND THE TWO TALLEST IN EACH ROW.
+    #
+    # Knowing only the widest lets a line GROW but never SHRINK: when the widest cell narrows, the
+    # line must fall back to whatever the next-widest holds, and with only the leader recorded that
+    # means re-measuring the whole column — 273..625ms on a 2561-row table, measured. Keeping the
+    # RUNNER-UP as well makes the shrink O(1): the new width is simply max(this cell, runner-up).
+    # Wolfgang's suggestion, 2026-09-17, and it is what makes a live shrink affordable at all.
+    #
+    # `-1.0` means the runner-up is UNKNOWN, which happens when the leader drops below it: the new
+    # runner-up is then the third-widest, which nobody recorded. Only that case pays a rescan, and
+    # only of the one line. Pass 1 of flush_auto_size fills all of this at no extra cost — it
+    # already visits every cell to take the maximum.
+    #
+    # These hold PASS-1 values (per-cell maxima). Span settling is applied on top, from a copy, so
+    # an incremental update re-runs only that arithmetic and never re-measures text.
+    @as_col_best = [] of Float64
+    @as_col_best_at = [] of Int32
+    @as_col_second = [] of Float64
+    @as_col_second_at = [] of Int32
+    @as_row_best = [] of Float64
+    @as_row_best_at = [] of Int32
+    @as_row_second = [] of Float64
+    @as_row_second_at = [] of Int32
+    @as_multiline = [] of Bool
+    @as_spans = [] of Tuple(Int32, Int32, Int32, Int32, Float64, Float64, Int32)
+    @as_extents_valid = false
     @fit_pending : Bool = false
 
     # Size every line to its content instead of to the user's drags. Off by default; the
@@ -544,56 +571,148 @@ module CrymbleUI
     # computed widths into the adapter, destroying whatever the user had dragged. Instead the
     # cells are torn down and rebuilt at the new sizes, which is what the creation loop does
     # correctly for every line at once.
-    private def flush_auto_size : Nil
-      adapter = @adapter
-      return unless adapter && @auto_size
-      row_order, col_order = adapter.get_scrollorder
-      return if row_order.empty? || col_order.empty?
+    # ---- line extents: the two largest cells on each line (see @as_col_best) ----
 
-      widest = Array.new(col_order.size, 0.0)
-      tallest = Array.new(row_order.size, 0.0)
-      multiline = Array.new(row_order.size, false)
-      fh = frame_height
-      # PASS 1 — every cell votes on the lines it does NOT span.
-      #
-      # A spanning cell still cannot vote on one line: a grouped header across eight columns would
-      # dump its whole width into the first, and a row-header across eight records would make all
-      # eight that tall. That is why such cells used to be skipped altogether, which left a cluster
-      # header simply cut with content sizing having nothing to say about it. They are collected
-      # here instead and settled in pass 2, against the lines they actually cover.
-      spans = [] of Tuple(Int32, Int32, Int32, Int32, Float64, Float64, Int32)
-      row_order.size.times do |r|
-        col_order.size.times do |c|
-          bounding = adapter.cell_get_bounding_box(r, c)
-          r0, c0 = bounding[0]
-          r1, c1 = bounding[1]
-          spans_cols = c1 != c0
-          spans_rows = r1 != r0
-          natural = adapter.cell_natural_size(r, c)
-          widest[c] = natural[:width] if !spans_cols && natural[:width] > widest[c]
-          if !spans_rows && natural[:lines] > 1 && natural[:height] > tallest[r]
-            tallest[r] = natural[:height]
-            multiline[r] = true
-          end
-          # Once per span, at its origin: every covered cell reports the same box.
-          if (spans_cols || spans_rows) && r == r0 && c == c0
-            spans << {r0, r1, c0, c1, natural[:width], natural[:height], natural[:lines]}
-          end
+    UNKNOWN_EXTENT = -1.0
+
+    private def reset_line_extents(cols : Int32, rows : Int32) : Nil
+      @as_col_best = Array.new(cols, 0.0)
+      @as_col_best_at = Array.new(cols, -1)
+      @as_col_second = Array.new(cols, UNKNOWN_EXTENT)
+      @as_col_second_at = Array.new(cols, -1)
+      @as_row_best = Array.new(rows, 0.0)
+      @as_row_best_at = Array.new(rows, -1)
+      @as_row_second = Array.new(rows, UNKNOWN_EXTENT)
+      @as_row_second_at = Array.new(rows, -1)
+    end
+
+    # Seeding: one cell's measurement offered to a line, keeping the two largest. Only ever called
+    # while sweeping every cell, so `second` ends up genuinely the runner-up.
+    private def offer_extent(best, best_at, second, second_at, line : Int32, at : Int32, value : Float64) : Nil
+      return unless 0 <= line < best.size
+      if value > best[line]
+        second[line] = best[line]
+        second_at[line] = best_at[line]
+        best[line] = value
+        best_at[line] = at
+      elsif at != best_at[line] && (second[line] == UNKNOWN_EXTENT || value > second[line])
+        second[line] = value
+        second_at[line] = at
+      end
+    end
+
+    # One cell CHANGED. Returns true if the line's extent moved, :rescan if the answer cannot be
+    # known from what is recorded.
+    #
+    # The shrink cases are the point. If the cell that was largest gets smaller, the line falls to
+    # max(its new size, the runner-up) — known, O(1). The one case that cannot be answered is the
+    # leader dropping BELOW the runner-up: the new runner-up is the third-largest, which was never
+    # recorded, so the runner-up goes UNKNOWN and the NEXT shrink of that line rescans it. Marking
+    # it unknown rather than guessing matters: a runner-up that is too small would size the line
+    # NARROWER than a cell it still has to hold, which is a cut value rather than a cosmetic gap.
+    private def update_extent(best, best_at, second, second_at, line : Int32, at : Int32, value : Float64)
+      return false unless 0 <= line < best.size
+      if at == best_at[line]
+        return false if value == best[line]
+        if value > best[line]
+          best[line] = value
+          return true
+        end
+        # the leader shrank
+        if second[line] == UNKNOWN_EXTENT
+          return :rescan
+        elsif value >= second[line]
+          best[line] = value
+          return true
+        else
+          best[line] = second[line]
+          best_at[line] = second_at[line]
+          second[line] = UNKNOWN_EXTENT # the third-largest was never recorded
+          second_at[line] = -1
+          return true
         end
       end
 
-      # PASS 2 — a span must FIT across the lines it covers, so any shortfall is shared out.
-      #
-      # Shortest span first: a narrow group settles before a wider one that contains it, and the
-      # wider one then measures against what the narrow one already secured — otherwise the outer
-      # group would pay for width its own children are about to add.
-      #
-      # Crossing a line boundary is worth one grid_spacing plus the pixel auto_col_units adds, so a
-      # span gets that much for free per boundary; without it a span across k lines would demand k
-      # times more than it needs.
+      if value > best[line]
+        second[line] = best[line]
+        second_at[line] = best_at[line]
+        best[line] = value
+        best_at[line] = at
+        return true
+      end
+
+      if at == second_at[line]
+        # The runner-up moved. Growing keeps it the runner-up; shrinking may hand the slot to a
+        # third cell nobody recorded, so it goes unknown rather than becoming an underestimate.
+        if value > second[line]
+          second[line] = value
+        elsif value < second[line]
+          second[line] = UNKNOWN_EXTENT
+          second_at[line] = -1
+        end
+        return false
+      end
+
+      if second[line] == UNKNOWN_EXTENT || value > second[line]
+        second[line] = value
+        second_at[line] = at
+      end
+      false
+    end
+
+    # Rebuild one line's two largest by measuring just that line — O(cells on the line), and only
+    # when the runner-up was consumed. This is the whole cost of the fallback: one column, never
+    # the table.
+    private def rescan_col_extent(col : Int32) : Nil
+      adapter = @adapter
+      return unless adapter
+      row_order, col_order = adapter.get_scrollorder
+      return unless 0 <= col < @as_col_best.size
+      @as_col_best[col] = 0.0
+      @as_col_best_at[col] = -1
+      @as_col_second[col] = UNKNOWN_EXTENT
+      @as_col_second_at[col] = -1
+      row_order.size.times do |r|
+        bounding = adapter.cell_get_bounding_box(r, col)
+        next if bounding[1][1] != bounding[0][1] # a spanning cell does not vote on one column
+        offer_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at,
+                     col, r, adapter.cell_natural_size(r, col)[:width])
+      end
+    end
+
+    private def rescan_row_extent(row : Int32) : Nil
+      adapter = @adapter
+      return unless adapter
+      row_order, col_order = adapter.get_scrollorder
+      return unless 0 <= row < @as_row_best.size
+      @as_row_best[row] = 0.0
+      @as_row_best_at[row] = -1
+      @as_row_second[row] = UNKNOWN_EXTENT
+      @as_row_second_at[row] = -1
+      multi = false
+      col_order.size.times do |c|
+        bounding = adapter.cell_get_bounding_box(row, c)
+        next if bounding[1][0] != bounding[0][0]
+        natural = adapter.cell_natural_size(row, c)
+        next unless natural[:lines] > 1
+        multi = true
+        offer_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at,
+                     row, c, natural[:height])
+      end
+      @as_multiline[row] = multi if row < @as_multiline.size
+    end
+
+    # Pass 2 + write-back, from the recorded pass-1 extents. No text is measured here, so the
+    # incremental path can afford it on every keystroke: it is span arithmetic and one assignment
+    # per line. Returns whether any size actually moved.
+    private def apply_line_extents(fh : Float64) : Bool
+      return false unless @as_extents_valid
+      widest = @as_col_best.dup
+      tallest = @as_row_best.dup
+      multiline = @as_multiline.dup
       per_boundary = grid_spacing + 1.0
-      spans.sort_by! { |span| span[3] - span[2] }
-      spans.each do |(r0, r1, c0, c1, width, _height, _lines)|
+
+      @as_spans.each do |(r0, r1, c0, c1, width, _height, _lines)|
         next unless c1 > c0 && c1 < widest.size
         covered = c1 - c0 + 1
         have = (c0..c1).sum { |c| widest[c] } + (covered - 1) * per_boundary
@@ -602,10 +721,7 @@ module CrymbleUI
         share = deficit / covered
         (c0..c1).each { |c| widest[c] += share }
       end
-      spans.sort_by! { |span| span[1] - span[0] }
-      spans.each do |(r0, r1, c0, c1, _width, height, lines)|
-        # Height follows the same rule as an ordinary cell: only genuinely multi-line content grows
-        # a row, because a single line's natural height already exceeds the box it paints in.
+      @as_spans.each do |(r0, r1, c0, c1, _width, height, lines)|
         next unless r1 > r0 && lines > 1 && r1 < tallest.size
         covered = r1 - r0 + 1
         single = DEFAULT_ROW_HEIGHT * fh - 1.0
@@ -619,56 +735,95 @@ module CrymbleUI
         end
       end
 
-      # A STICKY line is sized to its content like any other, and may GROW — but the pinned strip
-      # as a whole is BOUNDED.
-      #
-      # It was shrink-only until 2026-09-13, to stop a pinned line growing past a viewport it
-      # cannot scroll: pinned lines do not move, so anything pushed beyond the edge is unreachable
-      # by any gesture. True, but it banned growth outright and that made a too-narrow row-header
-      # column a dead end — the mode would not widen it, and the drag is refused while the mode is
-      # on, so the label stayed cut with no way out at all (field report: "I cannot resize c1 and
-      # c2 if auto-size is active", where c1/c2 are exactly the pinned columns).
-      #
-      # The invariant worth keeping is not "never grow", it is "the pinned strip must not swallow
-      # the viewport". So each pinned line is sized to its content, and if the strip then exceeds
-      # PINNED_MAX_SHARE of the visible grid the pinned lines are scaled back into that budget
-      # (never below the floor). A line that still cannot fit shows its cut marker, which is honest
-      # and, unlike the old rule, escapable.
-      #
-      # Floor unchanged: never narrower than its ruler label — the ruler strip paints no cut
-      # marker, so a cut label would be a silent loss. Per AXIS — a cell in a pinned column still
-      # votes its line count to its own row, which scrolls normally.
       floor = auto_col_floor_units(fh)
       sticky_cols = sizing_sticky_col_count
-      sticky_rows = sizing_sticky_row_count
-      # Why content sizing did what it did, on demand: `CRYMBLE_AUTOSIZE_LOG=1`. Zero cost unset,
-      # and it is what found the sticky-count bug above — from the running app, in one toggle, after
-      # every headless fixture had said the feature was fine. The four numbers that matter are the
-      # sticky counts, what each line measured, and the widths either side of the assignment.
+      changed = false
+      widest.each_index do |c|
+        next unless c < @col_widths.size
+        wanted = auto_col_units(widest[c], fh)
+        wanted = Math.max(wanted, floor) if c < sticky_cols
+        if (@col_widths[c] - wanted).abs > 0.0001
+          @col_widths[c] = wanted
+          changed = true
+        end
+      end
+      tallest.each_index do |r|
+        next unless r < @row_heights.size
+        wanted = multiline[r] ? auto_row_units(tallest[r], fh) : DEFAULT_ROW_HEIGHT
+        if (@row_heights[r] - wanted).abs > 0.0001
+          @row_heights[r] = wanted
+          changed = true
+        end
+      end
+      changed
+    end
+
+    private def flush_auto_size : Nil
+      adapter = @adapter
+      return unless adapter && @auto_size
+      row_order, col_order = adapter.get_scrollorder
+      return if row_order.empty? || col_order.empty?
+
+      multiline = Array.new(row_order.size, false)
+      fh = frame_height
+      # PASS 1 — every cell votes on the lines it does NOT span.
+      #
+      # A spanning cell still cannot vote on one line: a grouped header across eight columns would
+      # dump its whole width into the first, and a row-header across eight records would make all
+      # eight that tall. That is why such cells used to be skipped altogether, which left a cluster
+      # header simply cut with content sizing having nothing to say about it. They are collected
+      # here instead and settled in pass 2, against the lines they actually cover.
+      spans = [] of Tuple(Int32, Int32, Int32, Int32, Float64, Float64, Int32)
+      # The runner-up is taken here too — see @as_col_best. This is the only place that visits
+      # every cell, so it is the only place that can seed it for free.
+      reset_line_extents(col_order.size, row_order.size)
+      row_order.size.times do |r|
+        col_order.size.times do |c|
+          bounding = adapter.cell_get_bounding_box(r, c)
+          r0, c0 = bounding[0]
+          r1, c1 = bounding[1]
+          spans_cols = c1 != c0
+          spans_rows = r1 != r0
+          natural = adapter.cell_natural_size(r, c)
+          unless spans_cols
+            offer_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at,
+                         c, r, natural[:width])
+          end
+          if !spans_rows && natural[:lines] > 1
+            offer_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at,
+                         r, c, natural[:height])
+            multiline[r] = true
+          end
+          # Once per span, at its origin: every covered cell reports the same box.
+          if (spans_cols || spans_rows) && r == r0 && c == c0
+            spans << {r0, r1, c0, c1, natural[:width], natural[:height], natural[:lines]}
+          end
+        end
+      end
+
+      # Span settling and the write-back are apply_line_extents' — the same arithmetic the
+      # per-keystroke path runs, and it must be the same or the two would disagree about what a
+      # line is owed. Everything above this point is the part only a full sweep can do: MEASURE.
+      @as_spans = spans
+      @as_multiline = multiline
+      @as_extents_valid = true
+
       if ENV["CRYMBLE_AUTOSIZE_LOG"]?
         STDERR.puts "[autosize] cols=#{col_order.size} rows=#{row_order.size} " \
-                    "sticky=(#{sticky_row_count},#{sticky_col_count}) fh=#{fh} floor=#{floor.round(2)}"
-        STDERR.puts "[autosize] widest=#{widest.map(&.round(1))}"
-        STDERR.puts "[autosize] tallest=#{tallest.map(&.round(1))} multiline=#{multiline}"
+                    "sticky=(#{sticky_row_count},#{sticky_col_count}) fh=#{fh} " \
+                    "floor=#{auto_col_floor_units(fh).round(2)}"
+        STDERR.puts "[autosize] widest=#{@as_col_best.map(&.round(1))}"
+        STDERR.puts "[autosize] tallest=#{@as_row_best.map(&.round(1))} multiline=#{multiline}"
         STDERR.puts "[autosize] widths BEFORE=#{@col_widths.map(&.round(2))}"
       end
-      col_order.size.times do |c|
-        wanted = auto_col_units(widest[c], fh)
-        @col_widths[c] = c < sticky_cols ? Math.max(wanted, floor) : wanted
-      end
+
+      apply_line_extents(fh)
       fit_pinned_cols(fh)
+      fit_pinned_rows(fh)
+
       if ENV["CRYMBLE_AUTOSIZE_LOG"]?
         STDERR.puts "[autosize] widths AFTER =#{@col_widths.map(&.round(2))}"
       end
-      row_order.size.times do |r|
-        wanted = multiline[r] ? auto_row_units(tallest[r], fh) : DEFAULT_ROW_HEIGHT
-        # Same rule on this axis: a pinned row may shrink to its content, never grow past a
-        # viewport it cannot scroll. Its floor is DEFAULT_ROW_HEIGHT, which `auto_row_units`
-        # already applies — there is no label-width counterpart, because the row ruler's label
-        # is bounded by the ruler's WIDTH, not by the row's height.
-        @row_heights[r] = wanted
-      end
-      fit_pinned_rows(fh)
 
       destroy_active_cells
       @force_cell_update = true
@@ -781,21 +936,74 @@ module CrymbleUI
       return unless @auto_size
       fh = frame_height
       changed = false
-      # Sticky lines grow here too, under the same budget as flush_auto_size — this is the
-      # per-keystroke path and it writes the arrays directly, so leaving it out would re-cut the
-      # very column the toggle had just fitted, the moment the user typed into it.
-      wanted_col = auto_col_units(content_width, fh)
-      if wanted_col > (@col_widths[col]? || 0.0)
-        @col_widths[col] = wanted_col
-        fit_pinned_cols(fh) if col < sizing_sticky_col_count
-        changed = true
-      end
-      if lines > 1
-        wanted_row = auto_row_units(content_height, fh)
-        if wanted_row > (@row_heights[row]? || 0.0)
-          @row_heights[row] = wanted_row
-          fit_pinned_rows(fh) if row < sizing_sticky_row_count
+
+      # SHRINKS AS WELL AS GROWS, since 2026-09-17. It used to grow only, and the shrink was left
+      # to "the next structural re-measure" — which never arrives for an ordinary edit, because
+      # embrace announces an in-place write per-cell (core announce_write) precisely so it does not
+      # pay for a structural rebuild. So a column widened by a long value stayed wide forever after
+      # the value was shortened. Wolfgang: "when I edit a cell, it automatically widens (correct),
+      # but if I make it shorter, it doesn't shorten."
+      #
+      # What makes the shrink affordable is the recorded RUNNER-UP (see @as_col_best): a line never
+      # narrows below the next-largest cell it still has to hold, and that is known without
+      # measuring anything. The old rationale for growing only — "narrow the column below what
+      # OTHER rows hold, banding cells the user is not editing" — is answered by construction, and
+      # the other half, "a full-column rescan every time", happens only when the runner-up was
+      # consumed.
+      if @as_extents_valid
+        col_moved = update_extent(@as_col_best, @as_col_best_at, @as_col_second, @as_col_second_at,
+                                  col, row, content_width)
+        if col_moved == :rescan
+          rescan_col_extent(col)
+          col_moved = true
+        end
+        row_moved = false
+        if lines > 1
+          @as_multiline[row] = true if row < @as_multiline.size
+          moved = update_extent(@as_row_best, @as_row_best_at, @as_row_second, @as_row_second_at,
+                                row, col, content_height)
+          if moved == :rescan
+            rescan_row_extent(row)
+            row_moved = true
+          else
+            row_moved = moved
+          end
+        elsif row < @as_row_best.size && @as_row_best_at[row] == col
+          # The cell that made this row tall is no longer multi-line, so the row may fall back to a
+          # single line — but only a rescan can say whether another cell still holds it tall.
+          rescan_row_extent(row)
+          row_moved = true
+        end
+        if col_moved || row_moved
+          changed = apply_line_extents(fh)
+          # UNCONDITIONALLY, unlike the grow-only path this replaced. That one adjusted a single
+          # line, so re-applying the pinned budget mattered only when THAT line was pinned;
+          # apply_line_extents rewrites every line from the recorded extents, which puts a pinned
+          # column's unbounded width back. Typing into an ORDINARY column then left the pinned
+          # strip over its share of the grid — caught by the sticky typing spec, which asserts
+          # exactly that bound.
+          fit_pinned_cols(fh)
+          fit_pinned_rows(fh)
+        end
+      else
+        # No pass 1 has run yet, so there is nothing to fall back to and growing is all that can be
+        # justified — narrowing here could cut a cell this path has never seen.
+        # Sticky lines grow here too, under the same budget as flush_auto_size — this is the
+        # per-keystroke path and it writes the arrays directly, so leaving it out would re-cut the
+        # very column the toggle had just fitted, the moment the user typed into it.
+        wanted_col = auto_col_units(content_width, fh)
+        if wanted_col > (@col_widths[col]? || 0.0)
+          @col_widths[col] = wanted_col
+          fit_pinned_cols(fh) if col < sizing_sticky_col_count
           changed = true
+        end
+        if lines > 1
+          wanted_row = auto_row_units(content_height, fh)
+          if wanted_row > (@row_heights[row]? || 0.0)
+            @row_heights[row] = wanted_row
+            fit_pinned_rows(fh) if row < sizing_sticky_row_count
+            changed = true
+          end
         end
       end
       return unless changed
@@ -1032,11 +1240,13 @@ module CrymbleUI
     # THE choice between the two sticky passes, in one place: they run either/or per frame, and
     # which one is picked must not vary by caller — a divergence there is a user-visible jump when
     # the frame type flips. Three callers had grown their own copy of this if/else.
-    private def run_sticky_pass : Nil
+    # `cells_destroyed` — a sticky cell went away this frame, so its ink is still on the layer with
+    # nothing obliged to paint over it. It matters only in the reposition branch; see there.
+    private def run_sticky_pass(cells_destroyed : Bool = false) : Nil
       if sticky_cells_can_use_blit_plan?
         compute_sticky_blit_plans
       else
-        reposition_sticky_cells
+        reposition_sticky_cells(cells_destroyed)
       end
     end
 
@@ -1623,6 +1833,12 @@ module CrymbleUI
       @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
       @content_layer.not_nil!.background_color = content_background_color # cached fallback; pull keeps it live
       @content_layer.not_nil!.viewport_cache = true
+      # This layer repairs its own geometry, so it opts out of the clear note_position_change does
+      # for a moved widget: mark_needs_resize_shift below TRANSLATES the buffer past the resized
+      # line instead, keeping viewport culling and the per-slot skip on. Declared here rather than
+      # inferred from viewport_cache, because being a viewport cache is not what provides the
+      # repair — these two call sites are, and a plain ScrollView has neither.
+      @content_layer.not_nil!.owns_geometry_repair = true
       @content_layer.not_nil!.tiled_cells = true # grid of tiling cells → eligible for direct-to-layer render
       @content_layer.not_nil!.cache_extent = CACHE_EXTENT
       @content_layer.not_nil!.scroll_offset = scroll_offset
@@ -2709,7 +2925,7 @@ module CrymbleUI
         # texture) is routed to render_list by compute_sticky_blit_plans; every other sticky cell merely
         # moved → its cached texture is blitted at the new position, instead of a full sticky-layer clear
         # + re-render of every header. (reposition_sticky_cells stays the fallback when nothing blits.)
-        run_sticky_pass
+        run_sticky_pass(cells_destroyed)
 
         # Sync cell widgets to appropriate layers and mark new cells for render
         if cells_created || cells_destroyed || @active_cells.any?

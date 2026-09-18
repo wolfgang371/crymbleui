@@ -1153,7 +1153,13 @@ module SF
     end
 
     def title=(title : String)
-      LibCSFML.sfRenderWindow_setTitle(@handle, title)
+      # NOT sfRenderWindow_setTitle: its char* is decoded with the local 8-bit encoding (Latin-1),
+      # so a UTF-8 registered mark (0xC2 0xAE) reaches the title bar as "A-circumflex" + the mark -
+      # reported as "a garbled character between H3O Embrace and the (r)". UTF-32 is unambiguous.
+      codepoints = Array(UInt32).new(title.size + 1)
+      title.each_char { |c| codepoints << c.ord.to_u32 }
+      codepoints << 0_u32 # NUL terminator
+      LibCSFML.sfRenderWindow_setUnicodeTitle(@handle, codepoints.to_unsafe)
     end
 
     def visible=(visible : Bool)

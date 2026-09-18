@@ -1132,10 +1132,14 @@ module CrymbleUI
             # created cells on the frames a scroll reveals them.
             return if @last_rendered_layer_position.nil?
             if l = containing_layer_for_repair
-                # Layers that own a geometry-repair mechanism opt out — a viewport cache recenters and
-                # skips per slot, an overlay repaints wholesale. Same exemption assess_rebuild_staleness
-                # applies for the same reason; clearing them here would throw away a pending blit-shift.
-                l.mark_needs_clear_and_render unless l.skip_rebuild_clear || l.viewport_cache
+                # Layers that own a geometry-repair mechanism opt out, because clearing them here
+                # would throw away a pending blit-shift. That used to be spelled `viewport_cache`,
+                # which claimed it for every layer of the type: the repair in question is
+                # mark_needs_resize_shift, whose only callers are VirtualMatrix's two. A plain
+                # ScrollView's content layer is viewport_cache with no repair of its own, so it took
+                # the exemption and kept the vacated pixels — the About dialog's ghosted logo. The
+                # claim is now opt-IN (Layer#owns_geometry_repair), made by the layer that has it.
+                l.mark_needs_clear_and_render unless l.skip_rebuild_clear || l.owns_geometry_repair
             end
         end
 
