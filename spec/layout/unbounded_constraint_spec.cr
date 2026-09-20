@@ -19,11 +19,11 @@ class UnbCell < CrymbleUI::Widget
     super(id: nil)
   end
 
-  def measure(c : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
     CrymbleUI::Size.new(300.0, 40.0)
   end
 
-  def perform_layout(c : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
     @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(300.0, 40.0))
   end
 

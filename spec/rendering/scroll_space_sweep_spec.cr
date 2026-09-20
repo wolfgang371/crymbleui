@@ -34,11 +34,11 @@ class SweepRow < CrymbleUI::Widget
     @dropped = true
   end
 
-  def measure(c : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
     CrymbleUI::Size.new(300.0, 40.0)
   end
 
-  def perform_layout(c : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
     @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(300.0, 40.0))
   end
 
@@ -55,11 +55,11 @@ end
 class SweepFgBox < CrymbleUI::DecoratedContainer
   MARK = CrymbleUI::Color.new(255, 0, 255, 255)
 
-  def measure(c : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
     CrymbleUI::Size.new(300.0, 40.0)
   end
 
-  def perform_layout(c : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
     @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(300.0, 40.0))
   end
 
@@ -75,11 +75,11 @@ class SweepFiller < CrymbleUI::Widget
     super(id: id)
   end
 
-  def measure(c : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
     CrymbleUI::Size.new(300.0, 40.0)
   end
 
-  def perform_layout(c : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
     @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(300.0, 40.0))
   end
 
@@ -88,7 +88,7 @@ class SweepFiller < CrymbleUI::Widget
   end
 end
 
-def build_sweep_public(direction : CrymbleUI::ScrollDirection, scroll : CrymbleUI::Vec2)
+private def build_sweep(direction : CrymbleUI::ScrollDirection, scroll : CrymbleUI::Vec2)
   renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
   app = TestApp.new
   window = CrymbleUI::Window.new("Sweep", 400, 300)
@@ -176,7 +176,7 @@ describe "scroll-space sweep" do
   SWEEP_CASES.each do |name, direction, scroll|
     describe name do
       it "paints every subject at absolute minus the scroll" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         applied = f[:sv].scroll_offset
         [f[:drag_row], f[:drop_row], f[:combo], f[:inner]].each do |w|
           w.viewport_bounds.x.should be_close(w.absolute_bounds.x - applied.x, 0.5)
@@ -185,7 +185,7 @@ describe "scroll-space sweep" do
       end
 
       it "finds the widget under the painted position, and hands it its own space" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         row = f[:drag_row]
         sweep_focus(f, row, direction, scroll)
         click = sweep_visible_point(row, f[:sv])
@@ -201,7 +201,7 @@ describe "scroll-space sweep" do
       end
 
       it "keeps the drag ghost under the cursor and highlights the row the cursor is over" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         row = f[:drag_row]
         target = f[:drop_row]
         sweep_focus(f, row, direction, scroll)
@@ -226,7 +226,7 @@ describe "scroll-space sweep" do
       end
 
       it "anchors a popup to the painted control" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         combo = f[:combo]
         sweep_focus(f, combo, direction, scroll)
         painted = combo.viewport_bounds
@@ -240,7 +240,7 @@ describe "scroll-space sweep" do
       end
 
       it "paints a foreground decoration on the content it decorates" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         sweep_focus(f, f[:fg_box], direction, scroll)
         backend = f[:renderer].backend
         painted = f[:fg_box].viewport_bounds
@@ -262,7 +262,7 @@ describe "scroll-space sweep" do
       end
 
       it "composites a nested scroller's layer at its painted position" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         sweep_focus(f, f[:inner], direction, scroll)
         inner = f[:inner]
         layer = inner.layer.should_not be_nil
@@ -272,7 +272,7 @@ describe "scroll-space sweep" do
       end
 
       it "orders focus by what the user sees" do
-        f = build_sweep_public(direction, scroll)
+        f = build_sweep(direction, scroll)
         order = CrymbleUI::FocusCycler.new.collect_focusable_widgets(f[:window])
         painted = order.map { |w| w.viewport_bounds.y }
         painted.each_cons(2) { |pair| pair[1].should be >= pair[0] }

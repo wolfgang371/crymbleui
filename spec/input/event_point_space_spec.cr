@@ -19,12 +19,12 @@ class SpacySpy < CrymbleUI::Widget
     super(id: id)
   end
 
-  def measure(c : CrymbleUI::BoxConstraints) : CrymbleUI::Size
-    CrymbleUI::Size.new(c.max_width, 40.0)
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    CrymbleUI::Size.new(constraints.max_width, 40.0)
   end
 
-  def perform_layout(c : CrymbleUI::BoxConstraints, p : CrymbleUI::Vec2)
-    @bounds = CrymbleUI::Rect.new(p, CrymbleUI::Size.new(c.max_width, 40.0))
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(constraints.max_width, 40.0))
   end
 
   def to_primitives(b : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)

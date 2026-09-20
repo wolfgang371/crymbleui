@@ -56,9 +56,23 @@ describe "GUITestHelpers#click_on inside a scrolled ScrollView" do
     renderer.render_frame(app)
     target.viewport_bounds.y.should_not eq(target.absolute_bounds.y) # instrument: really scrolled
 
+    view = sv.viewport_bounds
+    painted = target.viewport_bounds
+    point = CrymbleUI::Vec2.new(painted.x + painted.width / 2, painted.y + painted.height / 2)
+    geo = "scroll=#{sv.scroll_offset} view=#{view} painted=#{painted} " \
+          "laid_out=#{target.absolute_bounds} point=#{point}"
+
+    # Preconditions, each naming itself: a bare "clicked == false" says only that something went
+    # wrong, and this spec exists to tell window space from content space. These are what
+    # diagnosed the real cause - a spec elsewhere had redefined `click_on` for the whole binary.
+    painted.y.should_not(eq(target.absolute_bounds.y), "nothing scrolled: #{geo}")
+    inside = point.y > view.y && point.y < view.y + view.height
+    inside.should(be_true, "the click point is outside the viewport: #{geo}")
+    window.hit_test(point).should(eq(target), "hit_test found the wrong widget: #{geo}")
+
     click_on(app, target)
 
-    target.clicked.should be_true
-    decoy.clicked.should be_false
+    target.clicked.should(be_true, "click_on did not reach the target: #{geo}")
+    decoy.clicked.should(be_false, "click_on reached the DECOY, the unscrolled position: #{geo}")
   end
 end

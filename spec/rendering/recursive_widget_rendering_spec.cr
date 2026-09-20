@@ -23,7 +23,7 @@ end
 
 # Helper to recursively render widget and children
 # Primitives use widget-local coords, so we need to translate: widget-local → absolute → layer-local
-def render_widget_and_children_recursive(widget : CrymbleUI::Widget, backend, offset_x : Float64, offset_y : Float64)
+private def render_widget_and_children_recursive(widget : CrymbleUI::Widget, backend, offset_x : Float64, offset_y : Float64)
   return if widget.skip_render?
 
   # Get widget's absolute position (in window coords)

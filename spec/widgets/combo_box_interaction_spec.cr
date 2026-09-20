@@ -5,17 +5,11 @@ require "../../src/widgets/window"
 require "../../src/testing/test_renderer"
 require "../../src/dsl/builder"
 
-# Helper methods for interaction tests
-def click_on(app, widget)
-  bounds = widget.absolute_bounds
-  center = CrymbleUI::Vec2.new(bounds.x + bounds.width/2, bounds.y + bounds.height/2)
-  app.handle_mouse_down(center)
-  app.handle_mouse_up(center)
-end
-
-def press_key(key : SF::Keyboard::Key, control = false, shift = false)
-  CrymbleUI::Widget.focus_manager.handle_key_down(key, control, shift)
-end
+# click_on / press_key come from CrymbleUI::Testing::GUITestHelpers, which spec_helper includes
+# at top level. This file used to define its own copies WITHOUT `private`, so they replaced the
+# library's for the WHOLE compiled binary - and its click_on aimed at `absolute_bounds`, the
+# unscrolled position. That silently defeated the one spec written to prove the helper works in
+# window space (spec/testing/click_on_scrolled_spec.cr), which passed per-file and failed in CI.
 
 # DSL-style app that creates NEW instances on each build() (like real apps)
 class ComboBoxDSLApp < CrymbleUI::App
