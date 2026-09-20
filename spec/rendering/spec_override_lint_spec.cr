@@ -16,8 +16,13 @@ require "../spec_helper"
 #
 # `private def` is file-scoped and shadows nothing - that is the fix, not an exception.
 private def spec_files : Array(String)
+  # src_glob, never Dir.glob: on Windows the latter returns backslash paths, so the
+  # `spec/autotest/` exclusion below silently matches nothing and the autotests - which
+  # legitimately share top-level names across separate binaries - get reported as clashes.
+  # That is exactly how this lint failed CI on windows-latest while passing on linux.
+  #
   # spec/autotest/* are standalone programs, each its own binary: names there cannot collide.
-  Dir.glob("spec/**/*.cr").sort.reject(&.starts_with?("spec/autotest/"))
+  src_glob("spec/**/*.cr").reject(&.starts_with?("spec/autotest/"))
 end
 
 private def top_level_defs(path : String) : Array({String, Int32})
@@ -43,6 +48,17 @@ describe "spec-suite override lint" do
       "#{offenders.join("; ")}"
   end
 
+  it "excludes the standalone autotests from the cross-file rules" do
+    # An instrument, not a rule: if the exclusion ever matches nothing (it did on Windows,
+    # where Dir.glob returns backslashes), the cross-file checks start reporting the
+    # autotests - separate binaries that may legitimately share a name - and the failure
+    # reads as a code problem rather than a path problem. Assert the COVERAGE.
+    all = src_glob("spec/**/*.cr")
+    all.count(&.starts_with?("spec/autotest/")).should be > 0
+    spec_files.none?(&.starts_with?("spec/autotest/")).should be_true
+    spec_files.none?(&.includes?('\\')).should be_true
+  end
+
   it "does not define the same top-level name in two spec files" do
     seen = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
     spec_files.each do |path|
@@ -54,11 +70,26 @@ describe "spec-suite override lint" do
       "one of these wins for the entire binary, silently: #{clashes.join("; ")}"
   end
 
+  it "scans paths through src_glob, never a bare Dir.glob" do
+    # `Dir.glob` returns BACKSLASH paths on Windows, so any `starts_with?("spec/...")` or
+    # path comparison built on it silently matches nothing there. spec_helper owns the
+    # normalisation (`src_glob`) precisely so each new path-scanning spec does not re-learn
+    # this from a red CI run - which is how this very file failed on windows-latest.
+    offenders = src_glob("spec/**/*.cr").reject(&.ends_with?("spec_helper.cr")).flat_map do |path|
+      File.read_lines(path).each_with_index.compact_map do |line, i|
+        code = line.gsub(/"(?:[^"\\]|\\.)*"/, %q("")).split('#').first
+        "#{path}:#{i + 1}" if code.includes?("Dir.glob")
+      end.to_a
+    end
+    offenders.should eq([] of String),
+      "use src_glob (spec_helper) so Windows paths are normalised: #{offenders.join("; ")}"
+  end
+
   it "does not REPLACE a production method by reopening its type" do
     # Adding a test-only accessor to a reopened class is fine and common (`..._for_spec`).
     # Replacing a method the production type already defines is what silences a real surface.
     production = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
-    Dir.glob("src/**/*.cr").each do |path|
+    src_glob("src/**/*.cr").each do |path|
       current = nil.as(String?)
       File.read_lines(path).each do |line|
         if m = line.match(/^\s*(?:abstract\s+)?class\s+([A-Za-z_][A-Za-z_0-9:]*)/)

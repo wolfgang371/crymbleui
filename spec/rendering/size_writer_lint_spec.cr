@@ -97,7 +97,7 @@ describe "size-writer tripwire" do
     # The class is reopened across virtual_matrix/*.cr; a write from one of those files would be
     # invisible to the baseline above and could not be paired with a refresh by review.
     offenders = [] of String
-    Dir.glob("src/widgets/virtual_matrix/*.cr").each do |path|
+    src_glob("src/widgets/virtual_matrix/*.cr").each do |path|
       File.read_lines(path).each_with_index do |line, i|
         offenders << "#{path}:#{i + 1}: #{line.strip}" if size_writer_line?(size_writer_strip(line))
       end
