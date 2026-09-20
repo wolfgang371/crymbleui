@@ -1,5 +1,8 @@
 # VirtualMatrix Architecture
 
+> **The contract is `MATRIX_LAWS.md`** — read that before changing the matrix. This file is
+> the REFERENCE behind it: the data model, the five layers, the algorithms in full.
+
 **Status**: IMPLEMENTED
 **Last Updated**: 2026-06-19
 **Related**: See `REACTIVITY.md` for the reactive model (property macros, Source-backed `scroll_offset`, the matrix viewport-cache slot as the canonical "spatial coherence" axis), `LAYER_RENDERING_ARCHITECTURE.md` for the layer rendering pipeline, `RENDERING_PIPELINES.md` for rendering pipelines and cache validation

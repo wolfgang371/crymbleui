@@ -29,6 +29,10 @@ module CrymbleUI
     # open) and the host's perform_layout (re-layout on rebuild) so the two agree --
     # otherwise a rebuild that keeps the popup open (e.g. a MultiComboBox gutter toggle)
     # re-anchors it below and it visibly jumps.
+    # `abs` is WINDOW space (`viewport_bounds`), not content space: the popup mounts into
+    # Window.overlays, and the flip test below compares against the window's height. Anchoring a
+    # popup to `absolute_bounds` opens it `scroll_offset` away from the control inside a
+    # ScrollView — and decides the flip at the wrong place too.
     private def popup_position(abs : Rect, popup_height : Float64) : Vec2
       popup_y = abs.y + abs.height
       if win = find_window
@@ -56,7 +60,7 @@ module CrymbleUI
       # Lay out and position the popup immediately.
       # The overlay system (Window.perform_layout) would lay it out on the
       # next frame, but we need valid bounds NOW so it's visible and interactive.
-      abs = absolute_bounds
+      abs = viewport_bounds
       min_width = @explicit_width || abs.width
       # Measure unconstrained to get natural width, then ensure at least cell width
       natural_size = popup.measure(BoxConstraints.loose(Size.new(Float64::INFINITY, 200.0)))

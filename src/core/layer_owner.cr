@@ -63,9 +63,13 @@ module CrymbleUI
 
     # Pull-based bounds: compute the correct bounds for a given layer.
     # Override in each LayerOwner to return the appropriate bounds.
-    # Default: return absolute_bounds (correct for simple single-layer widgets).
+    #
+    # PAINTED bounds, not laid-out: a layer is composited onto the WINDOW, so a layer-owning
+    # widget that sits inside a scroller (a ScrollView nested in another, a matrix in a scrolled
+    # panel) must place its layer where it is painted or the layer lands a scroll-offset away
+    # from its own widget. Identical to `absolute_bounds` when nothing above scrolls.
     def compute_bounds_for_layer(layer : Layer) : Rect
-      absolute_bounds
+      viewport_bounds
     end
 
     # Layer-owning widgets must not skip layout.

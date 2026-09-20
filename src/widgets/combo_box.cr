@@ -316,7 +316,7 @@ module CrymbleUI
       # Re-position popup if open (in Window.overlays), with the SAME flip-above logic as
       # the initial open so a rebuild while open doesn't snap it back below the cell.
       if popup_open && (popup = @current_popup)
-        popup.bounds = Rect.new(popup_position(absolute_bounds, popup.bounds.height), popup.bounds.size)
+        popup.bounds = Rect.new(popup_position(viewport_bounds, popup.bounds.height), popup.bounds.size)
       end
     end
 

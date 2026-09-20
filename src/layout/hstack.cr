@@ -34,8 +34,10 @@ module CrymbleUI
         # Measure total size needed for all children
         def measure(constraints : BoxConstraints) : Size
             # Account for padding in available space
-            inner_max_width = (constraints.max_width - padding * 2).clamp(0.0, Float64::MAX)
-            inner_max_height = (constraints.max_height - padding * 2).clamp(0.0, Float64::MAX)
+            # See the note in vstack.cr: clamping to Float64::MAX turns "unbounded" into a finite
+            # number and silently defeats every `finite?` guard below.
+            inner_max_width = {(constraints.max_width - padding * 2), 0.0}.max
+            inner_max_height = {(constraints.max_height - padding * 2), 0.0}.max
 
             return Size.new(padding * 2, padding * 2) if @children.empty?
 
@@ -66,7 +68,7 @@ module CrymbleUI
         # STACKING axis — the dual of VStack/height). Own chain, no clamp.
         def min_intrinsic_width(height : Float64) : Float64
             return padding * 2 if @children.empty?
-            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_height = {(height - padding * 2), 0.0}.max
             total_width = 0.0
             @children.each_with_index do |child, index|
                 total_width += child.min_intrinsic_width(inner_max_height)
@@ -80,7 +82,7 @@ module CrymbleUI
         # holds a height-shrinkable child (a fill VirtualMatrix).
         def min_intrinsic_height(width : Float64) : Float64
             return padding * 2 if @children.empty?
-            inner_max_width = (width - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_width = {(width - padding * 2), 0.0}.max
             max_height = 0.0
             @children.each do |child|
                 max_height = Math.max(max_height, child.min_intrinsic_height(inner_max_width))

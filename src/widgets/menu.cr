@@ -132,8 +132,9 @@ module CrymbleUI
                 # open-time (old-zoom) width and long labels clip. (No-op when unchanged.)
                 recompute_menu_item_alignment
 
-                # Calculate absolute position for popup
-                abs_bounds = absolute_bounds
+                # Where the menu is PAINTED: the popup mounts at window level, so a menu bar
+                # inside a scrolled panel must anchor to the painted position.
+                abs_bounds = viewport_bounds
                 popup_position = Vec2.new(abs_bounds.x, abs_bounds.y + abs_bounds.height)
 
                 # Re-layout popup at new position
@@ -229,8 +230,9 @@ module CrymbleUI
 
             # Add popup to window as overlay (persists across DSL rebuilds)
             if window = find_window
-                # Calculate absolute position for popup
-                abs_bounds = absolute_bounds
+                # Where the menu is PAINTED: the popup mounts at window level, so a menu bar
+                # inside a scrolled panel must anchor to the painted position.
+                abs_bounds = viewport_bounds
                 popup_position = Vec2.new(abs_bounds.x, abs_bounds.y + abs_bounds.height)
 
                 # Add popup as overlay (auto-migrated during reconciliation)

@@ -580,7 +580,10 @@ module CrymbleUI
           @drag_manager.begin_drag_tracking(draggable, point)
         end
 
-        widget.on_mouse_down(point, button)
+        # Into the widget's own space: hit_test already found it by converting the point on the
+        # way down through every ScrollView; delivering the raw window point would make the
+        # widget's own `point - absolute_bounds` wrong by exactly the scroll.
+        widget.on_mouse_down(widget.to_content(point), button)
 
         # Cancel drag tracking if widget claimed the click for its own purpose
         # (e.g., VirtualMatrix resize — drag tracking would intercept mouse_move)
@@ -664,7 +667,7 @@ module CrymbleUI
       # Handle widget dragging if mouse is down (WindowPanel, ScrollView, etc.)
       if @mouse_down
         if widget = @mouse_down_widget
-          widget.on_mouse_move(point)
+          widget.on_mouse_move(widget.to_content(point))
           # Rebuild only if explicitly requested (not for layout-only changes)
           if needs_rebuild?
             # Save path_id before rebuild (widget will be replaced with new instance)
@@ -705,7 +708,7 @@ module CrymbleUI
 
       # Call on_mouse_up on the widget that was pressed
       if widget = @mouse_down_widget
-        widget.on_mouse_up(point, button)
+        widget.on_mouse_up(widget.to_content(point), button)
 
         # If mouse released over the same widget, trigger click (left-click only)
         if button == MouseButton::Left
@@ -739,7 +742,7 @@ module CrymbleUI
         current : Widget? = widget
         while current
           if current.responds_to?(:on_mouse_wheel)
-            current.on_mouse_wheel(delta, point, shift: shift)
+            current.on_mouse_wheel(delta, current.to_content(point), shift: shift)
             # Rebuild only if explicitly requested
             rebuild if needs_rebuild?
             return
@@ -844,7 +847,7 @@ module CrymbleUI
     private def infer_widget_cursor(root : Widget, point : Vec2) : CursorType
       widget = root.hit_test(point)
       return CursorType::Arrow if widget.nil?
-      widget.preferred_cursor(point) || CursorType::Arrow
+      widget.preferred_cursor(widget.to_content(point)) || CursorType::Arrow
     end
 
     # Clear all widget render states

@@ -130,7 +130,7 @@ module CrymbleUI
     # Pull-based layer bounds: dispatch by layer identity
     # Sticky layers need per-axis resize clipping (row=width only, col=height only, corner=none)
     def compute_bounds_for_layer(layer : Layer) : Rect
-      abs = absolute_bounds
+      abs = viewport_bounds # painted: this view may itself sit inside a scrolled one
       ew = effective_viewport_width
       eh = effective_viewport_height
 
@@ -289,8 +289,22 @@ module CrymbleUI
     # A ScrollView scrolls horizontally too, so it imposes NO intrinsic WIDTH floor either — the width
     # dual. This is the OPT-IN escape valve: embed shrinkable content in a ScrollView and the panel can
     # shrink past it (the floor is 0); otherwise the content's own min floors the panel.
+    #
+    # `keep_content_width` opts OUT of the valve on the width axis, for the case the valve does not
+    # serve: a vertically-scrolling column of controls. There the escape valve lets the container
+    # shrink past the content, and since a Vertical ScrollView cannot scroll sideways the content
+    # has nowhere to go — it is squeezed instead, down to unreadable stubs. With this set, the
+    # content's own minimum floors the container again, exactly as it would without a ScrollView
+    # in the chain. Deliberately opt-in: the default stays the documented valve.
+    property keep_content_width : Bool = false
+
     def min_intrinsic_width(height : Float64) : Float64
-      0.0
+      return 0.0 unless @keep_content_width
+      # The content's own floor, WITHOUT the scrollbar's width added on. Adding it made the floor
+      # unsatisfiable: the container grows to honour the min, its own chrome eats the difference,
+      # and the content area lands exactly SCROLLBAR_WIDTH short of the floor it just caused —
+      # a violation that never resolves (verify_bounds: "Content width 1084.0 < min 1100.0").
+      @content_widget.try(&.min_intrinsic_width(height)) || 0.0
     end
 
     def perform_layout(constraints : BoxConstraints, position : Vec2)
@@ -354,8 +368,8 @@ module CrymbleUI
 
       # Create/update layer with effective bounds (excludes scrollbar area)
       effective_bounds = Rect.new(
-        absolute_bounds.x,
-        absolute_bounds.y,
+        viewport_bounds.x,
+        viewport_bounds.y,
         effective_width,
         effective_height
       )
@@ -880,6 +894,11 @@ module CrymbleUI
     # Override hit_test to intercept clicks on scrollbar areas
     # Without this, clicks on scrollbars would go to content behind them
     # Also adjusts for scroll offset in viewport_cache mode
+    # Only the CONTENT rides the scroll; the scrollbars are painted where they are laid out.
+    def paint_shift_for(child : Widget) : Vec2
+      child.same?(@content_widget) ? scroll_offset : Vec2.zero
+    end
+
     def hit_test(point : Vec2) : Widget?
       abs = absolute_bounds
       return nil unless abs.contains_point(point)

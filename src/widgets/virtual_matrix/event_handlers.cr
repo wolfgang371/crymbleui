@@ -37,21 +37,11 @@ module CrymbleUI
 
     # === MOUSE HANDLING ===
 
-    # Accumulate scroll offsets from ancestor ScrollViews.
-    # on_mouse_down receives screen-space coordinates, but absolute_bounds
-    # is in content-space (doesn't account for ancestor scrolling).
-    # Adding ancestor scroll offsets converts screen→content.
-    private def ancestor_scroll_offset : Vec2
-      offset = Vec2.zero
-      current = @parent
-      while current
-        if current.is_a?(ScrollView)
-          offset = Vec2.new(offset.x + current.scroll_offset.x, offset.y + current.scroll_offset.y)
-        end
-        current = current.parent
-      end
-      offset
-    end
+    # NO screen→content conversion here any more: every point a widget is handed already arrives
+    # in the widget's own space (App converts once, via Widget#to_content — see
+    # docs/RENDERING_LAWS.md § Coordinate spaces). This file used to accumulate
+    # ancestor ScrollView offsets itself; keeping that would convert twice and land the cursor on
+    # the wrong cell.
 
     def point_to_cell(point : Vec2) : Tuple(Int32, Int32)?
       content_x = absolute_bounds.x
@@ -141,8 +131,7 @@ module CrymbleUI
       # the un-scrolled logical position — visibly offset from where the
       # mouse actually is whenever scroll_offset != 0.
       unless @interactive_cells
-        ancestor_scroll = ancestor_scroll_offset
-        content_point = Vec2.new(point.x + ancestor_scroll.x, point.y + ancestor_scroll.y)
+        content_point = point
         if sv = @content_scroll_view
           @scroll_offset.set(sv.scroll_offset)
         end
@@ -247,9 +236,7 @@ module CrymbleUI
     end
 
     def preferred_cursor(point : Vec2) : CursorType?
-      ancestor_scroll = ancestor_scroll_offset
-      content_point = Vec2.new(point.x + ancestor_scroll.x, point.y + ancestor_scroll.y)
-      edge = detect_resize_edge(content_point)
+      edge = detect_resize_edge(point)
       return nil unless edge
       case edge[0]
       when ResizeAxis::Col then CursorType::SizeHorizontal
@@ -264,7 +251,7 @@ module CrymbleUI
       @drag_source_was_preexisting = !@drag_source_cell.nil?
       # Right-click: move cursor to clicked cell, then bubble for context menu
       if button == MouseButton::Right
-        content_point = Vec2.new(point.x + ancestor_scroll_offset.x, point.y + ancestor_scroll_offset.y)
+        content_point = point
         if sv = @content_scroll_view
           @scroll_offset.set(sv.scroll_offset)
         end
@@ -276,10 +263,7 @@ module CrymbleUI
         return true
       end
 
-      # Convert screen-space point to content-space by adding ancestor scroll offsets.
-      # App.handle_mouse_down passes screen-space coordinates, but absolute_bounds
-      # is in content-space (doesn't account for ancestor ScrollView scrolling).
-      content_point = Vec2.new(point.x + ancestor_scroll_offset.x, point.y + ancestor_scroll_offset.y)
+      content_point = point
 
       # Sync scroll offset from ScrollView (user may have scrolled via scrollbar)
       if sv = @content_scroll_view
@@ -347,10 +331,8 @@ module CrymbleUI
     def on_mouse_move(point : Vec2)
       return unless resize_axis != ResizeAxis::None
 
-      # Convert screen-space to content-space (same as on_mouse_down)
-      ancestor_scroll = ancestor_scroll_offset
-      content_x = point.x + ancestor_scroll.x
-      content_y = point.y + ancestor_scroll.y
+      content_x = point.x
+      content_y = point.y
       sx = content_x - absolute_bounds.x
       sy = content_y - absolute_bounds.y
 
@@ -661,7 +643,11 @@ module CrymbleUI
           bb = adapter.cell_get_drag_bounding_box(src[0], src[1])
           min_r, min_c = bb[0]
           max_r, max_c = bb[1]
-          abs = absolute_bounds
+          # The ghost is drawn by the WINDOW, so this rect is window space: start from where the
+          # matrix is PAINTED (it may itself sit in a scrolled panel) and subtract the matrix's own
+          # scroll for the cell inside it. The two conversions are different scrollers, not a
+          # duplicate — `viewport_bounds` cannot know which cell this bounding box covers.
+          abs = viewport_bounds
           x = abs.x + ruler_col_width_pixels + (0...min_c).sum { |c| col_width_pixels(c) } - scroll_offset.x
           y = abs.y + ruler_row_height_pixels + (0...min_r).sum { |r| row_height_pixels(r) } - scroll_offset.y
           w = (min_c..max_c).sum { |c| col_width_pixels(c) }

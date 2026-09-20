@@ -105,14 +105,16 @@ module CrymbleUI
       candidates : Array(Widget),
       direction : Symbol
     ) : Widget?
-      current_bounds = current.absolute_bounds
+      # PAINTED positions throughout: "the next one up" is a statement about the screen, and a
+      # candidate inside a scrolled view is not where its laid-out bounds say it is.
+      current_bounds = current.viewport_bounds
       current_center = bounds_center(current_bounds)
 
       # Filter out current widget and find widgets in the correct direction
       valid_candidates = candidates.reject { |w| w == current }
 
       in_direction = valid_candidates.select do |candidate|
-        candidate_bounds = candidate.absolute_bounds
+        candidate_bounds = candidate.viewport_bounds
         candidate_center = bounds_center(candidate_bounds)
         in_direction?(current_center, candidate_center, current_bounds, candidate_bounds, direction)
       end
@@ -121,7 +123,7 @@ module CrymbleUI
 
       # Score and sort candidates - lower score is better
       scored = in_direction.map do |candidate|
-        score = calculate_navigation_score(current_bounds, candidate.absolute_bounds, direction)
+        score = calculate_navigation_score(current_bounds, candidate.viewport_bounds, direction)
         {candidate, score}
       end
 

@@ -85,8 +85,9 @@ module CrymbleUI
     # Measure total size needed for all children (VStack-like vertical layout)
     def measure(constraints : BoxConstraints) : Size
       # Account for padding in available space
-      inner_max_width = (constraints.max_width - padding * 2).clamp(0.0, Float64::MAX)
-      inner_max_height = (constraints.max_height - padding * 2).clamp(0.0, Float64::MAX)
+      # See the note in vstack.cr: clamping to Float64::MAX turns "unbounded" into a finite number.
+      inner_max_width = {(constraints.max_width - padding * 2), 0.0}.max
+      inner_max_height = {(constraints.max_height - padding * 2), 0.0}.max
 
       return Size.new(padding * 2, padding * 2) if @children.empty?
 

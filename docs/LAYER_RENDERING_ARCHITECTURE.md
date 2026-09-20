@@ -1,5 +1,9 @@
 # Layer-Based Rendering Architecture
 
+> **The contract is `RENDERING_LAWS.md`** — read that before changing the render path. This
+> file is the REFERENCE behind it: why each invariant exists, what it cost to learn, and the
+> worked examples. Add new rules to the laws file and the reasoning here.
+
 **Status**: IMPLEMENTED ✅
 **Related**: See `ARCHITECTURE.md` for DrawPrimitive architecture, and `REACTIVITY.md` for the
 canonical reactive-invalidation model (auto-capture, version counting, the pull render trigger).
@@ -800,7 +804,7 @@ between what the renderer wrote and what the compositor reads.
 
 ## Coordinate Systems
 
-Two coordinate systems that must be kept distinct:
+Three coordinate systems that must be kept distinct:
 
 ### Absolute Coordinates (widget.bounds)
 
@@ -817,8 +821,74 @@ button.bounds  = Rect(110, 130, 50, 24)       # Absolute position
 
 **Used for:**
 - Layout calculations (parent → child positioning)
-- Hit testing (mouse clicks)
 - Layer positioning (where to draw cached texture)
+
+These are CONTENT-space positions. They are the same as window positions only while nothing
+between the widget and the root scrolls — see the next section before using them against a
+cursor.
+
+### Window Coordinates (`widget.viewport_bounds`) — what meets the cursor
+
+A widget inside a `ScrollView` does NOT move when the view scrolls: it keeps its laid-out
+position and the LAYER composites shifted, which is the whole point of `viewport_cache`
+(one bounds change instead of a re-layout of the content). So for such a widget
+`absolute_bounds` is where it WOULD be at scroll 0, and
+
+```
+painted position = absolute_bounds - scroll_offset        # the renderer's own rule, per layer
+```
+
+`Widget#viewport_bounds` is that painted position: one parent walk, asking each parent how much
+it shifts the child below it — `Widget#paint_shift_for(child)`, which is zero by default. At
+scroll 0 it equals `absolute_bounds`, so it is always the safe one to ask.
+
+**Scrolling is not a ScrollView privilege**, which is why the walk asks a hook instead of naming
+a class:
+
+| scroller | shifts | holds still |
+|---|---|---|
+| `ScrollView` | its content widget, by `scroll_offset` | its scrollbars |
+| `VirtualMatrix` | its cells, by `scroll_offset` | sticky rows (Y) and columns (X) |
+
+A matrix keeps its cells' laid-out bounds and paints them shifted exactly as a ScrollView does —
+measured: a cell stays at x=143 while the matrix scrolls 46 → 60 — so anything anchored to a cell
+(a cell editor's dropdown, a ghost, a highlight) needs this too. Teaching the hook to a new
+scroller is the whole integration.
+
+**The rule has two halves, and the second is what keeps the first from being a discipline
+everyone must remember:**
+
+1. **A widget always sees points in its own space.** `hit_test` had always worked that way
+   (`ScrollView#hit_test` converts for its children); delivery does too, so the line
+   every handler writes — `point - absolute_bounds` — is right by construction, scrolled or not.
+   The conversion lives in ONE place, `App`'s four dispatch sites, via `Widget#to_content`.
+2. **Anything that LEAVES the widget tree works in window space** — a ghost, a drop highlight, a
+   popup, a menu position — because it is drawn by the window, not by the scrolled layer. Those
+   convert outward, explicitly, with `Widget#to_window` / `viewport_bounds`.
+
+`to_content` and `to_window` are inverses over the same walk, so there is no third rule to get
+wrong. Concretely:
+
+| consumer | space | how |
+|---|---|---|
+| `ScrollView#hit_test` | converts the POINT inward | `point + scroll_offset`, then tests children's `absolute_bounds` |
+| mouse handlers (`on_mouse_down/move/up/wheel`) | receive the widget's OWN space | `App` converts with `widget.to_content(point)` before delivering |
+| `on_right_click_handler` | window | `to_window(point)` — the handler exists to place something on the screen |
+| drag ghost, drop highlight, drop-target hit test | converts the WIDGET outward | `viewport_bounds` (`drag_manager.cr`) |
+| combo / multi-combo popups | converts the WIDGET outward | `viewport_bounds` (`popup_host.cr`) — they mount into `Window.overlays`, and the flip-above test compares against the WINDOW height |
+| a layer's bounds | converts the WIDGET outward | `compute_bounds_for_layer` → `viewport_bounds`: a layer composites onto the WINDOW, so a layer-owning widget inside a scroller must place it where it is painted |
+| foreground primitives | buffer space | `slot_axis(abs, layer.bounds, buffer_origin)` — the same rule the widget's own primitives use |
+| Tab order / arrow navigation | painted | `viewport_bounds`: "the next one down" is a statement about the screen |
+| `VirtualMatrix#drag_ghost_bounds` | converts by hand | `absolute_bounds - scroll_offset`, the matrix scrolls itself |
+
+Mixing the two costs exactly the scroll amount, and the symptom names the culprit: an overlay
+that is correct at the top of a list and drifts further down the further you scroll. That was the
+2026-09 arc — the drag ghost and the drop highlight were built from `absolute_bounds`, so dragging a
+field in a scrolled config panel put the ghost hundreds of pixels below the cursor and
+highlighted the wrong row (it never showed up while the only draggables lived in unscrolled
+panels). The same walk found the combo popups, which opened at the unscrolled position AND took
+the flip-above decision there. A VirtualMatrix cell editor is NOT affected: its parent chain is
+the matrix alone, so the two spaces coincide.
 
 ### Widget-Local Coordinates (primitives)
 
@@ -871,6 +941,30 @@ Layer-local position = 0 + 110 - 100 = 10
 
 So primitive renders at (10, 30) within layer texture
 ```
+
+**The formula above is COMPLETE ONLY for a layer whose buffer is the viewport.** A
+`viewport_cache` layer's buffer is larger than the viewport and starts at `buffer_origin`
+(negative by the cache extent, e.g. -100), so the full rule has a third term:
+
+```
+non-viewport_cache: buffer position = abs - layer.bounds
+viewport_cache:     buffer position = abs - layer.bounds - buffer_origin      # = slot_axis()
+```
+
+`scroll_offset` does NOT appear here, and that is the point: the buffer stores CONTENT, and the
+COMPOSITE step is what applies the viewport transform (`scroll_offset - buffer_origin`). Painting
+is content space; only compositing knows where the viewport currently is.
+
+Both terms live in one helper, `LayerRenderer#slot_axis(coord, layer_bound, buffer_origin)` — use
+it, do not re-derive it. `buffer_origin` is `Vec2.zero` off the viewport_cache path (its single
+production writer is `recenter_origin!`), so the one call is correct for every layer.
+
+> Written down in 2026-09 because it was NOT written down: `render_foreground_primitives` derived
+> its own position as `abs - layer.bounds`, exactly the incomplete rule documented above, and so
+> painted every DecoratedContainer foreground 100px off inside any scrolled view — embrace's
+> Configurator arrows pointing into empty space (`spec/rendering/foreground_scroll_offset_spec`).
+> The full-repaint path had its own third copy of the rule. A rule stated three times is a rule
+> that will disagree with itself.
 
 ### Float-to-Integer Coordinate Rounding — the PixelSnap policy
 
@@ -1332,6 +1426,68 @@ assert(!widget.rendered_to_layer_at_current_bounds?,
 
 **Catches**: Capturing widget's own old content as "background" (causes double-rendering artifacts)
 
+#### Invariant (h2): A Capture Needs Something Painted Beneath It
+
+**Rule**: a widget may only capture its background where the widget that paints beneath it has
+actually painted into the buffer this pass. Where that does not hold, the widget renders
+**direct-to-layer** for that pass — no texture, nothing memorized — and returns to the texture path
+next frame, when the buffer beneath it is whole.
+
+**Enforcement**: `render_single_widget` walks the ancestors' per-pass dispositions before capturing
+(`LayerRenderer.pass_painted?`) and falls through to the existing direct-to-layer branch.
+
+**Why critical**: (h) protects a capture from the widget's *own* stale content. This protects it
+from *nothing at all*. Parent-first ordering (below) is necessary but **not sufficient**, because
+painting is conditional — an ancestor can be culled, slot-skipped, or return early — while
+capturing was unconditional. A widget that captures where its parent has not yet painted stores
+transparency, keeps it, and RESTORES it over the parent's content on every later re-render. The
+damage is permanent until a full repaint, because the capture is memorized.
+
+**How it presents**: rectangles of the layer background sitting inside painted content — a widget's
+exact box, blanked. In the field (2026-09-20, embrace's Config tab): scroll a `ScrollView`
+containing nested `RecursiveGrid`s down, back up, and down again; the third leg leaves the grid's
+coloured cells punched through with panel background, and only Ctrl+0 restores them. Traced:
+
+```
+capture Text#- at buf(124,643) 58x53 captured_transparent=100% cleared=false origin=(-100,0)
+   ancestors: DropZoneBox=NOT-PAINTED <- Expanded=NOT-PAINTED <- VStack=rendered
+              <- RecursiveGrid=NOT-PAINTED(431x114) <- ...
+render-blit Text#- -> buf(124,643) 58x53 texture_transparent=100%   # erases the cell colour
+```
+
+**Why it needs the third leg**: the first descent paints the band and the widget blits a good
+texture; the return leg recenters and leaves the band unpainted; the second descent is where the
+newly-exposed widget captures the emptiness.
+
+**Not visible headless**: the whole chain is per-widget texture blits into a `viewport_cache`
+buffer under a real recenter. Regression coverage is the SFML autotest
+`core/spec/autotest/config_tab_scroll_garble_autotest.cr`, whose oracle counts layer-background
+pixels ENCLOSED by cell colours in a captured frame: 3043 before the guard, 0 after, deterministic
+across runs.
+
+**Refuted on the way there** (each measured, none is the cause — do not re-try them): the
+widget-texture fast-path blit; dropping captured backgrounds on a blit-shift; the per-slot skip;
+and the blit-shift geometry itself. All four assume the paint is MISSING; it is being ERASED.
+
+**WHY NOT SIMPLY DEFER.** The obvious repair — leave the widget dirty and capture next frame —
+removes the holes (3043 -> 0 on the SFML oracle) and **breaks seven existing specs**, because
+deferring means not painting:
+
+| spec | what it catches |
+|------|-----------------|
+| `scroll_view_viewport_cache_spec` "all rows in viewport range are visible (no gaps)" | the deferred widget simply is not there |
+| …"newly entering widgets are rendered to correct screen position" | same, on entry |
+| …"buttons appear in sequential order — no skipped indices" | gaps mid-run |
+| …"viewport shows NEWLY visible content, not old wrapped pixels" | stale content |
+| …"renders widgets at buffer positions beyond viewport size" | margin cells |
+| `scroll_view_buffer_recenter_spec` "renders correctly after scroll down and up (no garbling)" | the sibling case of this very defect |
+| `scroll_view_performance_spec` "continuous scroll renders O(1) widgets per frame" | re-dirtying breaks the O(1) budget |
+
+Hence the direct-to-layer fallback above: the widget PAINTS (no gaps, no skipped indices, budget
+intact) and memorizes nothing (no erasure later). Note also that the pixel oracle alone does not
+catch the deferral regression — it counts background ENCLOSED by cell colour, and a missing row is
+enclosed by nothing. Run the suite.
+
 #### Invariant (siblings): No Overlap Constraint
 **Rule**: Sibling widgets cannot have overlapping bounds.
 
@@ -1369,6 +1525,11 @@ end
 **Critical requirement**: During full render, widgets MUST be processed in parent-before-children order.
 
 **Why**: Children capture backgrounds from layer. If child processes before parent, it captures empty/wrong background!
+
+> **Ordering is necessary but not sufficient** — see invariant (h2) below. Being earlier in the list is
+> not the same as having PAINTED: an ancestor can be culled, slot-skipped or return early, and the
+> child then captures emptiness from a spot its parent never filled. The capture site checks the
+> ancestors' per-pass dispositions and defers when any of them did not paint.
 
 ```crystal
 # Collect widgets in depth-first order (parent before children)
@@ -1461,7 +1622,7 @@ Compositor: O(layers)
 2. **Background memorization**: Captured BEFORE widget renders, AFTER parent renders
 3. **Parent-first ordering**: Critical for correct background capture
 4. **Parent invalidation**: O(children) cascade when parent changes (correct, rare)
-5. **Invariants enforce correctness**: (f) rendering, (g) memorization, (h) capture purity, (siblings) no-overlap
+5. **Invariants enforce correctness**: (f) rendering, (g) memorization, (h) capture purity, (h2) a capture needs something painted beneath it, (siblings) no-overlap
 6. **Performance**: Optimized for common case (leaf changes = O(1)), accepts rare case (parent changes = O(children))
 
 ## The Drag Performance Bug (Case Study)

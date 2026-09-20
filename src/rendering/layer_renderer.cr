@@ -795,6 +795,7 @@ module CrymbleUI
         # pushes onto this same stack, so a raise mid-widget can leave several live.
         entry_clip_depth = backend.clip_depth
         backend.push_clip(layer_clip_rect)
+        LayerRenderer.pass_id &+= 1
         begin
           # Render each widget using per-widget texture approach
           widgets_to_render.each do |widget|
@@ -1252,11 +1253,21 @@ module CrymbleUI
         # Checked BEFORE the widget_backend fast path so backendless direct cells skip too.
         slot_buffer_pos = {layer_local_x, layer_local_y}
         if !layer.buffer_just_cleared && widget.slot_fresh?(slot_buffer_pos)
+          LayerRenderer.mark_covered(widget)
           record_widget_disposition(widget, :skipped)
           return nil
         end
         if existing_backend = widget.widget_backend
           if existing_backend.width == widget_width && existing_backend.height == widget_height
+            # NOT during a FULL render. The per-slot skip above refuses to trust the buffer when
+            # it was just cleared, but that is only one of the ways a pass becomes full: a
+            # viewport_cache layer that blit-shifts its buffer (handle_viewport_cache_scroll)
+            # sets full_render WITHOUT clearing, and then this path repainted most of the layer
+            # from cached textures over shifted pixels. Field measurement, the frame the black
+            # boxes appeared in:
+            #   full=true widgets=135 rendered=22 blitted=113 cleared=FALSE recenters=0
+            #   origin=(-100,0) scroll=(0,120)
+            # A full render means every widget renders; blitting is for incremental passes.
             if widget.has_valid_primitive_cache? && widget.slot_rev_matches?
               # Fast path: blit cached content, skip ALL other work including get_primitives
               {% if flag?(:DEBUG_RENDER) %}
@@ -1292,6 +1303,7 @@ module CrymbleUI
               backend.blit(existing_backend, layer_local_x, layer_local_y)
               widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
               widget.stamp_slot(slot_buffer_pos)
+              LayerRenderer.mark_covered(widget)
               record_widget_disposition(widget, :blitted)
               {% if flag?(:cache_validation) %}
                 # CV trace: verify buffer content AFTER fast-path blit
@@ -1411,7 +1423,32 @@ module CrymbleUI
       # invariant-(h) trip, no self-capture; (c) the disposed texture frees GPU memory (the M4 goal:
       # ~130 live textures → 0). A stale texture left in place would be blitted by the fast path once
       # slot_rev matches — hence the mandatory dispose.
-      if layer.viewport_cache && layer.tiled_cells && layer.buffer_just_cleared
+      # A widget composes over the layer by memorizing the pixels beneath it (`background_backend`)
+      # and restoring them into its own texture before drawing. That is only sound where those
+      # pixels EXIST. Covering the buffer is conditional — an ancestor can be culled, dropped or
+      # return early — while capturing was not, so after a recenter a newly-exposed widget could capture
+      # the empty band, memorize it, and then restore that emptiness OVER its parent's content on
+      # every later re-render. Field symptom: rectangles of layer background punched into a
+      # RecursiveGrid's cells, persistent until a full repaint.
+      #
+      # On such a pass, render DIRECT-TO-LAYER instead: no texture, so nothing is memorized and
+      # nothing is stamped over what is already there — the widget simply composes onto the buffer.
+      # Deliberately NOT a deferral: deferring means not painting, which costs "all rows visible
+      # (no gaps)", "no skipped indices" and the O(1)-per-frame budget (seven ScrollView specs).
+      # The widget returns to the texture path next frame, when the buffer beneath it is whole.
+      capture_would_be_blind = false
+      if layer.viewport_cache && !layer.buffer_just_cleared && widget.background_backend.nil?
+        anc = widget.parent
+        while anc && !(anc.responds_to?(:layer) && anc.layer == layer)
+          unless LayerRenderer.pass_covered?(anc)
+            capture_would_be_blind = true
+            break
+          end
+          anc = anc.parent
+        end
+      end
+
+      if (layer.viewport_cache && layer.tiled_cells && layer.buffer_just_cleared) || capture_would_be_blind
         if wb = widget.widget_backend
           wb.dispose
           widget.widget_backend = nil # setter also nils last_rendered_layer_position
@@ -1429,6 +1466,7 @@ module CrymbleUI
         end
         backend.pop_clip
         widget.stamp_slot({layer_local_x, layer_local_y})
+        LayerRenderer.mark_covered(widget)
         record_widget_disposition(widget, :rendered)
         return
       end
@@ -1697,6 +1735,7 @@ module CrymbleUI
       widget.last_rendered_layer_position = {layer_local_x, layer_local_y}
       # Pull/SlotBuffer: stamp the slot so the next frame's per-slot check can SKIP this cell.
       widget.stamp_slot({layer_local_x, layer_local_y}) if layer.viewport_cache
+      LayerRenderer.mark_covered(widget)
       record_widget_disposition(widget, :rendered)
     end
 
@@ -1706,6 +1745,26 @@ module CrymbleUI
     # "this cell was painted, and how" WITHOUT sampling pixels. A culled/dropped widget never reaches
     # a paint point → no entry → absent, which is exactly the grow-ghost signature.
     protected def record_widget_disposition(widget : Widget, disposition : Symbol) : Nil
+    end
+
+    # Invariant (h2): a capture is only sound where the buffer beneath it holds something. Covering
+    # the buffer is conditional (an ancestor can be culled, dropped or return early) while capturing
+    # was not, so a widget could memorize an empty band and then restore that emptiness over its
+    # parent's content forever after.
+    #
+    # "Covered" is the honest word, and it is wider than "painted": the layer BUFFER holds this
+    # widget's pixels either because it painted this pass (:rendered/:blitted) or because the
+    # per-slot check verified they are still there (:skipped). Only an absent widget — one that
+    # never reached a paint point — leaves nothing beneath. A counter per layer pass plus a stamp
+    # per widget, so the test costs one comparison and allocates nothing on the render path.
+    class_property pass_id : UInt64 = 0
+
+    def self.mark_covered(widget : Widget) : Nil
+      widget.last_covered_pass = @@pass_id
+    end
+
+    def self.pass_covered?(widget : Widget) : Bool
+      widget.last_covered_pass == @@pass_id
     end
 
     # Execute primitive on widget's own backend (no coordinate offset needed)
@@ -1743,10 +1802,16 @@ module CrymbleUI
       prims = widget.foreground_primitives
       return if prims.empty?
 
-      # Calculate widget position in layer-local coordinates
+      # Where the widget is painted IN THE BUFFER — the same rule the widget's own primitives
+      # use (`slot_axis`), because this pass draws onto the same buffer. A viewport_cache buffer
+      # holds content space shifted by `buffer_origin` (the composite undoes it with
+      # `scroll_offset - buffer_origin`); omitting that term drew every foreground at the
+      # position the content had when the origin was zero — the Configurator's reference arrows
+      # left behind by a scrolled Config tab. `buffer_origin` is zero off that path (its single
+      # production writer is `recenter_origin!`), so one formula serves both.
       widget_abs = widget.absolute_bounds
-      layer_local_x = PixelSnap.origin(widget_abs.x - layer_offset_x)
-      layer_local_y = PixelSnap.origin(widget_abs.y - layer_offset_y)
+      layer_local_x = slot_axis(widget_abs.x, layer_offset_x, layer.buffer_origin.x)
+      layer_local_y = slot_axis(widget_abs.y, layer_offset_y, layer.buffer_origin.y)
 
       # Execute primitives with offset (primitives are widget-local, layer expects layer-local)
       prims.each do |primitive|

@@ -11,9 +11,11 @@ module CrymbleUI
       focusables = [] of Widget
       collect_recursive(root, focusables)
 
-      # Sort by reading order: primary Y (top-to-bottom), secondary X (left-to-right)
+      # Sort by reading order: primary Y (top-to-bottom), secondary X (left-to-right).
+      # PAINTED position, not laid-out: "reading order" is what the user sees, and widgets on
+      # either side of a scrolled view are only comparable once both are in window space.
       focusables.sort_by! do |widget|
-        bounds = widget.absolute_bounds
+        bounds = widget.viewport_bounds
         # Use integers for stable sorting (avoid float precision issues)
         {bounds.y.to_i, bounds.x.to_i}
       end

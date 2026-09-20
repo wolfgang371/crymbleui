@@ -147,7 +147,7 @@ module CrymbleUI
 
         # Pull-based layer bounds: expand absolute_bounds by border margin
         def compute_bounds_for_layer(layer : Layer) : Rect
-            abs = absolute_bounds
+            abs = viewport_bounds
             Rect.new(
                 abs.x - BORDER_MARGIN,
                 abs.y - BORDER_MARGIN,

@@ -493,6 +493,86 @@ module CrymbleUI
             end
         end
 
+        # Where this widget is PAINTED, in window coordinates.
+        #
+        # `absolute_bounds` sums the parent chain, which is CONTENT space: a widget whose parent
+        # scrolls keeps its laid-out position and the pixels move instead (a ScrollView composites
+        # its layer shifted; a VirtualMatrix paints its cells shifted). Anything that meets the
+        # CURSOR - the drag ghost, the drop highlight, a popup anchored under a control - lives in
+        # window space and must convert, or it is displaced by exactly the scroll amount. Mouse
+        # handlers get the opposite conversion, done once in App (`to_content`).
+        #
+        # ONE walk, like `absolute_bounds`: sum the chain and subtract what each parent shifts its
+        # child by, so this costs the same as the position it corrects.
+        def viewport_bounds : Rect
+            Widget.increment_absolute_bounds_count  # same parent walk, same budget
+            x = @bounds.x
+            y = @bounds.y
+            node : Widget = self
+            current = @parent
+            while current
+                x += current.bounds.x
+                y += current.bounds.y
+                shift = current.paint_shift_for(node)
+                x -= shift.x
+                y -= shift.y
+                node = current
+                current = current.parent
+            end
+            Rect.new(x, y, @bounds.width, @bounds.height)
+        end
+
+        # How much THIS widget shifts the given child when painting it. A widget that scrolls its
+        # children keeps their laid-out bounds and moves the pixels instead, so a child's painted
+        # position is its laid-out position minus this. Default: nothing moves.
+        #
+        # Per-CHILD, not per-widget, because the same parent shifts one child and not another: a
+        # ScrollView's scrollbars stay put while its content scrolls, and a matrix's sticky rows
+        # and columns hold one axis still. Only the shifting widget knows which is which.
+        def paint_shift_for(child : Widget) : Vec2
+            Vec2.zero
+        end
+
+        # The shift a point must cross between this widget's space and the window's: the sum of
+        # `paint_shift_for` along the parent chain. `to_window` subtracts it, `to_content` adds it
+        # back, and they are inverses, so there is no third rule to get wrong.
+        protected def enclosing_scroll : Vec2
+            x = 0.0
+            y = 0.0
+            node : Widget = self
+            current = @parent
+            while current
+                shift = current.paint_shift_for(node)
+                x += shift.x
+                y += shift.y
+                node = current
+                current = current.parent
+            end
+            Vec2.new(x, y)
+        end
+
+        # A point of MINE, placed on the window. Use it for anything that leaves the widget tree:
+        # an overlay, a menu position, a ghost - they are drawn by the window, not by the scroller.
+        def to_window(point : Vec2) : Vec2
+            s = enclosing_scroll
+            Vec2.new(point.x - s.x, point.y - s.y)
+        end
+
+        # A window point, brought into MY space - the space `bounds` and `absolute_bounds` live in.
+        # This is what a widget's mouse handlers are given, so `point - absolute_bounds` is correct
+        # without anyone having to think about scrolling.
+        def to_content(point : Vec2) : Vec2
+            s = enclosing_scroll
+            Vec2.new(point.x + s.x, point.y + s.y)
+        end
+
+        # The render pass in which this widget's pixels were last put INTO its layer's buffer —
+        # painted fresh, blitted from its texture, or verified still fresh by the per-slot skip.
+        # Compared against `LayerRenderer.pass_id` by `LayerRenderer.pass_covered?`, so a widget
+        # that never reached a paint point (culled, dropped, returned early) is distinguishable
+        # from one that did, in O(1) and with no per-frame allocation. See invariant (h2).
+        property last_covered_pass : UInt64 = 0
+
         # Widget invalidation state (Clean, NeedsRender, NeedsLayout)
         property state : WidgetState
 
@@ -1660,10 +1740,13 @@ module CrymbleUI
             bring_containing_panel_to_front
             if button == MouseButton::Right
                 # Bubble up: find nearest ancestor with right-click handler
+                # `point` is in MY space; a right-click handler exists to put something on the
+                # SCREEN (embrace hangs its context menus off this), so it is handed window
+                # coordinates. The one place the direction is reversed, and it says so.
                 current : Widget? = self
                 while current
                     if handler = current.on_right_click_handler
-                        handler.call(point)
+                        handler.call(to_window(point))
                         break
                     end
                     current = current.parent

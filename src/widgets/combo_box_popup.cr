@@ -35,7 +35,7 @@ module CrymbleUI
 
     # Override Popup's compute_bounds_for_layer: no border margin expansion
     def compute_bounds_for_layer(layer : Layer) : Rect
-      absolute_bounds
+      viewport_bounds
     end
 
     TEXT_INPUT_PADDING = 4.0

@@ -222,10 +222,12 @@ module CrymbleUI
       @state.phase = DragPhase::Active
 
       # Store source bounds for ghost sizing (use custom drag bounds if provided)
+      # Window space throughout: `drag_ghost_bounds` already converts (VirtualMatrix
+      # subtracts its own scroll), and `viewport_bounds` converts for everyone else.
       @source_bounds = if source.is_a?(Draggable)
-        source.as(Draggable).drag_ghost_bounds || source.absolute_bounds
+        source.as(Draggable).drag_ghost_bounds || source.viewport_bounds
       else
-        source.absolute_bounds
+        source.viewport_bounds
       end
 
       # Calculate ghost offset (cursor position relative to widget origin)
@@ -288,7 +290,7 @@ module CrymbleUI
     end
 
     private def create_highlight_layer(target : Widget)
-      bounds = target.absolute_bounds
+      bounds = target.viewport_bounds
 
       # Get highlight color from target (if DropTarget) or use default
       color = if target.is_a?(DropTarget)
@@ -330,7 +332,7 @@ module CrymbleUI
     # Reusing the same Layer object avoids changing object identity,
     # which would trigger expensive layer recollection in render_all_layers.
     private def update_or_create_highlight_layer(target : Widget)
-      bounds = target.absolute_bounds
+      bounds = target.viewport_bounds
       color = if target.is_a?(DropTarget)
         target.as(DropTarget).highlight_color
       else
@@ -462,7 +464,7 @@ module CrymbleUI
 
       # Check if this widget is a valid drop target
       if widget.is_a?(DropTarget)
-        if widget.absolute_bounds.contains_point(position)
+        if widget.viewport_bounds.contains_point(position)
           if widget.as(DropTarget).accepts_drop?(data)
             return widget
           end

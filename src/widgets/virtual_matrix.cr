@@ -1548,6 +1548,28 @@ module CrymbleUI
     end
 
     # Expose active_cells for testing (read-only)
+    # A matrix scrolls its own cells: they keep their laid-out bounds and the matrix paints them
+    # shifted, exactly as a ScrollView does with its content — which is why a cell editor's popup
+    # opened at the unscrolled place until this existed (Wolfgang, double-click on a
+    # horizontally scrolled grid). Sticky rows and columns are pinned, so they hold that axis.
+    # O(1), off the matrix's own bookkeeping: `sync_cells_to_layers` already routes every cell and
+    # ruler to the layer that says how it moves, so the layer IS the answer. (The first version
+    # scanned `active_cells` for the child — and `viewport_bounds` runs per drop-target candidate
+    # on every mouse-move during a drag, which made it O(cells) inside an O(tree) walk.)
+    # A child with no render_layer is not painted by this matrix at all (its inner ScrollView, its
+    # overlays) and must not be shifted.
+    def paint_shift_for(child : Widget) : Vec2
+      layer = child.render_layer
+      return Vec2.zero unless layer
+      sv = @content_scroll_view
+      case layer
+      when @content_layer                 then scroll_offset                  # rides both axes
+      when sv.try(&.sticky_row_layer)     then Vec2.new(scroll_offset.x, 0.0) # column header: X only
+      when sv.try(&.sticky_col_layer)     then Vec2.new(0.0, scroll_offset.y) # row header: Y only
+      else                                     Vec2.zero                      # corner, and anything else
+      end
+    end
+
     def active_cells : Hash(Tuple(Int32, Int32), Widget)
       @active_cells
     end

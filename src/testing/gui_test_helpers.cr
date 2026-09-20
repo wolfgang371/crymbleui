@@ -55,9 +55,12 @@ module CrymbleUI::Testing
       rendered.should be >= min_count, "expected at least #{min_count} rendered children, got #{rendered}"
     end
 
-    # Simulate click at widget center through App (full event path)
+    # Simulate click at widget center through App (full event path).
+    # The point goes in where the real cursor does, so it must be WINDOW space: a widget inside a
+    # ScrollView keeps its laid-out bounds, and aiming at those clicks whatever sits at that place
+    # unscrolled — silently testing the wrong widget.
     def click_on(app : CrymbleUI::App, widget : CrymbleUI::Widget)
-      bounds = widget.absolute_bounds
+      bounds = widget.viewport_bounds
       center = CrymbleUI::Vec2.new(bounds.x + bounds.width/2, bounds.y + bounds.height/2)
       app.handle_mouse_down(center)
       app.handle_mouse_up(center)

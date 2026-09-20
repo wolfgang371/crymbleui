@@ -25,6 +25,7 @@ require "./widgets/virtual_matrix"
 require "./widgets/simple_matrix"
 require "./widgets/dir_browser"
 require "./widgets/tree_node"
+require "./widgets/tabs"
 
 # Layout containers
 require "./layout/vstack"

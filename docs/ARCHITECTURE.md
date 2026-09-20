@@ -1,4 +1,8 @@
 **It is a structural test, never a widget-type test.** The questions asked are *how many lines does
+
+> **Orientation, not contract.** The rules a change must satisfy live in `RENDERING_LAWS.md`,
+> `MATRIX_LAWS.md`, `PLACEMENT_CASES.md` and the repo's `CREDO.md`. Read this for the WHY:
+> the problem the architecture solves and the principles behind it.
 this region's content occupy* and *does this cell name more than one line*. Nothing asks whether a
 cell is a header, a ruler, a rank or a value, and nothing asks whether it is multiline —
 `is_multiline` is not a term in the rule. That is what lets it survive a cell factory returning an

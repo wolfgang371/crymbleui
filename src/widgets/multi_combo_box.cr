@@ -205,7 +205,7 @@ module CrymbleUI
       if @popup_open && (popup = @current_popup)
         # Re-anchor with the SAME flip-above logic as the initial open, so a rebuild
         # (e.g. a gutter toggle that keeps the popup open) doesn't snap it back below.
-        popup.bounds = Rect.new(popup_position(absolute_bounds, popup.bounds.height), popup.bounds.size)
+        popup.bounds = Rect.new(popup_position(viewport_bounds, popup.bounds.height), popup.bounds.size)
       end
     end
 

@@ -736,3 +736,35 @@ describe "VirtualMatrix ComboBox Tab/Shift+Tab" do
     combo.popup_open?.should be_false
   end
 end
+
+# Wolfgang, 2026-09-20: double-clicking cell 7/c6 in a HORIZONTALLY SCROLLED grid opened the
+# dropdown far to the right of the cell — at the place that cell would have had at scroll 0.
+#
+# A matrix cell widget carries CONTENT-space bounds (measured: the cell stays at x=143 while the
+# matrix scrolls 46 -> 60); the matrix paints it shifted, exactly as a ScrollView does. The popup
+# mounts into Window.overlays, which is window space, so it must be anchored to where the cell is
+# PAINTED. Same defect as the scrolled-panel dropdowns, reached through the one scroller that is not a
+# ScrollView.
+describe "VirtualMatrix cell editor popup position" do
+  it "opens at the cell the user sees, with the matrix scrolled" do
+    matrix = make_combo_matrix
+    renderer, app = setup_combo_matrix(matrix, width: 200, height: 200)
+
+    fm = CrymbleUI::Widget.focus_manager
+    fm.focus(matrix)
+    fm.handle_key_down(SF::Keyboard::Key::Right, false, false)
+    renderer.render_frame(app)
+
+    matrix.scroll_offset = CrymbleUI::Vec2.new(60.0, 0.0)
+    renderer.render_frame(app)
+    matrix.scroll_offset.x.should be > 0.0 # instrument: really scrolled
+
+    combo = matrix.active_cells[{0, 1}]?.as(CrymbleUI::ComboBox)
+    painted = combo.viewport_bounds
+    painted.x.should be_close(combo.absolute_bounds.x - matrix.scroll_offset.x, 0.5)
+
+    combo.expand
+    popup = combo.current_popup.not_nil!
+    popup.bounds.x.should be_close(painted.x, 0.5)
+  end
+end

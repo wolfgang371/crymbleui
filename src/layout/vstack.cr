@@ -34,8 +34,13 @@ module CrymbleUI
         # Measure total size needed for all children
         def measure(constraints : BoxConstraints) : Size
             # Account for padding in available space
-            inner_max_width = (constraints.max_width - padding * 2).clamp(0.0, Float64::MAX)
-            inner_max_height = (constraints.max_height - padding * 2).clamp(0.0, Float64::MAX)
+            # `{x, 0.0}.max`, never `clamp(0.0, Float64::MAX)`: INFINITY.clamp(0, MAX) is MAX — a
+            # FINITE number — so an UNBOUNDED axis arrived at the children as "astronomically wide",
+            # and every `finite?` guard downstream waved it through. A ScrollView takes all the width
+            # it is offered, so a nested one then measured 1.79e308 wide and its parent rendered
+            # nothing at all (spec/layout/unbounded_constraint_spec).
+            inner_max_width = {(constraints.max_width - padding * 2), 0.0}.max
+            inner_max_height = {(constraints.max_height - padding * 2), 0.0}.max
 
             return Size.new(padding * 2, padding * 2) if @children.empty?
 
@@ -66,7 +71,7 @@ module CrymbleUI
         # stacking, composing children's min instead of natural. Own chain, so no INFINITY→MAX clamp.
         def min_intrinsic_height(width : Float64) : Float64
             return padding * 2 if @children.empty?
-            inner_max_width = (width - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_width = {(width - padding * 2), 0.0}.max
             total_height = 0.0
             @children.each_with_index do |child, index|
                 total_height += child.min_intrinsic_height(inner_max_width)
@@ -79,7 +84,7 @@ module CrymbleUI
         # stack — mirrors measure's max_width; no spacing). The width dual of min_intrinsic_height.
         def min_intrinsic_width(height : Float64) : Float64
             return padding * 2 if @children.empty?
-            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_height = {(height - padding * 2), 0.0}.max
             max_width = 0.0
             @children.each do |child|
                 max_width = Math.max(max_width, child.min_intrinsic_width(inner_max_height))

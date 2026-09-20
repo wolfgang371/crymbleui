@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.4.2**
+**Version 1.5.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~37749 LOC
-- spec/: ~73103 LOC
+- src/: ~38318 LOC
+- spec/: ~74560 LOC
 
 ## Used by
 
@@ -62,6 +62,9 @@ ghosted logo behind a resized panel -- were found by using it, not by testing it
 - **Disabled buttons and menu items** (since v0.4.0) - visual feedback, no click handling
 - **Right-click context menus** - handler bubbling up the widget tree
 - **Window title sync** - dynamic window title from root widget
+- **Tabs widget** (since v1.5.0) - several pages in one panel, a tab strip on top. Every page
+  is built, not just the visible one, so a hidden page keeps its widget ids and the keyboard
+  shortcuts it declares keep firing for the panel
 
 ## Installation
 
@@ -112,6 +115,56 @@ and many more in examples/
 
 ## New Features
 
+### v1.5.0
+
+#### Tutorial 28: Tabs
+Putting several pages in one panel, with a tab strip on top.
+
+![Tutorial 28: Tabs](screenshots/tutorial-28.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial28App < CrymbleUI::App
+  state ones : Int32 = 0
+  state twos : Int32 = 0
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 28: Tabs", 620, 420) do
+      window_panel("Report", 20.0, 20.0, 560.0, 340.0, id: "report") do
+        # Kept OUTSIDE the tabs on purpose: a strip of context that should stay readable
+        # whichever page is forward.
+        text("Both pages are live. Ctrl+1 and Ctrl+2 work from either one.")
+
+        tabs(id: "views", active: 0) do
+          tab("Summary") do
+            text("Summary page")
+            text("counted on this page: #{@ones}")
+            button("Count here", "^1", id: "count_one") { self.ones += 1 }
+          end
+
+          tab("Details") do
+            text("Details page")
+            text("counted on this page: #{@twos}")
+            button("Count there", "^2", id: "count_two") { self.twos += 1 }
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial28App.new)
+```
+
+</details>
+
+---
 ### v1.0.0
 
 The first stable release. What defines CrymbleUI:
@@ -2134,6 +2187,54 @@ class Tutorial27App < CrymbleUI::App
 end
 
 CrymbleUI.run(Tutorial27App.new)
+```
+
+</details>
+
+---
+### Tutorial 28: Tabs
+Putting several pages in one panel, with a tab strip on top.
+
+![Tutorial 28: Tabs](screenshots/tutorial-28.png)
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+include CrymbleUI
+
+class Tutorial28App < CrymbleUI::App
+  state ones : Int32 = 0
+  state twos : Int32 = 0
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 28: Tabs", 620, 420) do
+      window_panel("Report", 20.0, 20.0, 560.0, 340.0, id: "report") do
+        # Kept OUTSIDE the tabs on purpose: a strip of context that should stay readable
+        # whichever page is forward.
+        text("Both pages are live. Ctrl+1 and Ctrl+2 work from either one.")
+
+        tabs(id: "views", active: 0) do
+          tab("Summary") do
+            text("Summary page")
+            text("counted on this page: #{@ones}")
+            button("Count here", "^1", id: "count_one") { self.ones += 1 }
+          end
+
+          tab("Details") do
+            text("Details page")
+            text("counted on this page: #{@twos}")
+            button("Count there", "^2", id: "count_two") { self.twos += 1 }
+          end
+        end
+      end
+    end
+  end
+end
+
+CrymbleUI.run(Tutorial28App.new)
 ```
 
 </details>

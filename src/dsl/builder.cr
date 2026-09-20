@@ -167,9 +167,11 @@ module CrymbleUI
 
             def scroll_view(id : String? = nil, direction : ScrollDirection = ScrollDirection::Vertical,
                             spacing : Float64 = 0.0, padding : Float64 = 0.0,
-                            max_height : Float64? = nil, max_width : Float64? = nil, &block)
+                            max_height : Float64? = nil, max_width : Float64? = nil,
+                            keep_content_width : Bool = false, &block)
                 ensure_container_stack
                 scroll = ScrollView.new(direction: direction, max_height: max_height, max_width: max_width, id: id)
+                scroll.keep_content_width = keep_content_width
                 # Add to parent container if we're inside one
                 if @container_stack && !@container_stack.not_nil!.empty?
                     @container_stack.not_nil!.last.add_child(scroll)
@@ -1197,6 +1199,38 @@ module CrymbleUI
                     return widget.as(WindowPanel) if widget.is_a?(WindowPanel)
                 end
                 nil
+            end
+
+            # A tab strip over a set of pages. Every page is built; only the active one is laid
+            # out — so the hidden pages' widgets stay findable and, importantly, the shortcuts
+            # they declare stay registered and keep firing (see Tabs).
+            #
+            #   tabs(id: "views") do
+            #     tab("Perspective") { ... }
+            #     tab("Config")      { ... }
+            #   end
+            def tabs(id : String? = nil, active : Int32 = 0, &block)
+                ensure_container_stack
+                widget = Tabs.new(id: id, active: active)
+                if @container_stack && !@container_stack.not_nil!.empty?
+                    @container_stack.not_nil!.last.add_child(widget)
+                end
+                with_container(widget, &block)
+                widget
+            end
+
+            # One page of the enclosing `tabs`. The page is a vstack, so its block reads like any
+            # other container's.
+            def tab(text : String, id : String? = nil, spacing : Float64 = 5.0, padding : Float64 = 5.0, &block)
+                ensure_container_stack
+                owner = @container_stack.not_nil!.last?
+                # A precondition, not a fallback: a `tab` outside `tabs` has nowhere to go, and
+                # silently dropping it would lose the page AND its shortcuts.
+                raise "tab(\"#{text}\") must be used inside a tabs block" unless owner.is_a?(Tabs)
+                page = TabPage.new(id: id, spacing: spacing, padding: padding)
+                owner.add_tab(text, page)
+                with_container(page, &block)
+                page
             end
 
             def tree_node(
