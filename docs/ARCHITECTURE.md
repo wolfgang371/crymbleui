@@ -1289,6 +1289,16 @@ TextEntered: 'd' (0x64)
 4. **Control characters ARE sent**: `Ctrl+S` generates `TextEntered(0x13)` control character
 5. **No frame boundary issues**: All events between frames are properly queued
 
+**The one frame-boundary trap: live device state.** The queue is drained between frames, so a queued
+event is handled AFTER the input source has moved on. Anything a handler asks the live devices
+(`SF::Keyboard.key_pressed?`, `SF::Mouse.get_position`) answers for a later moment. The TextEntered
+branch once filtered text by the live Ctrl key: under an AutoHotkey burst, plain text queued before a
+Ctrl chord was dropped whenever the chord was held at drain time, while Tab (whose KeyEvent carries its
+own flags) kept navigating — cells came out empty with the cursor in step (2026-09-22). Modifiers are
+therefore tracked from the event stream by `KeyboardDispatch` (`src/input/keyboard_dispatch.cr`), which
+owns KeyPressed/KeyReleased/TextEntered routing and is driven headlessly by
+`spec/input/keyboard_dispatch_spec.cr`; the wheel reads its position from its own event.
+
 ### Implementation Guidelines for Text Input
 
 When implementing text fields, use the same pattern as SFML's text_input example:

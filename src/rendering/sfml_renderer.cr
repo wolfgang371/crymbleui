@@ -8,6 +8,7 @@ require "../core/scheduler"
 require "../core/font_sizing"
 require "../input/shortcut_manager"
 require "../input/focus_manager"
+require "../input/keyboard_dispatch"
 require "../widgets/window_panel"
 require "./sfml_paint_context"
 require "./pixel_snap"
@@ -186,6 +187,9 @@ module CrymbleUI
       # Create focus manager for keyboard focus
       @focus_manager = FocusManager.new
       Widget.focus_manager = @focus_manager
+
+      # Routes the keyboard events; kept out of this class so a spec can drive it headlessly.
+      @keyboard = KeyboardDispatch.new(@focus_manager, @shortcut_manager)
 
       # Set global font for text measurement (wrap in SFMLFont)
       Widget.font = SFMLFont.new(@default_font)
@@ -457,10 +461,6 @@ module CrymbleUI
     # walk, kept until the aggregate's completeness is spec+interactively proven (removing it = final
     # flag deletion).
     @render_trigger = RenderTrigger.new
-    # Cost of the most recently rendered frame, so InputLog can correlate each keystroke with the
-    # load at the moment it arrived — the reporter's loss is load-dependent (clean when slow, clean
-    # with one Shape, lossy with ten).
-    @last_frame_total_ms : Float64 = 0.0
 
     private def any_layer_needs_render?(app : App) : Bool
       @render_trigger.should_render?(app)
@@ -645,37 +645,13 @@ module CrymbleUI
 
     private def handle_event_impl(event : LibCSFML::Event, app : App) : Bool
       case event.type
-      when SF::Event::TextEntered
-        # Check for Ctrl++ / Ctrl+- for zoom (works on all keyboard layouts)
-        char = event.text.unicode.chr
-        if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
-          case char
-          when '+', '='
-            handle_zoom_in
-            return true
-          when '-'
-            handle_zoom_out
-            return true
-          end
-          # Filter ALL text when Ctrl is pressed (Ctrl+key combos shouldn't insert text)
-          # This prevents Ctrl+0 from inserting '0', Ctrl+S from inserting 's', etc.
-          return true
-        end
-        # Dispatch text input to focused widget
-        # Filter control characters (< 32) except for specific cases
-        # Also filter DEL (127)
-        if char.ord >= 32 && char.ord != 127
-          InputLog.next_in_batch if InputLog.enabled?
-          _outcome = @focus_manager.handle_text_input(char)
-          if InputLog.enabled?
-            InputLog.record("text", char.to_s, _outcome.is_a?(Bool) ? _outcome : nil,
-              @focus_manager.focused_widget, app.needs_rebuild?, @last_frame_total_ms)
-          end
-        end
-        true # Redraw for text input
+      when SF::Event::TextEntered, SF::Event::KeyPressed, SF::Event::KeyReleased, SF::Event::FocusLost
+        @keyboard.handle(event, app)
       when SF::Event::MouseWheelScrolled
+        # Everything below is read from the event and the keyboard's event-stream state, never from
+        # the live devices: a queued wheel event belongs where and how it happened (KeyboardDispatch).
         # Ctrl+MouseWheel = zoom in/out
-        if SF::Keyboard.key_pressed?(SF::Keyboard::LControl) || SF::Keyboard.key_pressed?(SF::Keyboard::RControl)
+        if @keyboard.control?
           if event.mouse_wheel_scroll.delta > 0
             handle_zoom_in
           elsif event.mouse_wheel_scroll.delta < 0
@@ -684,128 +660,22 @@ module CrymbleUI
           return true
         end
 
-        # Dispatch wheel event to widgets
-        # Get current mouse position from window
-        if window = @window
-          sfml_pos = SF::Mouse.get_position(window)
-          mouse_pos = Vec2.new(sfml_pos.x.to_f64, sfml_pos.y.to_f64)
-          # Note: SFML delta is positive for scroll up, negative for scroll down
-          # Check wheel axis - touchpad can generate horizontal scroll events
-          delta = case event.mouse_wheel_scroll.wheel
-                  when SF::Mouse::Wheel::HorizontalWheel
-                    Vec2.new(event.mouse_wheel_scroll.delta.to_f64, 0.0) # Horizontal scroll → X
-                  else
-                    Vec2.new(0.0, event.mouse_wheel_scroll.delta.to_f64) # Vertical scroll → Y
-                  end
-          # Detect shift key for horizontal scrolling
-          shift = SF::Keyboard.key_pressed?(SF::Keyboard::LShift) || SF::Keyboard.key_pressed?(SF::Keyboard::RShift)
-          app.handle_mouse_wheel(delta, mouse_pos, shift)
-          # Update hover after scroll - content under mouse has changed
-          app.update_hover(mouse_pos)
-        end
+        # Dispatch wheel event to widgets, at the position the wheel turned
+        wheel = event.mouse_wheel_scroll
+        mouse_pos = Vec2.new(wheel.position.x.to_f64, wheel.position.y.to_f64)
+        # Note: SFML delta is positive for scroll up, negative for scroll down
+        # Check wheel axis - touchpad can generate horizontal scroll events
+        delta = case wheel.wheel
+                when SF::Mouse::Wheel::HorizontalWheel
+                  Vec2.new(wheel.delta.to_f64, 0.0) # Horizontal scroll → X
+                else
+                  Vec2.new(0.0, wheel.delta.to_f64) # Vertical scroll → Y
+                end
+        # Shift turns the wheel horizontal
+        app.handle_mouse_wheel(delta, mouse_pos, @keyboard.shift?)
+        # Update hover after scroll - content under mouse has changed
+        app.update_hover(mouse_pos)
         true # Redraw after scroll
-      when SF::Event::KeyPressed
-        key = event.key
-        if InputLog.enabled?
-          InputLog.record("key", key.code.to_s, nil, @focus_manager.focused_widget,
-            app.needs_rebuild?, @last_frame_total_ms)
-        end
-        # Global zoom shortcuts - numpad +/- and Ctrl+0 for reset
-        # Note: Regular keyboard +/- is handled via TextEntered for keyboard layout compatibility
-        if key.control
-          case key.code
-          when SF::Keyboard::Add # numpad +
-            handle_zoom_in
-            return true
-          when SF::Keyboard::Subtract # numpad -
-            handle_zoom_out
-            return true
-          when SF::Keyboard::Num0, SF::Keyboard::Numpad0 # 0 = reset zoom
-            handle_zoom_reset
-            return true
-          when SF::Keyboard::M # Ctrl+M = toggle maximize on topmost panel
-            if !key.alt && !key.shift
-              if panel = app.root.try(&.find_topmost_panel)
-                panel.toggle_maximize
-              end
-              return true
-            end
-          when SF::Keyboard::Tab # Ctrl+Tab / Ctrl+Shift+Tab = cycle panels
-            if root = app.root
-              @focus_manager.cycle_panel(forward: !key.shift, root: root)
-            end
-            return true
-          when SF::Keyboard::D # Ctrl+Shift+D = dump render state (dev diagnostic)
-            if key.shift
-              if root = app.root
-                RenderDebug.dump(root)
-                puts "[render dump] /tmp/render_dump/ — #{Layer.active_layers(root).size} layers (PNG per layer + report.txt)"
-              end
-              return true
-            end
-          end
-        end
-
-        # ESC key: panel shortcuts first (dialog close), then app-level (drags, menus)
-        if key.code == SF::Keyboard::Escape
-          active_panel = app.root.try(&.find_topmost_panel)
-          if active_panel && @shortcut_manager.handle_key_event(event.key, active_panel)
-            return true
-          end
-          if app.handle_escape
-            return true
-          end
-        end
-
-        # Tab/Shift+Tab: the focused widget gets first dibs (a focus scope like
-        # VirtualMatrix round-robins its cell cursor and stays focused); only
-        # if it declines do we cycle focus to the next/previous widget.
-        if key.code == SF::Keyboard::Tab
-          if root = app.root
-            @focus_manager.handle_tab_key(key.shift, root)
-          end
-          return true
-        end
-
-        # For Enter/Space, check topmost panel shortcuts first
-        # (dialog confirm/cancel takes priority over widget focus)
-        if key.code == SF::Keyboard::Enter || key.code == SF::Keyboard::Space
-          active_panel = app.root.try(&.find_topmost_panel)
-          if active_panel && @shortcut_manager.handle_key_event(event.key, active_panel)
-            return true
-          end
-        end
-
-        # Route the key through the SHARED dispatcher: focused widget first, then
-        # spatial focus navigation on a declined arrow (skipped under Alt). This is
-        # the exact same path FocusManager#dispatch_key gives the headless tester,
-        # so the two cannot drift (a drift here is what hid the ComboBox arrow
-        # focus-escape from the suite).
-        root = app.root
-        handled = if root
-                    @focus_manager.dispatch_key(key.code, key.control, key.shift, key.alt, root)
-                  else
-                    @focus_manager.handle_key_down(key.code, key.control, key.shift, key.alt)
-                  end
-
-        # Activation keys (Enter/Space) are handled here — dispatch_key only does
-        # focus movement (arrows), not activation. Skip when Alt is held.
-        unless handled || key.alt
-          case key.code
-          when SF::Keyboard::Enter, SF::Keyboard::Space
-            # Activate focused widget (button click, checkbox toggle)
-            key_sym = key.code == SF::Keyboard::Enter ? :enter : :space
-            @focus_manager.handle_activation_key(key_sym)
-            handled = true
-          end
-        end
-
-        # If still not handled, try keyboard shortcuts
-        unless handled
-          active_panel = app.root.try(&.find_topmost_panel)
-          @shortcut_manager.handle_key_event(event.key, active_panel)
-        end
-        true # Redraw for key events
       when SF::Event::Closed
         # Let app handle close request (can save data, show dialogs, etc.)
         # App calls quit() when ready to actually close
@@ -1027,10 +897,14 @@ module CrymbleUI
         # attempt hit). CrSFMLBackend#dispose only enqueues; this is what actually frees.
         CrSFMLBackend.drain_reaper
 
-        @last_frame_total_ms = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms +
-                               LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
+        # Cost of this frame, so InputLog can correlate each keystroke with the load at the moment
+        # it arrived — the reporter's loss is load-dependent (clean when slow, clean with one Shape,
+        # lossy with ten).
+        frame_ms = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms +
+                   LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
+        @keyboard.last_frame_ms = frame_ms
         if InputLog.enabled?
-          InputLog.record_frame(@last_frame_total_ms, did_layout, false,
+          InputLog.record_frame(frame_ms, did_layout, false,
             LayerRenderer.rendered_layer_ids.any?(&.starts_with?("matrix_content")))
           InputLog.batch_begin # events arriving after this frame form a new batch
         end
@@ -1261,11 +1135,6 @@ module CrymbleUI
     # Handle zoom out (Ctrl+- or Ctrl+MouseWheel down)
     private def handle_zoom_out
       FontSizing.zoom_out
-    end
-
-    # Handle zoom reset (Ctrl+0)
-    private def handle_zoom_reset
-      FontSizing.reset_zoom
     end
   end
 end
