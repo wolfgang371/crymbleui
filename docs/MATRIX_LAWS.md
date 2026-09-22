@@ -30,6 +30,32 @@ is a scroller, so every coordinate law there applies to it.
   reads the order BACKWARDS and counts the trailing indices that form `{0..n-1}`. So a fixture
   must contain EVERY index, with the sticky ones LAST (`(1...n).to_a + [0]` ⇒ index 0 sticky).
   An order that merely omits an index is malformed and raises deep in `update_visible_cells`.
+- **A whole-axis order means every line is sticky, and that is legal** — nothing scrolls, which
+  is inert, not broken (embrace's [Commits] view is one pinned row over an empty content layer,
+  and a one-row grid's `[0]` derives the same way). Note that `(1...n).to_a + [0]` pins ONE index
+  only for n > 2; at n = 2 the whole order qualifies and both lines are sticky.
+
+## Ink bands
+
+- **The band a cell places ink in is the one it LIVES in.** `update_ink_regions` hands every cell
+  the band its ink must stay inside and `place_ink` holds the ink at that band's edge, which is
+  how a half-scrolled cell keeps its value readable. A pinned row is held in the strip ABOVE the
+  scrolling area, so measuring it against the scrolling band declared it entirely invisible and
+  the hold pinned its ink to the cell's far edge: short values sat on the bottom edge of a row
+  made tall by a multi-line neighbour (2026-09-21). Any new cell class needs its own band, not
+  the content one.
+- **A ruler's band is in the RULER's space.** `draw_labels` takes the viewport's extent and must
+  subtract the widget's own origin: every ruler sits at the matrix's origin except the corner row
+  strip, which sits at `(0, ruler_h)` and drew a pinned row's number a ruler-height too low.
+- **Whatever a placement READS, the cache must depend on.** A ruler places its labels against the
+  viewport extent, which it reads straight off the matrix — not through a Source — so its
+  primitive cache has no dependency on it. Marking the sticky LAYERS on resize does not help: a
+  layer re-renders from the widgets' cached primitives. Shrinking the panel therefore left a
+  pinned row's number where it sat when the panel was tall while the cells beside it re-placed
+  (measured in the field: the strip's last recompute used band 0..366 while the cells had moved
+  on to 0..46). `perform_layout` now invalidates the ruler caches on a size change — and the
+  general rule stands: a new non-reactive input to a placement needs its own invalidation, or it
+  needs to be read through a Source.
 
 ## Cells
 
@@ -52,6 +78,18 @@ goes into StickyMath, not into one of them.**
 - A compound is held only by as much as its span EXCEEDS the visible band; a group you can see all
   of is not held at all. Identify a compound by a FACT about the model (its span), never by an
   implementation signal the rule may withdraw (e.g. `ink_region.compound`).
+
+## Content sizing (`auto_size`)
+
+- **A line shrinks only against a recorded runner-up.** One cell's measurement can prove a column
+  must be wider, never that it may be narrower; `@as_col_best`/`@as_col_second` (pass 1 of
+  `flush_auto_size`) are what make the narrowing safe and O(1). Without them the only honest move
+  is to grow — which is what the `@as_extents_valid == false` branch of `fit_cell_to_content` does.
+- **Carry the measurement with the sizes, or don't cancel the re-measure.** Reconciliation adopts
+  the old matrix's `@col_widths`/`@row_heights` and cancels `@auto_size_pending` on the strength of
+  it. Any state the incremental path needs to keep working must travel with them
+  (`carry_line_extents_from`) — a widget that holds sizes it cannot explain is permanently
+  grow-only, and it looks perfectly correct until someone shortens a value.
 
 ## Perf
 

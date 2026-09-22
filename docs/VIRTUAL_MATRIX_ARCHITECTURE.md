@@ -99,6 +99,16 @@ The runner-up goes unknown rather than being replaced by a guess because the new
 *third* largest, which nobody recorded. An underestimate there would size a line **narrower than a
 cell it still has to hold** — a cut value, not a cosmetic gap.
 
+**The extents have to outlive the widget.** A commit rebuilds the tree, and reconciliation builds a
+fresh `VirtualMatrix` that adopts the old one's sizes — then cancels the re-measure precisely
+because the sizes came with it. Carrying the RESULT without the measurement it came from left the
+new instance with every line's size and no runner-up to justify narrowing one, so
+`fit_cell_to_content` fell back to its grow-only branch for the rest of that instance's life: one
+committed edit disabled the shrink for the session, on both axes and on the Escape revert (field
+report, 2026-09-21). `carry_line_extents_from` moves the whole of pass 1's output with the sizes,
+under the same dims gate; anything that makes the content itself stale still re-arms
+`@auto_size_pending` and re-measures over it.
+
 Invariants worth keeping:
 - a line never narrows below what its other cells hold. That was the original reason for growing
   only; it is now enforced directly instead of by refusing to shrink.
@@ -456,6 +466,10 @@ Rows 0 and 1 are sticky (scroll out last, rendered at fixed positions)
 
 The `derive_sticky_count` method walks the tail backwards, checking at EVERY step that the
 accumulated set equals `{0, 1, ..., size-1}`, and stops at the first element that breaks it.
+When the walk consumes the WHOLE order — a one-row grid's `[0]`, or `[1, 0]` at n = 2 — every
+line is sticky and nothing scrolls. That is a legal state, not an error; what it must not do is
+leak into rules written for scrolling cells (it did twice: the auto-size sticky-line exclusion in
+2026-09-02, and the ink band in 2026-09-21).
 
 **The tail must therefore be DESCENDING** — `[.., 1, 0]`. An adapter that appends its header
 block in natural order ends `[.., 0, 1]`, the first element read is `{1}`, which is not `{0}`,
@@ -865,7 +879,13 @@ The `copy_state_from` override handles:
    identity-INDEPENDENT (fresh-adapter-per-build apps keep their resize state) and
    dims-GATED (a drifted grid keeps the constructor's fresh `get_sizes` arrays; a
    carried short array would raise IndexError in the scroll clamp). The arrays are
-   carried by reference — safe because the old instance is discarded.
+   `dup`ped, not assigned: assigning left both matrices writing through ONE buffer
+   (measured), harmless only while the old instance is discarded immediately.
+   The pass-1 EXTENTS travel with those sizes, under the same gate
+   (`carry_line_extents_from`): content sizing cancels its own re-measure here when the
+   mode did not change (`@auto_size_pending = false`), so nothing downstream will
+   re-derive them — and a matrix holding sizes it cannot explain is grow-only for life
+   (see *Content sizing* above).
 4. Applies the CLEAR rule: a swapped-in adapter instance (identity compare) clears
    every VM layer via the same helper `flush_invalidate_all` uses — deliberate
    heuristic default, since a fresh instance has no announce history; a same-instance

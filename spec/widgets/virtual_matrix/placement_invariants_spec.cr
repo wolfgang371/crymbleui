@@ -493,6 +493,11 @@ describe "placement invariants, swept one pixel at a time" do
       matrix.pre_render_flush
 
       marks = [] of Tuple(Float64, String)
+      # THIS FIXTURE HAS NO PINNED ROW, so a row number here always comes from `row_ruler_widget`
+      # (which draws `sticky_rows...size`). A PINNED row's number is drawn by the corner row strip
+      # and is placed against a different band; reading the strip here was tried on 2026-09-21 and
+      # reverted, because the mutation that breaks that placement left this invariant green -
+      # 11918 pairs, all 0.0px. Pinned rows are guarded by `sticky_ink_band_spec` instead.
       rw.to_primitives(rw.bounds).each do |p|
         next unless p.is_a?(CrymbleUI::DrawText)
         next if p.text.empty?

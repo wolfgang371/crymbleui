@@ -164,3 +164,99 @@ describe "auto-size row height after an ordinary cell edit" do
       "column 1 of this row still holds five lines, so the row must not have shortened"
   end
 end
+
+# THE SHRINK HAS TO SURVIVE A REBUILD.
+#
+# Wolfgang, 2026-09-21: "switch on auto-size, click 1/c2, 'enter', 'a', 'a' -> widens; BS ->
+# shortens; 'Enter' to leave; same again: 'enter', 'a' -> widens; BS -> now does _not_ shorten!"
+# - and the same for row heights, and for the revert on Escape.
+#
+# Everything above this line exercises ONE matrix instance. Committing an edit in embrace rebuilds
+# the tree: the DSL builds a FRESH VirtualMatrix and reconciliation carries the old one's state
+# into it. The carry takes the sizes and then cancels the re-measure as redundant - correct, and
+# the whole point of carrying them. What it did not take was the pass-1 EXTENTS those sizes came
+# from, so the new instance held every column's width and no record of the runner-up that lets it
+# narrow one, and fit_cell_to_content fell back to its grow-only branch for the rest of that
+# instance's life. One commit was enough to lose the shrink for the session.
+private class RebuildingMatrixApp < CrymbleUI::App
+  def initialize(@adapter : CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter, @matrix_id : String)
+    super()
+  end
+
+  # A new widget per build, as a DSL consumer does - reconciliation then adopts the old one's
+  # state. Setting the mode HERE is faithful too (embrace.cr:1180 assigns it on the fresh widget),
+  # and it is what makes the carry's `@auto_size_explicit` branch the one under test.
+  def build : CrymbleUI::Widget
+    matrix = CrymbleUI::VirtualMatrix.new(@adapter, id: @matrix_id)
+    matrix.auto_size = true
+    matrix
+  end
+end
+
+private def live_matrix(app, id) : CrymbleUI::VirtualMatrix
+  app.find(id).not_nil!.as(CrymbleUI::VirtualMatrix)
+end
+
+private def rebuilding(adapter, id, w, h)
+  renderer = CrymbleUI::Testing::TestRenderer.new(w, h)
+  app = RebuildingMatrixApp.new(adapter, id)
+  app.build_tree
+  live_matrix(app, id).layout(
+    CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(w.to_f, h.to_f)), CrymbleUI::Vec2.zero)
+  renderer.settle_rendering(app)
+  {app, renderer}
+end
+
+describe "auto-size shrink after a rebuild" do
+  it "narrows the column on an edit made after a rebuild, not only before one" do
+    adapter = ShrinkAdapter.new(6, 3)
+    adapter.set(0, 0, "a very considerably wider value than the rest")
+    app, renderer = rebuilding(adapter, "rebuilt_cols", 900, 400)
+
+    before = live_matrix(app, "rebuilt_cols")
+    wide = before.active_cells[{0, 0}].bounds.width
+    narrow_col = before.active_cells[{0, 1}].bounds.width
+    wide.should be > narrow_col # instrument check: the long value really did widen the column
+
+    app.request_rebuild
+    renderer.settle_rendering(app)
+    matrix = live_matrix(app, "rebuilt_cols")
+    matrix.should_not be(before)                                    # control: widget replaced
+    matrix.active_cells[{0, 0}].bounds.width.should be_close(wide, 1.0) # and its sizes carried
+
+    # The same edit as the sibling example above, now on the far side of the rebuild.
+    adapter.set(0, 0, "x")
+    matrix.fit_cell_to_content(0, 0, 12.0, 20.0, 1)
+    adapter.invalidate_cell!(0, 0)
+    renderer.settle_rendering(app)
+
+    matrix.active_cells[{0, 0}].bounds.width.should be_close(narrow_col, 1.0),
+      "the column stayed #{matrix.active_cells[{0, 0}].bounds.width.round(1)}px wide after its " \
+      "widest value became \"x\" (a short column is #{narrow_col.round(1)}px) - the rebuild " \
+      "carried the width without the measurement behind it"
+  end
+
+  it "shortens the row on an edit made after a rebuild, not only before one" do
+    adapter = TallAdapter.new(5, 3)
+    adapter.set(0, 0, "one\ntwo\nthree\nfour\nfive")
+    app, renderer = rebuilding(adapter, "rebuilt_rows", 900, 600)
+
+    before = live_matrix(app, "rebuilt_rows")
+    tall = before.active_cells[{0, 0}].bounds.height
+    plain = before.active_cells[{1, 0}].bounds.height
+    tall.should be > plain # instrument check: the multi-line value really did make row 0 taller
+
+    app.request_rebuild
+    renderer.settle_rendering(app)
+    matrix = live_matrix(app, "rebuilt_rows")
+    matrix.should_not be(before)
+    matrix.active_cells[{0, 0}].bounds.height.should be_close(tall, 1.0)
+
+    matrix.fit_cell_to_content(0, 0, 30.0, 20.0, 1)
+    renderer.settle_rendering(app)
+
+    matrix.active_cells[{0, 0}].bounds.height.should be_close(plain, 1.0),
+      "the row stayed #{matrix.active_cells[{0, 0}].bounds.height.round(1)}px tall after its only " \
+      "multi-line cell became one line (a single-line row is #{plain.round(1)}px)"
+  end
+end

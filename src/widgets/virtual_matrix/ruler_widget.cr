@@ -82,9 +82,16 @@ module CrymbleUI
         # of pixels past the screen — so `bounds.height` here put the far edge somewhere you cannot
         # see and the clamp could never engage. The near edge was right all along, which is exactly
         # how it looked: "it's always visible on the upper part, but not in the lower one"
-        # (Wolfgang, 2026-09-10, images #97/#98). Both rulers share the matrix's origin, so the
-        # viewport's own extent is the right number in this space.
-        band_hi = axis == :col ? @matrix.bounds.width : @matrix.bounds.height
+        # (Wolfgang, 2026-09-10, images #97/#98).
+        #
+        # IN THIS WIDGET'S SPACE, which is not the matrix's for all of them: the corner row strip
+        # is laid out at (0, ruler_h) and every other ruler at the matrix's origin. Taking the
+        # viewport's extent raw therefore handed the strip a band a ruler-height too tall, and a
+        # pinned row's number — the strip draws those, the row ruler draws only the scrolling
+        # ones — was placed below the part of its row you can still see: with one record left and
+        # the panel shrunk, the "1" sat on the panel's bottom edge while its value stayed up in
+        # view (Wolfgang, 2026-09-21). Its own origin is what makes the number common to both.
+        band_hi = axis == :col ? @matrix.bounds.width - bounds.x : @matrix.bounds.height - bounds.y
 
         range.each do |i|
           cell_size = sizes[i].to_f64

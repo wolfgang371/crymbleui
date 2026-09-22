@@ -536,6 +536,8 @@ module CrymbleUI
     @as_spans = [] of Tuple(Int32, Int32, Int32, Int32, Float64, Float64, Int32)
     @as_extents_valid = false
     @fit_pending : Bool = false
+    # The viewport the ruler labels were last PLACED against; see perform_layout.
+    @last_ruler_viewport : Tuple(Float64, Float64)? = nil
 
     # Size every line to its content instead of to the user's drags. Off by default; the
     # consumer that turns it on is also expected to refuse the resize gesture, since
@@ -584,6 +586,35 @@ module CrymbleUI
       @as_row_best_at = Array.new(rows, -1)
       @as_row_second = Array.new(rows, UNKNOWN_EXTENT)
       @as_row_second_at = Array.new(rows, -1)
+    end
+
+    # Pass 1's whole output, moved from the matrix a rebuild replaces to the one replacing it.
+    #
+    # Its counterpart is the SIZE-CARRY in the reconcile, which takes @col_widths/@row_heights and
+    # then cancels the re-measure that would have recomputed them. That cancel is what makes a
+    # rebuild cheap, and it is also what makes this necessary: with the sizes carried and the
+    # measurement behind them dropped, the new instance knew every line's size and nothing about
+    # the runner-up that lets it shrink one, so fit_cell_to_content took its grow-only branch for
+    # the instance's whole life. Committing one edit lost the shrink for the session (field report,
+    # 2026-09-21: widens, then "BS -> now does _not_ shorten", on both axes and on Escape).
+    #
+    # Carried under the same guard as the sizes and for the same reason: the arrays are indexed by
+    # line, so equal dimensions is exactly the condition that keeps them addressable, and anything
+    # that makes the CONTENT stale re-arms @auto_size_pending (flush_invalidate_all, zoom) and
+    # re-measures over this. Lists the fields flush_auto_size fills, in the order it fills them,
+    # so a new one added there is added here.
+    protected def carry_line_extents_from(old : VirtualMatrix) : Nil
+      @as_col_best = old.@as_col_best.dup
+      @as_col_best_at = old.@as_col_best_at.dup
+      @as_col_second = old.@as_col_second.dup
+      @as_col_second_at = old.@as_col_second_at.dup
+      @as_row_best = old.@as_row_best.dup
+      @as_row_best_at = old.@as_row_best_at.dup
+      @as_row_second = old.@as_row_second.dup
+      @as_row_second_at = old.@as_row_second_at.dup
+      @as_multiline = old.@as_multiline.dup
+      @as_spans = old.@as_spans.dup
+      @as_extents_valid = old.@as_extents_valid
     end
 
     # Seeding: one cell's measurement offered to a line, keeping the two largest. Only ever called
@@ -1391,7 +1422,8 @@ module CrymbleUI
     # and 160 — 55 fps against 31. The rest is visible cells whose ink really did move.
     protected def update_ink_regions : Bool
       changed = false
-      lo = ruler_row_height_pixels + sticky_row_height_pixels
+      ruler_h = ruler_row_height_pixels
+      lo = ruler_h + sticky_row_height_pixels # the strip's bottom edge IS the content band's top
       hi = bounds.height
 
       @active_cells.each do |key, w|
@@ -1400,13 +1432,23 @@ module CrymbleUI
         box_top = w.bounds.y - (content_cell ? scroll_offset.y : 0.0)
         span = line_span(key, w, box_top)
         span_top, span_size = span || {box_top, w.bounds.height}
+        # THE BAND IS THE ONE THIS CELL LIVES IN. A pinned row is held in the strip ABOVE the
+        # scrolling area, so measuring it against the scrolling band — which by construction
+        # starts where the strip ends — said every one of its cells was entirely outside what can
+        # be seen, and the hold answered the only way it can: ink pinned to the cell's far edge.
+        # A short value in a row made tall by a multi-line neighbour then sat on the row's bottom
+        # edge (field report 2026-09-21, which reached it through a one-row grid that derived as
+        # all-sticky; a header row pinned on purpose does it with no degenerate order at all).
+        # Clipped by the viewport for the same reason the content band is: a strip taller than
+        # the matrix can only be seen as far as the matrix goes.
+        band_lo, band_hi = row < sticky_row_count ? {ruler_h, {lo, hi}.min} : {lo, hi}
         # THE FACT, from the grid: a compound on a sticky COLUMN that is not in a sticky row has
         # its Y box positioned and clipped by StickyMath.compound_axis (sticky_reposition.cr:110),
         # which is what "pinned" means. Derived here rather than recorded by the sticky pass,
         # because the two passes interleave — `run_sticky_pass` runs both before and after this one
         # in different frames, so a set filled by it would be a frame stale half the time.
         pinned = !span.nil? && col < sticky_col_count && row >= sticky_row_count
-        region = ink_region_for(!span.nil?, span_top, span_size, box_top, lo, hi, pinned)
+        region = ink_region_for(!span.nil?, span_top, span_size, box_top, band_lo, band_hi, pinned)
         next if w.ink_region == region
         w.ink_region = region
         # Repainted when the cell's INK ACTUALLY MOVES A PIXEL -- not when its region changes.
@@ -1802,6 +1844,21 @@ module CrymbleUI
 
       if show_rulers
         create_ruler_widgets(@content_scroll_view.not_nil!)
+        # A RULER NUMBER IS PLACED AGAINST THE VIEWPORT'S EXTENT (ruler_widget.cr, draw_labels),
+        # so a size change moves it — and marking the sticky layers above does NOT achieve that,
+        # whatever its comment says: a layer re-renders from the widgets' CACHED primitives, which
+        # still hold the placement computed at the old size. Shrinking the panel therefore left a
+        # pinned row's number where it sat when the panel was tall, while the cells beside it
+        # re-placed into the band that was left — `update_ink_regions` repaints a cell whose ink
+        # moves, and nothing did the same for the rulers. Measured in the field report of
+        # 2026-09-21: the strip's last recompute used band 0..366 while the cells had already
+        # moved on to 0..46, and the number sat ~37px below its own row's value.
+        #
+        # Guarded on the size actually changing, because this runs on every layout.
+        if @last_ruler_viewport != {full_width, full_height}
+          @last_ruler_viewport = {full_width, full_height}
+          mark_ruler_widgets_dirty_for_axis
+        end
       end
 
       update_visible_cells(content_width, content_height)
@@ -3409,6 +3466,10 @@ module CrymbleUI
           # nothing to recompute; without this every rebuild would pay a full re-measure whose
           # result the carry above had already provided.
           @auto_size_pending = false if old.auto_size == @auto_size
+          # ... and with the sizes, the pass-1 measurement they were computed from: the cancel
+          # above means nothing will re-derive it, and without it the shrink path has no runner-up
+          # to fall back to. See carry_line_extents_from.
+          carry_line_extents_from(old)
           # The mode was just switched OFF. A DSL consumer expresses that by building a fresh
           # widget with the property already false, so the setter never runs and cannot schedule
           # the handover — the sizes carried above would stay on screen but stay unowned, and the
