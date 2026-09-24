@@ -1676,6 +1676,9 @@ module CrymbleUI
           # dead widget between invalidation and next render.
           clear_proxy_focus
           mark_needs_layout
+          # Rows, columns and the edit proxy are stale until the flush: input queued behind this
+          # announce must wait for that frame (EventBatch).
+          Widget.app?.try &.request_frame_before_input
           nil
         }
       )

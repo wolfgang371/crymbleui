@@ -7,6 +7,9 @@ require "../rendering/render_trigger"
 require "./test_render_backend"
 require "../rendering/pixel_snap"
 require "../input/shortcut_manager"
+require "../input/keyboard_dispatch"
+require "../input/event_batch"
+require "./keys"
 require "./test_clipboard"
 
 module CrymbleUI
@@ -199,7 +202,7 @@ module CrymbleUI
         # it here too — else the rebuild sits unprocessed until some unrelated aggregate change happens to
         # fire a frame. Mirrors the SFML main loop, which applies needs_rebuild? after timers, not only on
         # the event path.
-        if app.needs_rebuild? || @render_trigger.should_render?(app)
+        if app.input_waits_for_frame? || @render_trigger.should_render?(app)
           render_frame(app)
           @render_trigger.record(app)
           true
@@ -439,6 +442,29 @@ module CrymbleUI
         app.handle_mouse_up(point)
         # Update cursor immediately after mouse up (matches SFMLRenderer fix)
         update_cursor(app, point)
+      end
+
+      # Delivers keyboard events the way the SFML run loop does: dispatched through KeyboardDispatch in
+      # batches that EventBatch delimits, one frame after each batch, then settled. This is the path
+      # for anything that depends on how QUEUED input interleaves with frames (a script typing, keys
+      # arriving during a slow frame): key_down below renders after every key, so a spec built on it
+      # cannot see a batch at all. Build the events with Testing::Keys.
+      def deliver(app : App, events : Array(LibCSFML::Event)) : Nil
+        Widget.app = app # as SFMLRenderer#run does: widgets reach the app (and its input barrier) here
+        keyboard = KeyboardDispatch.new(Widget.focus_manager, Widget.shortcut_manager)
+        queue = Deque(LibCSFML::Event).new(events)
+        until queue.empty?
+          EventBatch.drain(app, -> { queue.shift? }) do |event|
+            raise ArgumentError.new("deliver takes keyboard events, got #{event.type}") unless keyboard_event?(event)
+            keyboard.handle(event, app)
+          end
+          render_frame(app)
+        end
+        settle_rendering(app)
+      end
+
+      private def keyboard_event?(event : LibCSFML::Event) : Bool
+        event.type.key_pressed? || event.type.key_released? || event.type.text_entered?
       end
 
       # Faithful headless key dispatch — same routing as SFMLRenderer (focused

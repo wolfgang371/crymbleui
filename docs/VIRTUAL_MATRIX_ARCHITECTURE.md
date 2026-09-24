@@ -412,8 +412,9 @@ pre_render_flush():                  <- called by layer_renderer once per frame,
 ```
 
 **Why the deferral lives in VirtualMatrix, not the event loop.** Render-coalescing is already
-general: the SFML loop drains *all* queued events and renders once per batch (`sfml_renderer.cr`
-— *"poll all pending events, don't render per event"*). But it still *dispatches* every mouse
+general: the SFML loop drains the queued events and renders once per batch (`sfml_renderer.cr`
+— *"poll all pending events, don't render per event"*; a batch ends early only at an event that
+leaves a rebuild pending, see `EventBatch`). But it still *dispatches* every mouse
 event to widgets — deliberately, since dropping events would break anything that needs each one
 (drag precision, gestures). `pre_render_flush` is likewise a general hook (`widget.cr`, invoked
 on every layer owner). So the only VirtualMatrix-specific part is the *decision* to defer its
@@ -832,6 +833,11 @@ pre_render_flush() (called before rendering):
   If cell invalidations:
     Destroy specific cells, trigger_update_visible_cells
 ```
+
+An `invalidate_all!` also raises the app's input barrier (`App#request_frame_before_input`): until
+the flush, rows, columns and the edit proxy are stale, so input queued behind the announce waits for
+that frame instead of reading them (`EventBatch`; guarded by
+`spec/widgets/virtual_matrix_batch_text_spec.cr`).
 
 Cell-level invalidation destroys only the affected cell from `@active_cells`. The next `update_visible_cells` call will recreate it via `adapter.cell_paint()`, picking up the new data.
 

@@ -9,6 +9,7 @@ require "../core/font_sizing"
 require "../input/shortcut_manager"
 require "../input/focus_manager"
 require "../input/keyboard_dispatch"
+require "../input/event_batch"
 require "../widgets/window_panel"
 require "./sfml_paint_context"
 require "./pixel_snap"
@@ -499,7 +500,8 @@ module CrymbleUI
       needs_redraw = true
 
       # Main loop - event coalescing for smooth interaction
-      # Process ALL pending events first, then render once per frame
+      # Process the pending events first, then render once per frame. A batch ends early at an event
+      # that raises the input barrier, so the events behind it see the state it deferred (EventBatch).
       while window.open?
         # Check if there are scheduled timers
         next_wake = @scheduler.next_wake_time
@@ -510,18 +512,8 @@ module CrymbleUI
           remaining = next_wake
           while remaining > Time::Span.zero
             # Poll all pending events (coalescing - don't render per event)
-            while event = window.poll_event
-              event_count += 1
-              if event.type == SF::Event::MouseMoved
-                @last_mouse_move_time = Time.instant
-              end
-              redraw = handle_event(event, app)
-              if redraw || event.type == SF::Event::MouseButtonPressed ||
-                 event.type == SF::Event::MouseButtonReleased ||
-                 event.type == SF::Event::KeyPressed ||
-                 event.type == SF::Event::Resized
-                needs_redraw = true
-              end
+            event_count += EventBatch.drain(app, -> { window.poll_event }) do |event|
+              needs_redraw = true if dispatch(event, app)
             end
 
             # If redraw needed, break immediately to render (don't wait for timer)
@@ -531,7 +523,9 @@ module CrymbleUI
             if !needs_redraw && event_count > 0
               needs_redraw = any_layer_needs_render?(app)
             end
-            break if needs_redraw
+            # The input barrier also ends the wait: EventBatch stopped draining for it, and the events
+            # still queued must not sit until the next timer.
+            break if needs_redraw || app.input_waits_for_frame?
 
             # During active drag, use short sleep to stay responsive without 100% CPU busy-wait
             # Mouse events arrive at ~125Hz (8ms intervals), so 2ms sleep is responsive enough
@@ -571,26 +565,16 @@ module CrymbleUI
           # (measured: event_wait + event_poll = ~1200ms CPU over 1900 mouse events in 20s)
           # This is unavoidable SFML/X11 windowing system overhead, not our application code.
           # Our actual event handling (cursor_update + event processing) is only ~1% CPU.
-          if event = window.wait_event
-            event_count += 1
-            redraw = handle_event(event, app)
-            if redraw || event.type == SF::Event::MouseButtonPressed ||
-               event.type == SF::Event::MouseButtonReleased ||
-               event.type == SF::Event::KeyPressed ||
-               event.type == SF::Event::Resized
-              needs_redraw = true
+          # Not while the input barrier is up: the frame it waits for comes first (below), then the queue.
+          unless app.input_waits_for_frame?
+            if event = window.wait_event
+              event_count += 1
+              needs_redraw = true if dispatch(event, app)
             end
-          end
 
-          # After first event, poll any remaining queued events (event coalescing)
-          while event = window.poll_event
-            event_count += 1
-            redraw = handle_event(event, app)
-            if redraw || event.type == SF::Event::MouseButtonPressed ||
-               event.type == SF::Event::MouseButtonReleased ||
-               event.type == SF::Event::KeyPressed ||
-               event.type == SF::Event::Resized
-              needs_redraw = true
+            # After first event, poll any remaining queued events (event coalescing)
+            event_count += EventBatch.drain(app, -> { window.poll_event }) do |event|
+              needs_redraw = true if dispatch(event, app)
             end
           end
         end
@@ -615,6 +599,9 @@ module CrymbleUI
           needs_redraw = any_layer_needs_render?(app)
         end
 
+        # The barrier is lifted only by a frame: without one, EventBatch would never drain again.
+        needs_redraw = true if app.input_waits_for_frame?
+
         # Render once per frame with latest state (after processing all events)
         if needs_redraw
           render_frame(app)
@@ -628,6 +615,15 @@ module CrymbleUI
 
       @work_log.close # flush + close the frame ledger on exit
       InputLog.close  # ...and the keyboard trace, with its received-vs-accepted trailer
+    end
+
+    # Dispatch one polled event. Returns true if it requires a redraw.
+    private def dispatch(event : LibCSFML::Event, app : App) : Bool
+      @last_mouse_move_time = Time.instant if event.type == SF::Event::MouseMoved
+      handle_event(event, app) || event.type == SF::Event::MouseButtonPressed ||
+        event.type == SF::Event::MouseButtonReleased ||
+        event.type == SF::Event::KeyPressed ||
+        event.type == SF::Event::Resized
     end
 
     # Handle a single event

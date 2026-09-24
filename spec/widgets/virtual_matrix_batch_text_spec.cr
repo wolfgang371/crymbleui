@@ -2,6 +2,7 @@ require "../spec_helper"
 require "../../src/widgets/virtual_matrix"
 require "../../src/widgets/text_input"
 require "../../src/testing/test_renderer"
+require "../../src/testing/keys"
 
 # A keystroke is destroyed when it arrives in the same POLL BATCH as the commit that precedes it.
 #
@@ -33,6 +34,11 @@ require "../../src/testing/test_renderer"
 #   * "the proxy is nil between the rebuild and the next layout" — that gap cannot receive an event,
 #     because the loop polls at the TOP of an iteration and rebuild+layout are adjacent.
 # The real window is earlier than both: between the commit's invalidation and the rebuild it queues.
+#
+# First fixed inside the matrix (text re-derived the proxy past the pending invalidation), which left
+# navigation reading the stale row count. Now the announce raises the app's input barrier and the
+# queued events wait for the frame that flushes it (EventBatch) - one rule for text, keys and any
+# widget. The examples deliver the events the way the run loop batches them (TestRenderer#deliver).
 private class CommitInvalidatingAdapter
   include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
 
@@ -68,16 +74,67 @@ private def setup_matrix
   matrix
 end
 
-describe "VirtualMatrix text input arriving in one poll batch" do
-  it "keeps a character typed after the commit in the same batch" do
-    matrix = setup_matrix
-    CrymbleUI::Widget.focus_manager.focus(matrix)
+# An adapter whose commit GROWS the grid, as appending a record does: the next key queued behind
+# the commit navigates by the matrix's row count, which a pending invalidation has not re-read yet.
+private class GrowingAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::HeaderlessMatrixAdapter
 
-    # One batch: no frame, no layout, no rebuild between these three — exactly what the run loop
-    # hands over when events queued while a frame was rendering.
-    matrix.on_text_input('a').should be_true
-    matrix.on_key_down(SF::Keyboard::Key::Down, false, false) # commits -> adapter invalidates
-    matrix.on_text_input('b').should be_true                  # <- destroyed on the shipped build
+  getter assigned = [] of Tuple(Int32, Int32, String)
+
+  def initialize(@rows : Int32, @cols : Int32); end
+
+  def row_count : Int32; @rows; end
+
+  def col_count : Int32; @cols; end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    CrymbleUI::TextInput.new(value: "", mode: CrymbleUI::TextInputMode::QuickEntry)
+  end
+
+  def cell_assign(row : Int32, col : Int32, value : String)
+    @assigned << {row, col, value}
+    @rows += 1
+    invalidate_all!
+    {row, col}
+  end
+end
+
+private def deliver_to(adapter) : {CrymbleUI::VirtualMatrix, CrymbleUI::Testing::TestRenderer, TestApp}
+  matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "batch_matrix")
+  renderer = CrymbleUI::Testing::TestRenderer.new(600, 300)
+  app = TestApp.new
+  app.root_widget = matrix
+  app.build_tree
+  matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(600.0, 300.0)), CrymbleUI::Vec2.zero)
+  renderer.render_frame(app)
+  CrymbleUI::Widget.focus_manager.focus(matrix)
+  {matrix, renderer, app}
+end
+
+private alias Keys = CrymbleUI::Testing::Keys
+
+describe "VirtualMatrix text input arriving in one poll batch" do
+  # All queued at once, as the run loop receives it when events pile up behind a slow frame.
+  it "keeps a character typed after the commit in the same batch" do
+    adapter = CommitInvalidatingAdapter.new(5, 3)
+    matrix, renderer, app = deliver_to(adapter)
+    renderer.deliver(app, Keys.typed("a") + Keys.tap(SF::Keyboard::Key::Down) + # commits -> invalidates
+                          Keys.typed("b") + Keys.tap(SF::Keyboard::Key::Down))   # <- 'b' was destroyed
+
+    adapter.assigned.should eq([{0, 0, "a"}, {1, 0, "b"}])
+  end
+
+  # The same window, for navigation: the queued Down read the row count from before the commit grew
+  # the grid and stayed on the last old row, so the next value went over the one above it.
+  it "navigates into a row that a commit earlier in the batch added" do
+    adapter = GrowingAdapter.new(3, 3)
+    matrix, renderer, app = deliver_to(adapter)
+    matrix.set_cursor_from_cell({2, 0})
+    renderer.deliver(app, Keys.typed("a") + Keys.tap(SF::Keyboard::Key::Tab) + # commit grows to 4 rows
+                          Keys.tap(SF::Keyboard::Key::Down) +                  # into the new row 3
+                          Keys.typed("b") + Keys.tap(SF::Keyboard::Key::Tab))
+
+    adapter.assigned.should eq([{2, 0, "a"}, {3, 1, "b"}])
   end
 
   # CONTROL, and a record of what is NOT broken: give the matrix the frame the loop always runs

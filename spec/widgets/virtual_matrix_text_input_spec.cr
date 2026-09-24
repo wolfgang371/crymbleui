@@ -104,6 +104,23 @@ describe "VirtualMatrix TextInput proxy focus" do
       cell.value.should eq "X"
     end
 
+    # An arrow commits and drops the proxy, and used to re-arm it only if the cursor MOVED: against the
+    # grid's edge it stayed put with no proxy, and the next character had nowhere to go. Found by
+    # spec/fuzz/resize_focus_fuzz_spec (Right, Up, type on a ComboBox cell); a text cell is the same.
+    it "types into the cursor cell after an arrow that hit the grid's edge" do
+      matrix = make_ti_matrix
+      setup_ti_matrix(matrix)
+      fm = CrymbleUI::Widget.focus_manager
+      fm.focus(matrix)
+
+      [SF::Keyboard::Key::Up, SF::Keyboard::Key::Left].each do |edge|
+        matrix.on_key_down(edge, false, false) # {0, 0}: nowhere to go
+        matrix.cursor_rc.should eq({0, 0})
+        fm.handle_text_input('X')
+        matrix.active_cells[{0, 0}]?.as(CrymbleUI::TextInput).value.should eq("X")
+      end
+    end
+
     it "subsequent characters append in QuickEntry after first keystroke" do
       matrix = make_ti_matrix
       setup_ti_matrix(matrix)

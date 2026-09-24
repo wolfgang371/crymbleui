@@ -6,17 +6,23 @@ module CrymbleUI
     # Stores the exact clicked cell, not the top-left of merged region.
     # This allows cursor to be at any cell within a compound region.
     def set_cursor_from_cell(cell : Tuple(Int32, Int32))
+      place_cursor(cell)
+    end
+
+    # Every cursor placement ends here, and ends with the cursor cell holding the proxy. An arrow
+    # commits and drops the proxy before moving, so re-arming only on a MOVE left a cursor that hit
+    # the grid's edge with no editor, and the next character with nowhere to go.
+    private def place_cursor(cell : Tuple(Int32, Int32)) : Nil
       old_cursor = cursor_rc
       self.cursor_rc =cell
       clamp_cursor
       mark_cursor_overlay_dirty
       start_cursor_flash if cursor_rc != old_cursor
-      update_proxy_focus if cursor_rc != old_cursor
+      update_proxy_focus if cursor_rc != old_cursor || @proxy_focused_widget.nil?
     end
 
     # Move cursor in direction with optional modifiers
     def move_cursor(direction : Symbol, ctrl : Bool = false, shift : Bool = false)
-      old_cursor = cursor_rc
       row, col = cursor_rc
 
       case direction
@@ -75,11 +81,7 @@ module CrymbleUI
         col = flat_index % @cols
       end
 
-      self.cursor_rc ={row, col}
-      clamp_cursor
-      mark_cursor_overlay_dirty
-      start_cursor_flash if cursor_rc != old_cursor
-      update_proxy_focus if cursor_rc != old_cursor
+      place_cursor({row, col})
     end
 
     # Clamp cursor to valid bounds
@@ -112,13 +114,9 @@ module CrymbleUI
 
     # Update proxy focus to match the current cursor cell.
     # Called when cursor moves, when VirtualMatrix gains focus, or when cursor cell is created.
-    # `force` is for the one caller that must not be refused: text arriving in the same poll batch as
-    # the commit that queued the invalidation. Skipping the re-derive there leaves no proxy at all,
-    # and on_text_input then discards the character (see its comment). Attaching to a doomed cell is
-    # safe because flush_invalidate_all commits the proxy edit before destroying it.
-    private def update_proxy_focus(force : Bool = false)
+    private def update_proxy_focus
       # Don't establish proxy on cells that are about to be destroyed
-      return if @pending_invalidate_all && !force
+      return if @pending_invalidate_all
 
       cell_widget = @active_cells[cursor_rc]?
 

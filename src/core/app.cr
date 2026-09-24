@@ -43,14 +43,37 @@ module CrymbleUI
 
     # Request a DSL rebuild on the next frame.
     # Call this when app state changes require build() to produce a new widget tree.
-    def request_rebuild
+    #
+    # `blocks_input`: whether input queued behind this request must wait for the rebuilt tree (the
+    # input barrier below). True unless the caller knows the change leaves everything the input acts
+    # on in place - embrace's per-cell write, whose rebuild only refreshes the OTHER views of the
+    # data. Such a request is applied at the end of the batch, like any rebuild, without ending it:
+    # a script typing into a grid would otherwise pay a rebuild per committed cell.
+    def request_rebuild(blocks_input : Bool = true)
       @needs_rebuild = true
+      @frame_before_input = true if blocks_input
       @root.try &.mark_needs_layout  # layout needed after rebuild
     end
 
     def needs_rebuild? : Bool
       @needs_rebuild
     end
+
+    # THE INPUT BARRIER. Structural work deferred to the next frame - a blocking rebuild request, or
+    # a widget's announced structural change (VirtualMatrix#invalidate_all!) - leaves state that the
+    # next queued event would read stale. EventBatch stops dispatching while this holds, and the run
+    # loop renders the frame that applies the work; prepare_layout, which every frame runs, lifts it.
+    # Layout, scrolling and content refreshes do not raise it: their coalescing is what keeps a drag
+    # to one frame per batch.
+    def request_frame_before_input : Nil
+      @frame_before_input = true
+    end
+
+    def input_waits_for_frame? : Bool
+      @frame_before_input
+    end
+
+    @frame_before_input = false
 
     @hovered_widget : Widget? = nil
     @last_mouse_position : Vec2? = nil
@@ -765,6 +788,7 @@ module CrymbleUI
     # Prepare layout if needed, update topmost panel cache
     # Returns true if layout happened OR topmost panel changed, false otherwise
     def prepare_layout(window_size : Size) : Bool
+      @frame_before_input = false # this frame applies what the barrier was waiting for
       return false unless root = @root
 
       did_layout = false

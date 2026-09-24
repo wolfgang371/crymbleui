@@ -1299,6 +1299,20 @@ therefore tracked from the event stream by `KeyboardDispatch` (`src/input/keyboa
 owns KeyPressed/KeyReleased/TextEntered routing and is driven headlessly by
 `spec/input/keyboard_dispatch_spec.cr`; the wheel reads its position from its own event.
 
+**The other trap: deferred structure.** A handler that changes structure only requests the work — a
+rebuild, or a VirtualMatrix `invalidate_all!` — which the frame after the batch applies. An event
+dispatched in between acts on the state that work replaces: Tabs queued behind Ctrl+R (add a record)
+navigated the old one-row grid and wrapped back to row 0 (2026-09-23); a character queued behind a
+commit found no edit proxy (2026-07-29). Both raise the **input barrier**
+(`App#input_waits_for_frame?`); a batch ends at the first event that raises it, and the rest wait for
+the frame, whose `prepare_layout` lifts it (`EventBatch`, `src/input/event_batch.cr`). Layout,
+scrolling and single-cell refreshes do not raise it, so a drag still coalesces. A rebuild that only
+refreshes other views of the data - embrace's per-cell write - is requested with
+`request_rebuild(blocks_input: false)`: applied at the end of the batch, without ending it, so a
+script typing into a grid does not pay a rebuild per committed cell. Specs reproduce queued
+input with `TestRenderer#deliver` and `Testing::Keys`; `key_down` renders after every key and cannot
+see a batch.
+
 ### Implementation Guidelines for Text Input
 
 When implementing text fields, use the same pattern as SFML's text_input example:

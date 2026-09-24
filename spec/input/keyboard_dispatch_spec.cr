@@ -3,6 +3,7 @@ require "../../src/widgets/virtual_matrix"
 require "../../src/widgets/text_input"
 require "../../src/testing/test_renderer"
 require "../../src/input/keyboard_dispatch"
+require "../../src/testing/keys"
 
 # A keystroke's modifiers belong to the KEYSTROKE, not to the moment it is dispatched.
 #
@@ -13,7 +14,8 @@ require "../../src/input/keyboard_dispatch"
 # Ctrl for a later chord at drain time. Tab never asked, so navigation stayed in step while cells
 # came out empty — the reported symptom exactly.
 #
-# These examples feed KeyboardDispatch the LibCSFML::Event values the run loop polls. The live
+# These examples feed KeyboardDispatch the LibCSFML::Event values the run loop polls (built with
+# Testing::Keys), one by one: the dispatch itself, not the batching (TestRenderer#deliver). The live
 # keyboard is not part of the fixture, so a dispatch that consults it decides on the machine the
 # spec runs on, where nobody holds Ctrl.
 
@@ -43,31 +45,7 @@ private class KeyboardDispatchSpecAdapter
   end
 end
 
-private def key_event(type : LibCSFML::EventType, code : SF::Keyboard::Key, control = false, alt = false) : LibCSFML::Event
-  event = LibCSFML::Event.new
-  event.key = LibCSFML::KeyEvent.new(type: type, code: code, scancode: 0, alt: alt,
-    control: control, shift: false, system: false)
-  event
-end
-
-private def text_event(char : Char) : LibCSFML::Event
-  event = LibCSFML::Event.new
-  event.text = LibCSFML::TextEvent.new(type: LibCSFML::EventType::TextEntered, unicode: char.ord.to_u32)
-  event
-end
-
-# What SFML queues for one plain keystroke: the press, then the text it produced.
-private def typed(char : Char) : Array(LibCSFML::Event)
-  [key_event(LibCSFML::EventType::KeyPressed, SF::Keyboard::Key::Unknown), text_event(char)]
-end
-
-private def pressed(code : SF::Keyboard::Key, control = false) : Array(LibCSFML::Event)
-  [key_event(LibCSFML::EventType::KeyPressed, code, control)]
-end
-
-private def released(code : SF::Keyboard::Key, control = false) : Array(LibCSFML::Event)
-  [key_event(LibCSFML::EventType::KeyReleased, code, control)]
-end
+private alias Keys = CrymbleUI::Testing::Keys
 
 private def build_dispatch_fixture(rows = 3, cols = 3)
   adapter = KeyboardDispatchSpecAdapter.new(rows, cols)
@@ -89,11 +67,11 @@ describe CrymbleUI::KeyboardDispatch do
     CrymbleUI::FontSizing.zoom_in
     begin
       # Ctrl+0 as queued: X11 delivers TextEntered('0') for it (Windows delivers none).
-      events = pressed(SF::Keyboard::Key::LControl, control: true) +
-               pressed(SF::Keyboard::Key::Num0, control: true) + [text_event('0')] +
-               released(SF::Keyboard::Key::Num0, control: true) +
-               released(SF::Keyboard::Key::LControl, control: true) +
-               pressed(SF::Keyboard::Key::Tab)
+      events = [Keys.pressed(SF::Keyboard::Key::LControl, control: true),
+                Keys.pressed(SF::Keyboard::Key::Num0, control: true), Keys.text('0'),
+                Keys.released(SF::Keyboard::Key::Num0, control: true),
+                Keys.released(SF::Keyboard::Key::LControl, control: true)] +
+               Keys.tap(SF::Keyboard::Key::Tab)
       events.each { |e| dispatch.handle(e, app) }
 
       adapter.data[{0, 0}]?.should be_nil                            # no stray '0' in the cell
@@ -109,14 +87,9 @@ describe CrymbleUI::KeyboardDispatch do
     values = ["alpha", "b", "", "delta 4", "echo", "f", "golf", "h 8", "india"]
     events = [] of LibCSFML::Event
     values.each_with_index do |value, i|
-      value.each_char { |c| events.concat(typed(c)) }
-      events.concat(pressed(SF::Keyboard::Key::Tab))
-      next unless i % 3 == 2 # a Ctrl chord after each row, as the script adds records with Ctrl+R
-      events.concat(pressed(SF::Keyboard::Key::LControl, control: true))
-      events.concat(pressed(SF::Keyboard::Key::R, control: true))
-      events << text_event('\u0012') # the control character Ctrl+R produces
-      events.concat(released(SF::Keyboard::Key::R, control: true))
-      events.concat(released(SF::Keyboard::Key::LControl, control: true))
+      events.concat(Keys.typed(value) + Keys.tap(SF::Keyboard::Key::Tab))
+      # a Ctrl chord after each row, as the script adds records with Ctrl+R
+      events.concat(Keys.ctrl(SF::Keyboard::Key::R)) if i % 3 == 2
     end
     events.each { |e| dispatch.handle(e, app) }
 
@@ -129,10 +102,10 @@ describe CrymbleUI::KeyboardDispatch do
 
   it "AltGr text is typed: Windows reports it as Ctrl+Alt" do
     app, matrix, adapter, dispatch = build_dispatch_fixture
-    events = pressed(SF::Keyboard::Key::LControl, control: true) +
-             [key_event(LibCSFML::EventType::KeyPressed, SF::Keyboard::Key::RAlt, control: true, alt: true)] +
-             [key_event(LibCSFML::EventType::KeyPressed, SF::Keyboard::Key::Q, control: true, alt: true)] +
-             [text_event('@')] + pressed(SF::Keyboard::Key::Tab)
+    events = [Keys.pressed(SF::Keyboard::Key::LControl, control: true),
+              Keys.pressed(SF::Keyboard::Key::RAlt, control: true, alt: true),
+              Keys.pressed(SF::Keyboard::Key::Q, control: true, alt: true),
+              Keys.text('@')] + Keys.tap(SF::Keyboard::Key::Tab)
     events.each { |e| dispatch.handle(e, app) }
 
     adapter.data[{0, 0}]?.should eq("@")
@@ -142,12 +115,12 @@ describe CrymbleUI::KeyboardDispatch do
   # sideways off this state. X11 flags a modifier key's own event with the state BEFORE it.
   it "holds a modifier from its own press to its own release, and forgets it on focus loss" do
     app, _matrix, _adapter, dispatch = build_dispatch_fixture
-    dispatch.handle(pressed(SF::Keyboard::Key::LControl, control: false)[0], app)
+    dispatch.handle(Keys.pressed(SF::Keyboard::Key::LControl, control: false), app)
     dispatch.control?.should be_true
-    dispatch.handle(released(SF::Keyboard::Key::LControl, control: true)[0], app)
+    dispatch.handle(Keys.released(SF::Keyboard::Key::LControl, control: true), app)
     dispatch.control?.should be_false
 
-    dispatch.handle(pressed(SF::Keyboard::Key::LShift)[0], app)
+    dispatch.handle(Keys.pressed(SF::Keyboard::Key::LShift), app)
     dispatch.shift?.should be_true
     focus_lost = LibCSFML::Event.new
     focus_lost.type = LibCSFML::EventType::FocusLost
