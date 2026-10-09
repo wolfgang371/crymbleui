@@ -287,7 +287,11 @@ describe CrymbleUI::FileDialog do
   end
 
   it "counts a refused second click as spent: the next click on the folder only selects it" do
-    pending!("root ignores chmod 000") if LibC.getuid == 0
+    {% if flag?(:win32) %}
+      pending!("Windows has no chmod 000: the folder stays readable") # and LibC has no getuid there
+    {% else %}
+      pending!("root ignores chmod 000") if LibC.getuid == 0
+    {% end %}
     dir = fixture_dir
     locked = File.join(dir, "locked")
     Dir.mkdir_p(locked)
