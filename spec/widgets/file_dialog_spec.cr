@@ -108,6 +108,20 @@ describe CrymbleUI::FileDialog do
     FileUtils.rm_rf(dir) if dir
   end
 
+  it "opens a file in a subfolder by a path the host built with File.join" do
+    # The Driver takes a path as the host writes it - with \ separators on Windows (embrace's file
+    # dialog specs failed there on "dialog-x\sub\deep"). Green on POSIX either way; RED on Windows
+    # while the Driver split on '/' only.
+    dir = fixture_dir
+    File.write(File.join(dir, "sub", "c.embrace"), "three")
+    app = DialogApp.new(dir)
+    ui = CrymbleUI::Testing::Driver.new(app)
+    ui.open_file "fd_files", File.join("sub", "c.embrace")
+    app.accepted.should eq [File.join(dir, "sub", "c.embrace")]
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "takes a file with two clicks, and puts the first click's file in the name field" do
     dir = fixture_dir
     app = DialogApp.new(dir)

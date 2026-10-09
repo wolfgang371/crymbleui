@@ -67,7 +67,7 @@ describe CrymbleUI::FolderBrowser do
     app.browser.opened.should be_empty
     app.browser.selected_name.should eq "b.txt"
     ui.open_file "files", "b.txt"
-    app.browser.opened.should eq ["#{root}/b.txt"]
+    app.browser.opened.should eq [File.join(root, "b.txt")] # the platform separator: \ on Windows
   end
 
   it "moves the selection with the arrows and acts on it with Enter" do
@@ -82,7 +82,7 @@ describe CrymbleUI::FolderBrowser do
     b.move_selection(10)
     b.selected_name.should eq "b.txt"
     b.activate_selection
-    b.opened.should eq ["#{root}/b.txt"]
+    b.opened.should eq [File.join(root, "b.txt")] # the platform separator: \ on Windows
 
     b.move_selection(-2)
     b.selected_name.should eq "sub/"

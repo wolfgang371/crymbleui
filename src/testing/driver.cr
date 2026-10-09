@@ -253,7 +253,7 @@ module CrymbleUI
       end
 
       # Select (one click) or open (two) a file in a DirBrowser matrix, by name. A path "sub/x.emb"
-      # opens each directory on the way first.
+      # (or File.join("sub", "x.emb"), the platform's separator) opens each directory on the way first.
       def select_file(matrix_id : String, path : String) : Nil
         choose(matrix_id, path, clicks: 1)
       end
@@ -581,7 +581,9 @@ module CrymbleUI
       end
 
       private def choose(matrix_id : String, path : String, clicks : Int32) : Nil
-        *dirs, file = path.split('/')
+        # Path#parts, not split('/'): a host builds the path with File.join, which separates with \ on Windows
+        # (and on POSIX a \ is part of a name, which Path keeps).
+        *dirs, file = Path[path].parts
         dirs.each { |dir| activate_row(matrix_id, dir, 2) }
         activate_row(matrix_id, file, clicks)
       end

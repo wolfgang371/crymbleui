@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.7.1**
+**Version 1.7.2**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~40477 LOC
-- spec/: ~84270 LOC
+- src/: ~40479 LOC
+- spec/: ~84284 LOC
 
 ## Used by
 
