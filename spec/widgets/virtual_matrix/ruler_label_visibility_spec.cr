@@ -138,11 +138,11 @@ describe "a ruler number stays inside the visible band" do
     # at first as "a label must never be clipped", which #42 then contradicted — a label that may
     # never cross the edge can only POP. The real complaint is narrower and is what this asserts:
     # the number went above the edge while its row was still mostly on screen, having detached from
-    # the row and jumped to its natural centre. Under push-out it may cross the edge ONLY in the
-    # last stretch, when its own line's bottom is within a label's height of the edge.
+    # the row and jumped to its natural centre. It may cross the edge ONLY in the last stretch: once
+    # no more than one line of its row is left, the number leaves with that line (the hold - a
+    # region gives the band no more than it exceeds one line).
     renderer, app, matrix = tall_row_matrix
     band_top = matrix.ruler_row_height_pixels + matrix.sticky_row_height_pixels
-    font = CrymbleUI::FontSizing.calculate_size(-2)
     row0 = matrix.@cached_row_sizes.not_nil![0].to_f64
 
     offenders = [] of String
@@ -157,8 +157,8 @@ describe "a ruler number stays inside the visible band" do
       y = ruler.to_primitives(ruler.bounds).select(CrymbleUI::DrawText)
         .find { |t| t.text == "1" }.try(&.position.y)
       next unless y && y < band_top
-      remaining = (band_top + row0 - scroll) - band_top # how much of row 0 is still below the edge
-      offenders << "y=#{y.round(1)} with #{remaining.round(1)}px of the row still visible" if remaining > font + 1.0
+      remaining = (band_top + row0 - scroll) - band_top - matrix.grid_spacing # how much of row 0's box is still below the edge
+      offenders << "y=#{y.round(1)} with #{remaining.round(1)}px of the row still visible" if remaining > matrix.line_extent
     end
     offenders.should be_empty,
       "the number left the band while its row was still on screen: #{offenders.first(4)}"

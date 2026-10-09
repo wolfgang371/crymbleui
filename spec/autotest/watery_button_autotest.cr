@@ -100,16 +100,15 @@ class WateryButtonAutoTest < CrymbleUI::App
     btn_abs : String
 
   @phase = Phase::Settle
-  @scheduled_first = false
   @before : Capture? = nil
   @after : Capture? = nil
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      schedule(1200) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    after(1200.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     adapter = TutorialAdapter.new(1000, 1000)
     window(WINDOW_TITLE, 900, 600) do
       vstack(padding: 10.0, spacing: 5.0) do
@@ -124,28 +123,12 @@ class WateryButtonAutoTest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(
-      Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000),
-      &block
-    )
-  end
-
   private def run_phase
     case @phase
     when .settle?
       log("=== PHASE: Settle ===")
       @phase = Phase::CaptureBeforeZoom
-      schedule(800) { run_phase }
+      after(800.milliseconds) { run_phase }
 
     when .capture_before_zoom?
       log("=== PHASE: Capture BEFORE zoom (#{CrymbleUI::FontSizing.zoom_percentage}) ===")
@@ -154,7 +137,7 @@ class WateryButtonAutoTest < CrymbleUI::App
       root.try &.mark_needs_render  # Force a composite pass
       @before = capture_all("before")
       @phase = Phase::ApplyZoom
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when .apply_zoom?
       log("=== PHASE: Apply zoom ===")
@@ -162,12 +145,12 @@ class WateryButtonAutoTest < CrymbleUI::App
       root.try &.mark_needs_layout
       log("  Zoomed to #{CrymbleUI::FontSizing.zoom_percentage}")
       @phase = Phase::SettleAfterZoom
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when .settle_after_zoom?
       log("=== PHASE: Settle after zoom ===")
       @phase = Phase::CaptureAfterZoom
-      schedule(1500) { run_phase }
+      after(1500.milliseconds) { run_phase }
 
     when .capture_after_zoom?
       log("=== PHASE: Capture AFTER zoom (#{CrymbleUI::FontSizing.zoom_percentage}) ===")
@@ -177,7 +160,7 @@ class WateryButtonAutoTest < CrymbleUI::App
       @after = capture_all("after")
       log("")
       compare_and_report
-      schedule(500) { quit }
+      after(500.milliseconds) { quit }
 
     when .done?
       quit
@@ -312,8 +295,8 @@ class WateryButtonAutoTest < CrymbleUI::App
     # --- 4. ALL LAYERS ENUMERATION ---
     # Check every active layer: does it overlap the button area?
     if r = root
-      all_layers = Layer.active_layers(r).sort_by(&.z_index)
-      log("  ALL LAYERS (#{all_layers.size} total, sorted by z_index):")
+      all_layers = Layer.composite_order(r)
+      log("  ALL LAYERS (#{all_layers.size} total, composite order):")
       all_layers.each do |l|
         lb = l.bounds
         overlaps_btn = !(lb.x + lb.width < btn_abs.x || lb.x > btn_abs.x + btn_abs.width ||
@@ -406,7 +389,8 @@ class WateryButtonAutoTest < CrymbleUI::App
     end
 
     # --- 6. SINGLE LAYER COMPOSITOR SIMULATION ---
-    # Replicate the EXACT drawing from sfml_renderer.cr composite_viewport_cache_layer
+    # Replicate the EXACT drawing of a viewport-cache layer's live composite (sfml_renderer.cr
+    # composite_layer_to_window through LayerRenderer#composite_region, unclipped)
     comp_alpha_scan = ScanResult.new
     comp_none_scan = ScanResult.new
 

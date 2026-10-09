@@ -8,7 +8,7 @@ require "../../../src/testing/test_renderer"
 # their raw physical positions are meaningless). The compound's extent must
 # exclude shifted-out constituents in BOTH positioning passes — the layout pass
 # (reposition_sticky_cells) and the blit-plan fast path
-# (reposition_compound_in_blit_plan) are EITHER/OR per frame, so any disagreement
+# (compute_sticky_blit_plans) are EITHER/OR per frame, so any disagreement
 # is user-visible as a header width/pin JUMP when the frame type flips.
 #
 # cv-coherency is BLIND to this class (both sticky checkers skip compound cells;

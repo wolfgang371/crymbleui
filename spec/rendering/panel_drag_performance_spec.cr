@@ -7,6 +7,31 @@ require "../../src/testing/test_renderer"
 # - Only dirty widgets should re-render (selective rendering)
 # - Hover should only re-render the hovered widget
 
+# Asks for one rebuild the first time it draws - the shape of "state settles on the second frame".
+private class RebuildOnceWidget < CrymbleUI::Widget
+  @asked = false
+
+  def initialize(@app : CrymbleUI::App)
+    super()
+  end
+
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    CrymbleUI::Size.new(20.0, 20.0)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(20.0, 20.0))
+  end
+
+  def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    unless @asked
+      @asked = true
+      @app.request_rebuild
+    end
+    [CrymbleUI::FillRect.new(bounds, CrymbleUI::Color.new(1, 2, 3, 255)).as(CrymbleUI::DrawPrimitive)]
+  end
+end
+
 describe "Panel Drag Performance with Widget-Local Coordinates" do
   describe "drag with widget-local coordinates" do
     it "does NOT regenerate primitives during position-only drag" do
@@ -163,13 +188,39 @@ describe "Panel Drag Performance with Widget-Local Coordinates" do
 
       renderer.reset_counters
 
-      # Render 3 frames
-      3.times { renderer.render_frame(app) }
-
-      # Should have rendered panel layer 3 times
-      # (No changes, so might optimize to 0 renders with proper dirty tracking)
-      renderer.render_layer_count.should be >= 0  # Flexible for optimization
+      # The per-frame counters are reset per frame by SFMLRenderer; headless, the spec resets them.
+      CrymbleUI::LayerRenderer.reset_frame_counters
+      renderer.render_frame(app)
+      CrymbleUI::LayerRenderer.frame_layer_count.should be > 0 # the first frame renders the layers
+      renderer.render_frame(app)
+      CrymbleUI::LayerRenderer.reset_frame_counters
+      renderer.render_frame(app)
+      CrymbleUI::LayerRenderer.frame_layer_count.should eq 0 # an unchanged frame renders none
       renderer.render_frame_count.should eq 3
+    end
+
+    # settle_rendering renders until the live loop would idle. It used to render all max_frames frames
+    # always - its stop test counted the window's per-frame clear - so a GUI suite composited ~10x.
+    it "settles a static app in one frame" do
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
+      app = TestApp.new
+      app.root_widget = CrymbleUI::Window.new("Test", 800, 600)
+      app.build_tree
+      renderer.reset_counters
+      renderer.settle_rendering(app)
+      renderer.render_frame_count.should eq 1
+    end
+
+    it "settles in one more frame when the first frame requests a rebuild" do
+      renderer = CrymbleUI::Testing::TestRenderer.new(800, 600)
+      app = TestApp.new
+      window = CrymbleUI::Window.new("Test", 800, 600)
+      window.add_child(RebuildOnceWidget.new(app))
+      app.root_widget = window
+      app.build_tree
+      renderer.reset_counters
+      renderer.settle_rendering(app)
+      renderer.render_frame_count.should eq 2
     end
 
     it "tracks primitive counts correctly" do

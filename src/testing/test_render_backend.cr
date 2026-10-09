@@ -75,6 +75,11 @@ module CrymbleUI
         @@census = [] of TestRenderBackend
       end
 
+      # How many backends were created since census_start, recording on - "did this frame make any?".
+      def self.census_size : Int32
+        @@census.try(&.size) || 0
+      end
+
       # Everything created since census_start. Stops recording.
       def self.census_take : Array(TestRenderBackend)
         taken = @@census || [] of TestRenderBackend
@@ -172,11 +177,11 @@ module CrymbleUI
       # Returns array in row-major order (top-to-bottom, left-to-right)
       def get_pixels(x : Int32, y : Int32, width : Int32, height : Int32) : Array(Color)
         assert_live("get_pixels")
+        assert_inside(x, y, width, height, "get_pixels")
         pixels = [] of Color
         height.times do |dy|
           width.times do |dx|
-            color = get_pixel(x + dx, y + dy)
-            pixels << (color || Color.new(0, 0, 0, 0))  # Transparent if out of bounds
+            pixels << get_pixel(x + dx, y + dy).not_nil!
           end
         end
         pixels
@@ -567,7 +572,7 @@ module CrymbleUI
         assert_live_other(target, "blit_to", "target")
         # FAST PATH: Row-level copy for opaque blits (most common case).
         # Skips per-pixel get/set/clip overhead — direct array slice copy.
-        if !use_alpha_blend || (opacity >= 1.0 && blend_mode == BlendMode::Normal)
+        if !use_alpha_blend || (opacity == 1.0 && blend_mode == BlendMode::Normal)
           # Clip the DESTINATION span to the target's writable box — its clip intersected
           # with its buffer. Production draws a blit as a sprite, so the TARGET's view
           # scissor governs it exactly like any other draw; the source's clip is correctly
@@ -590,52 +595,7 @@ module CrymbleUI
           dy1 = Math.min(offset_y + Math.min(clip_height, @height), ty2)
           return if dx0 >= dx1 || dy0 >= dy1
 
-          cols = dx1 - dx0
-          # Row POINTERS, not indices. Both rows are already known to be inside both buffers —
-          # that is what the clipping above establishes — so re-deriving and bounds-checking the
-          # index for every pixel is pure overhead, and this is the hottest loop in the headless
-          # renderer by a wide margin: one idle frame of a real app composites ~3.6M pixels here
-          # (measured 2026-09-12: 183ms of a 290ms frame, 63%, while painting nothing at all).
-          # Arithmetic below is byte-for-byte what it was, floats included, so no pixel moves.
-          src_base = @pixels.to_unsafe
-          dst_base = target.@pixels.to_unsafe
-          ty = dy0
-          while ty < dy1
-            src_row = src_base + ((ty - offset_y) * @width + (dx0 - offset_x))
-            dst_row = dst_base + (ty * target.width + dx0)
-
-            if use_alpha_blend
-              # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent.
-              # `while`, not `cols.times do |j|`: the specs build in DEBUG mode, where the block
-              # is a real closure call per pixel rather than an inlined loop body — and this runs
-              # millions of times a frame. Same arithmetic, same order.
-              j = 0
-              while j < cols
-                src_color = src_row[j]
-                if src_color.a == 255
-                  dst_row[j] = src_color
-                elsif src_color.a > 0
-                  bg = dst_row[j]
-                  a = src_color.a / 255.0
-                  dst_row[j] = Color.new(
-                    ((src_color.r * a + bg.r * (1 - a)).to_i).clamp(0, 255).to_u8,
-                    ((src_color.g * a + bg.g * (1 - a)).to_i).clamp(0, 255).to_u8,
-                    ((src_color.b * a + bg.b * (1 - a)).to_i).clamp(0, 255).to_u8,
-                    255_u8
-                  )
-                end
-                j += 1
-              end
-            else
-              # COPY mode: one memcpy per row. Color is a 4-byte struct, the rows cannot overlap
-              # (distinct backends), and every pixel is written unconditionally — so the loop was
-              # only ever a slow way of spelling this. The previous comment rejected
-              # `@pixels[src_offset, cols]` because a slice allocates an Array per row; copy_from
-              # allocates nothing.
-              dst_row.copy_from(src_row, cols)
-            end
-            ty += 1
-          end
+          composite_rows(target, dx0 - offset_x, dy0 - offset_y, dx0, dy0, dx1 - dx0, dy1 - dy0, use_alpha_blend)
           return
         end
 
@@ -689,6 +649,64 @@ module CrymbleUI
         end
       end
 
+      # The fast compositing kernel, shared by blit_to and blit_region_to: `rows` x `cols` pixels from
+      # (src_x0, src_y0) here onto (dst_x0, dst_y0) of the target, the rect already clipped to both
+      # buffers and to the target's writable box. Normal blend at full opacity, or COPY.
+      private def composite_rows(target : TestRenderBackend, src_x0 : Int32, src_y0 : Int32, dst_x0 : Int32,
+                                 dst_y0 : Int32, cols : Int32, rows : Int32, use_alpha_blend : Bool) : Nil
+        raise ArgumentError.new("composite_rows copies rows with copy_from, which cannot overlap: blit onto another backend") if target.same?(self)
+        tx1, ty1, tx2, ty2 = target.writable_box # the clamp: callers clip, this refuses a rect they did not
+        unless cols >= 0 && rows >= 0 && dst_x0 >= tx1 && dst_y0 >= ty1 && dst_x0 + cols <= tx2 && dst_y0 + rows <= ty2 &&
+               src_x0 >= 0 && src_y0 >= 0 && src_x0 + cols <= @width && src_y0 + rows <= @height
+          raise ArgumentError.new("composite_rows: rect outside the source buffer or the target's writable box")
+        end
+        # Row POINTERS, not indices. Both rows are already known to be inside both buffers —
+        # that is what the clipping above establishes — so re-deriving and bounds-checking the
+        # index for every pixel is pure overhead, and this is the hottest loop in the headless
+        # renderer by a wide margin: one idle frame of a real app composites ~3.6M pixels here
+        # (measured 2026-09-12: 183ms of a 290ms frame, 63%, while painting nothing at all).
+        # Arithmetic below is byte-for-byte what it was, floats included, so no pixel moves.
+        src_base = @pixels.to_unsafe
+        dst_base = target.@pixels.to_unsafe
+        r = 0
+        while r < rows
+          src_row = src_base + ((src_y0 + r) * @width + src_x0)
+          dst_row = dst_base + ((dst_y0 + r) * target.width + dst_x0)
+
+          if use_alpha_blend
+            # Normal blend with opacity=1.0: copy opaque pixels, blend semi-transparent.
+            # `while`, not `cols.times do |j|`: the specs build in DEBUG mode, where the block
+            # is a real closure call per pixel rather than an inlined loop body — and this runs
+            # millions of times a frame. Same arithmetic, same order.
+            j = 0
+            while j < cols
+              src_color = src_row[j]
+              if src_color.a == 255
+                dst_row[j] = src_color
+              elsif src_color.a > 0
+                bg = dst_row[j]
+                a = src_color.a / 255.0
+                dst_row[j] = Color.new(
+                  ((src_color.r * a + bg.r * (1 - a)).to_i).clamp(0, 255).to_u8,
+                  ((src_color.g * a + bg.g * (1 - a)).to_i).clamp(0, 255).to_u8,
+                  ((src_color.b * a + bg.b * (1 - a)).to_i).clamp(0, 255).to_u8,
+                  255_u8
+                )
+              end
+              j += 1
+            end
+          else
+            # COPY mode: one memcpy per row. Color is a 4-byte struct, the rows cannot overlap
+            # (distinct backends), and every pixel is written unconditionally — so the loop was
+            # only ever a slow way of spelling this. The previous comment rejected
+            # `@pixels[src_offset, cols]` because a slice allocates an Array per row; copy_from
+            # allocates nothing.
+            dst_row.copy_from(src_row, cols)
+          end
+          r += 1
+        end
+      end
+
       # Implement RenderBackend#blit interface
       # Blit entire source backend to this backend at specified position
       # Uses COPY mode (matches SFML's BlendNone) for widget backend restoration
@@ -717,6 +735,20 @@ module CrymbleUI
       def blit_region_to(target : TestRenderBackend, src_x : Int32, src_y : Int32, width : Int32, height : Int32, dest_x : Int32, dest_y : Int32, use_alpha_blend : Bool = true, opacity : Float64 = 1.0, blend_mode : BlendMode = BlendMode::Normal)
         assert_live("blit_region_to")
         assert_live_other(target, "blit_region_to", "target")
+        # FAST PATH, the same cases and arithmetic as blit_to's: every viewport-cache layer composites
+        # through here, and the per-pixel loop below cost ~80 ns a pixel against ~27 on the kernel
+        # (measured 2026-09-27: 84 s of a 215 s GUI run). The rect is clipped to what the loop below
+        # would write: source pixels inside this buffer, destination pixels inside the writable box.
+        if !use_alpha_blend || (opacity == 1.0 && blend_mode == BlendMode::Normal)
+          tx1, ty1, tx2, ty2 = target.writable_box
+          dx0 = {dest_x, dest_x - src_x, tx1}.max
+          dy0 = {dest_y, dest_y - src_y, ty1}.max
+          dx1 = {dest_x + width, dest_x - src_x + @width, tx2}.min
+          dy1 = {dest_y + height, dest_y - src_y + @height, ty2}.min
+          return if dx0 >= dx1 || dy0 >= dy1
+          composite_rows(target, dx0 - dest_x + src_x, dy0 - dest_y + src_y, dx0, dy0, dx1 - dx0, dy1 - dy0, use_alpha_blend)
+          return
+        end
         height.times do |dy|
           width.times do |dx|
             src_color = get_pixel(src_x + dx, src_y + dy)
@@ -803,9 +835,7 @@ module CrymbleUI
       # Pop clipping region from stack
       def pop_clip
         assert_live("pop_clip")
-        # The `if any?` SWALLOWS an underflow that CrSFMLBackend#pop_clip raises on —
-        # a recorded divergence, tracked in the backlog, not a contract.
-        @clip_stack.pop if @clip_stack.any?
+        @clip_stack.pop # an unbalanced pop raises IndexError, as CrSFMLBackend#pop_clip does
         recompute_clip
       end
 

@@ -41,7 +41,6 @@ class Row39GarbledAutoTest < CrymbleUI::App
   DELAY_MS     = 150  # ms between steps (allow SFML to render each frame)
 
   @adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
-  @scheduled_first = false
 
   enum Phase
     Settle
@@ -55,16 +54,16 @@ class Row39GarbledAutoTest < CrymbleUI::App
   @step = 0
   @cv_failures_before_scroll = 0
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      {% if flag?(:cache_validation) %}
-        CrymbleUI::CacheValidation.enable(:immediate_mode)
-        CrymbleUI::CacheValidation.clear_failures!
-      {% end %}
-      schedule(800) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    {% if flag?(:cache_validation) %}
+      CrymbleUI::CacheValidation.enable(:immediate_mode)
+      CrymbleUI::CacheValidation.clear_failures!
+    {% end %}
+    after(800.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     # Match the demo layout: VStack with labels above/below the matrix
     window("Row39 Garbled Autotest", WINDOW_W, WINDOW_H) do
       vstack(padding: 10.0, spacing: 5.0) do
@@ -93,19 +92,6 @@ class Row39GarbledAutoTest < CrymbleUI::App
         end
       end
     end
-  end
-
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000), &block)
   end
 
   private def get_matrix : CrymbleUI::VirtualMatrix?
@@ -137,17 +123,17 @@ class Row39GarbledAutoTest < CrymbleUI::App
 
       @phase = Phase::ScrollDown
       @step = 0
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::ScrollDown
       if @step < SCROLL_STEPS
         do_scroll_step
         @step += 1
-        schedule(DELAY_MS) { run_phase }
+        after(DELAY_MS.milliseconds) { run_phase }
       else
         log("=== ScrollDown done (#{SCROLL_STEPS} steps) ===")
         @phase = Phase::Capture
-        schedule(300) { run_phase }
+        after(300.milliseconds) { run_phase }
       end
 
     when Phase::Capture
@@ -155,12 +141,12 @@ class Row39GarbledAutoTest < CrymbleUI::App
       capture_all_layers
       dump_cell_positions
       @phase = Phase::Results
-      schedule(300) { run_phase }
+      after(300.milliseconds) { run_phase }
 
     when Phase::Results
       output_results
       @phase = Phase::Done
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::Done
       quit

@@ -9,7 +9,7 @@
 
 ## Overview
 
-VirtualMatrix is a high-performance virtual grid widget that renders only the cells visible within the viewport, dynamically creating and destroying cell widgets as the user scrolls. It supports sticky rows/columns (header pinning via scroll_order), merged/compound cells spanning multiple rows and columns, interactive column/row resize, cursor navigation with proxy focus delegation to cell widgets, and bi-directional ScrollView integration for scrollbar chrome. The grid operates across five rendering layers and three coordinate systems, with aggressive dimension caching to maintain O(log n) scroll performance on grids of arbitrary size.
+VirtualMatrix is a high-performance virtual grid widget that renders only the cells visible within the viewport, dynamically creating and detaching cell widgets as the user scrolls (a cell that leaves is detached and its GPU freed, never destroyed - an adapter may hand the same widget back; MATRIX_LAWS § Cells). It supports sticky rows/columns (header pinning via scroll_order), merged/compound cells spanning multiple rows and columns, interactive column/row resize, cursor navigation with proxy focus delegation to cell widgets, and bi-directional ScrollView integration for scrollbar chrome. The grid operates across five rendering layers and three coordinate systems, with aggressive dimension caching to maintain O(log n) scroll performance on grids of arbitrary size.
 
 ## File Structure
 
@@ -122,16 +122,20 @@ Invariants worth keeping:
 VirtualMatrix uses five rendering layers, each with different scroll behavior:
 
 ```
-Layer Stack (z-index ascending)
+Layer Stack (composite order, back to front - Layer.composite_order)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-z = base+1    content_layer          viewport_cache, scrolls X+Y
-z = base+3..7 ScrollView layers      internal, sticky_row, sticky_col, sticky_corner, scrollbars
-z = base+8    cursor_overlay_layer   non-scrolling, additive/subtractive blend
+content_layer          (VM z 1)  viewport_cache, scrolls X+Y
+  layers owned inside cells      painted into the content layer (rank 0)
+  chrome ScrollView layers       painted into the content layer, ranked 1 (composite_rank): over every cell -
+                                 content (SV z 1), sticky_row 2, sticky_col 3, sticky_corner 4, scrollbar 5
+cursor_overlay_layer   (VM z 2)  non-scrolling, additive/subtractive blend - over the sticky headers too
+drag_overlay_layer     (VM z 3)  cell drag decals
 
-ScrollView provides 3 sticky sub-layers (VM passes base_z+2 as parent_z; SV adds +1..+5):
-  sticky_row_layer       scrolls X only, fixed Y   (column headers + ColumnRulerWidget)  z = base+4
-  sticky_col_layer       scrolls Y only, fixed X   (row headers + RowRulerWidget)        z = base+5
-  sticky_corner_layer    no scroll, fixed both      (corner cells + CornerRulerWidget + CornerRowStripWidget) z = base+6
+ScrollView's 3 sticky sub-layers:
+  sticky_row_layer       scrolls X only, fixed Y   (column headers + ColumnRulerWidget)
+  sticky_col_layer       scrolls Y only, fixed X   (row headers + RowRulerWidget)
+  sticky_corner_layer    no scroll, fixed both      (corner cells + CornerRulerWidget + CornerRowStripWidget)
+A sticky header cell is painted into its band (render_layer); a layer owner inside it composites over the band.
 ```
 
 ### Layer Ownership and Scroll Behavior
@@ -297,8 +301,10 @@ Content cell (row=5, col=3):
    │   ├── Sticky compounds: permanent key = top-left
    │   └── Content compounds: dynamic_handle = first visible cell
    │
-   ├── DESTROY cells outside destruction buffer
-   │   └── Clears proxy_focus, removes from children/active_cells
+   ├── DETACH cells outside destruction buffer (detach_cell)
+   │   └── Clears proxy_focus, removes from children/active_cells; after the
+   │       new cells are made, what did not come straight back is released
+   │       (release_detached: layers retired, surfaces freed)
    │
    ├── CREATE new cells via adapter.cell_paint()
    │   └── Layout at content-space position, mark needs_fresh_background
@@ -476,8 +482,8 @@ leak into rules written for scrolling cells (it did twice: the auto-size sticky-
 block in natural order ends `[.., 0, 1]`, the first element read is `{1}`, which is not `{0}`,
 and the derived count is **zero**: no error, no warning, the headers simply stop being sticky
 and their spanning cells become ordinary content. This example itself was written ascending
-until 2026-09-05, and both the library's `SimpleMatrixAdapter` (any request for >= 2 sticky
-lines silently yielded none) and embrace's pivot (same-level row headers) had the bug
+until 2026-09-05, and both the library's small-table adapter of that time (any request for >= 2
+sticky lines silently yielded none) and embrace's pivot (same-level row headers) had the bug
 that reading it produces. `ConfigurableMatrixAdapter#get_scrollorder` is the reference.
 
 An adapter that knows its header count wants exactly:
@@ -784,8 +790,10 @@ Eligibility (sticky_cells_can_use_blit_plan?):
 Fast path:
   1. Compute new position (same logic as reposition — compound cells literally so,
      both delegate to StickyMath.compound_axis)
-  2. Update widget.bounds (for hit-testing)
-  3a. If widget_backend present: create BlitEntry(source_backend, dest_x, dest_y)
+  2. Update widget.bounds (what painted_rect, popup anchors and the next layout read)
+  3a. If widget_backend present: create BlitEntry(widget, widget.backend_generation, dest_x, dest_y)
+      (nothing may replace that texture before the plan runs - a recenter spares sticky cells, a detach voids
+      the plan; the blit asserts the generation still matches)
   3b. If widget_backend absent: append widget to blit_plan_render_widgets
   4. Set layer.blit_plan = entries, layer.blit_plan_render_widgets = render_list
   5. mark_needs_full_render (triggers layer_renderer blit plan path)
@@ -817,7 +825,9 @@ dims/sizes re-read through the flush below). This canary sees dims-DRIFTING
 violations only — a same-dims structural change (e.g. merged spans splitting at
 constant grid size) is invisible at reconcile time and reaches the screen as stale
 pixels; the only protection there is announcing. Guarded by
-`spec/widgets/virtual_matrix_reconcile_adapter_contract_spec.cr`.
+`spec/widgets/virtual_matrix_reconcile_adapter_contract_spec.cr`. When reconcile runs inside
+a frame, as a rebuild's does, a TestRenderer swallows the raise like any frame exception: a
+suite sees it through `TestRenderer.frame_exceptions_swallowed` (docs/GRACEFUL_DEGRADATION.md).
 
 The MatrixAdapter supports push-based change notification:
 
@@ -828,10 +838,10 @@ Adapter -> VirtualMatrix:
 
 pre_render_flush() (called before rendering):
   If invalidate_all:
-    Re-read dimensions, destroy all cells, clear EVERY VM layer's pixels,
+    Re-read dimensions, detach all cells, clear EVERY VM layer's pixels,
     trigger_update_visible_cells
   If cell invalidations:
-    Destroy specific cells, trigger_update_visible_cells
+    Detach specific cells, trigger_update_visible_cells
 ```
 
 An `invalidate_all!` also raises the app's input barrier (`App#request_frame_before_input`): until
@@ -839,7 +849,7 @@ the flush, rows, columns and the edit proxy are stale, so input queued behind th
 that frame instead of reading them (`EventBatch`; guarded by
 `spec/widgets/virtual_matrix_batch_text_spec.cr`).
 
-Cell-level invalidation destroys only the affected cell from `@active_cells`. The next `update_visible_cells` call will recreate it via `adapter.cell_paint()`, picking up the new data.
+Cell-level invalidation detaches only the affected cell from `@active_cells`. The next `update_visible_cells` call will recreate it via `adapter.cell_paint()`, picking up the new data.
 
 **Full-invalidate pixel-clear invariant**: `flush_invalidate_all` MUST call
 `mark_needs_clear_and_render` on every VM-owned layer — content, sticky_row,
@@ -889,15 +899,17 @@ The `copy_state_from` override handles:
    (measured), harmless only while the old instance is discarded immediately.
    The pass-1 EXTENTS travel with those sizes, under the same gate
    (`carry_line_extents_from`): content sizing cancels its own re-measure here when the
-   mode did not change (`@auto_size_pending = false`), so nothing downstream will
+   mode did not change and the old instance had measured (`@auto_size_pending = false`
+   unless the old one was still pending - a matrix rebuilt before its first frame carries
+   default sizes and must still measure them), so nothing downstream will
    re-derive them — and a matrix holding sizes it cannot explain is grow-only for life
    (see *Content sizing* above).
 4. Applies the CLEAR rule: a swapped-in adapter instance (identity compare) clears
    every VM layer via the same helper `flush_invalidate_all` uses — deliberate
    heuristic default, since a fresh instance has no announce history; a same-instance
    unannounced dims drift is a contract violation (see Push-Based Adapter
-   Invalidation above). Fresh-adapter-per-build apps (the DSL `matrix` sugar,
-   dialog-local adapters) are legal: they pay a full clear per rebuild — felt cost
+   Invalidation above). Fresh-adapter-per-build apps (dialog-local
+   adapters) are legal: they pay a full clear per rebuild — felt cost
    ~nil, the body repaints on a rebuild anyway — and keep their resize state via
    rule 3. NOTE: sticky layers are additionally cleared unconditionally on every
    `perform_layout`; do not "optimize" that away without re-checking adapter-swap
@@ -907,6 +919,27 @@ The `copy_state_from` override handles:
 7. Rebinds adapter invalidation callbacks to the new widget instance
 
 `@last_synced_scroll_offset` is deliberately NOT reconciled: after rebuild, the ScrollView is fresh (offset=0), so the push branch must fire to seed it with the reconciled scroll_offset.
+
+### Which layers a rebuild carries, and what clears each
+
+A rebuild constructs a new VirtualMatrix; `copy_state_from` carries some layers over (with their retained
+buffers) and the rest are created anew with the matrix's internal ScrollView.
+
+| Layer | Across a rebuild | Cleared by |
+|---|---|---|
+| content | CARRIED (`reconcile_property content_layer`) | an announce (it marks the matrix for layout, so the carried layer takes a full-render clear; its flush runs `clear_all_vm_layers_for_invalidate`); an adapter swap (rule 4); a full render whenever something actually re-lays the layer out - a plain rebuild does NOT (contract spec (d)) |
+| cursor overlay + widget | CARRIED | an announce's flush and an adapter swap (`clear_all_vm_layers_for_invalidate`); every cursor move and flash tick (`mark_cursor_overlay_dirty` clears and re-renders); at rebuild time itself only `clear_on_grow` - it is `skip_rebuild_clear` and exempt from `assess_rebuild_staleness` |
+| drag overlay + widget | CARRIED | only `clear_on_grow` - NOT by an announce or an adapter swap (`clear_all_vm_layers_for_invalidate` leaves it out, so rule 4's "every VM layer" overstates); it matters only mid-drag |
+| sticky row / column / corner | NEW (they belong to the internal ScrollView) | first render; `perform_layout` clears all three on every layout (rule 4's note) |
+| the ScrollView's own layer, scrollbar layer | NEW | first render |
+
+A zoom change also clears the content and sticky layers (`handle_zoom_change`, its own near-copy of the list).
+
+So the retained content buffer is protected by the announce: a same-instance structural change that keeps
+the row and column count and is NOT announced (merged spans splitting, say) keeps the old cells' pixels in
+whatever it vacates - measured with contract spec (g)'s fixture, 75 of 75 gutter-band pixels stale; announced,
+none (in either ordering). The reconcile cannot see such a change (it compares counts), which is why the
+contract says announce.
 
 ## Dimension Caching
 
@@ -959,7 +992,7 @@ Every consumer must be told, and the list of consumers is exactly this, in this 
    recomputes the visible cells but does not clamp, so clamping after it would be undone on any
    shrink.
 
-The content layer needs nothing: `Layer#bounds` pulls through `compute_bounds_for_layer`, which
+The content layer needs nothing: `Layer#content_rect` (and so `bounds` and `size`) pulls through `compute_bounds_for_layer`, which
 re-runs `effective_content_size` on every read.
 
 Three paths are deliberately NOT full callers, and `spec/rendering/size_writer_lint_spec.cr` holds

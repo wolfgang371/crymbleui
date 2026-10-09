@@ -34,7 +34,7 @@ module CrymbleUI
     # === CURSOR OVERLAY WIDGET ===
 
     # Renders cursor row/col highlight bands on the overlay layer.
-    # Reads cursor_rc, scroll_offset, and cached sizes from the parent matrix
+    # Reads cursor_rc and where the lines are painted (painted_row / painted_col) from the parent matrix
     # at render time, so cursor movement only requires marking this widget dirty.
     private class CursorOverlayWidget < MatrixOverlayWidget
       property flash_on : Bool = true
@@ -45,30 +45,18 @@ module CrymbleUI
 
       def to_primitives(bounds : Rect) : Array(DrawPrimitive)
         cursor_row, cursor_col = @matrix.cursor_rc
-        col_sizes = @matrix.@cached_col_sizes
-        row_sizes = @matrix.@cached_row_sizes
-        scroll = @matrix.scroll_offset
-
-        return [] of DrawPrimitive unless col_sizes && row_sizes
+        return [] of DrawPrimitive unless @matrix.@cached_col_sizes && @matrix.@cached_row_sizes
+        # the cursor can briefly lie past a shrunk grid (its clamp runs after the size caches are rebuilt)
+        return [] of DrawPrimitive unless cursor_row < @matrix.placed_row_sizes.size && cursor_col < @matrix.placed_col_sizes.size
 
         is_sticky_row = cursor_row < @matrix.sticky_row_count
         is_sticky_col = cursor_col < @matrix.sticky_col_count
 
-        # Compute cursor position in content space (linear sum of sizes)
-        # Add ruler offsets since all cells are shifted by ruler space
-        ruler_x = @matrix.ruler_col_width_pixels
-        ruler_y = @matrix.ruler_row_height_pixels
-        cursor_y = ruler_y + (0...cursor_row).sum { |r| row_sizes[r] }.to_f64
-        cursor_x = ruler_x + (0...cursor_col).sum { |c| col_sizes[c] }.to_f64
-
-        # Sticky rows/cols are at fixed viewport positions (no scroll subtraction).
-        # Content rows/cols need scroll adjustment.
-        band_y = is_sticky_row ? cursor_y : cursor_y - scroll.y
-        band_x = is_sticky_col ? cursor_x : cursor_x - scroll.x
-
-        # Band dimensions
-        row_h = cursor_row < row_sizes.size ? row_sizes[cursor_row].to_f64 : 0.0
-        col_w = cursor_col < col_sizes.size ? col_sizes[cursor_col].to_f64 : 0.0
+        # The cursor's row and column, where they are painted (the line rule: a sticky line holds still,
+        # any other moves by the whole scroll the grid paints with).
+        band_y, row_h = @matrix.painted_row(cursor_row)
+        band_x, col_w = @matrix.painted_col(cursor_col)
+        whole_scroll = @matrix.painted_scroll
 
         delta = @matrix.cursor_highlight_delta.abs.clamp(0, 255)
         band_delta = (delta * 1.5).to_i.clamp(0, 255)
@@ -99,8 +87,8 @@ module CrymbleUI
         # Use actual layer bounds (not widget bounds) for robustness during resize transitions.
         overlay_h = @matrix.cursor_overlay_layer.try(&.bounds.height) || bounds.height
         overlay_w = @matrix.cursor_overlay_layer.try(&.bounds.width) || bounds.width
-        total_data_h = ruler_y + row_sizes.sum(&.to_f64) - scroll.y
-        total_data_w = ruler_x + col_sizes.sum(&.to_f64) - scroll.x
+        total_data_h = @matrix.placed_row_start(@matrix.placed_row_sizes.size) - whole_scroll.y
+        total_data_w = @matrix.placed_col_start(@matrix.placed_col_sizes.size) - whole_scroll.x
         data_bottom = {total_data_h, overlay_h}.min
         data_right = {total_data_w, overlay_w}.min
 
@@ -134,25 +122,29 @@ module CrymbleUI
             # overhangs the inter-row gap below the cell — and as the flash blinks that
             # asymmetric overhang reads as the cell's text jittering ~1px. The row/col
             # bands above deliberately keep the full pitch (a contiguous strip); only the
-            # blinking whole-cell flash must match its cell.
-            gap = @matrix.grid_spacing.to_f64
-            flash_w = {effective_col_w - gap, 0.0}.max
-            flash_h = {effective_row_h - gap, 0.0}.max
-            fill_rect(Rect.new(effective_band_x, effective_band_y, flash_w, flash_h), cell_flash_color)
+            # blinking whole-cell flash must match its cell - where it is painted.
+            if flash = @matrix.painted_rect(@matrix.get_bounding_box(@matrix.cursor_rc), pitch: false)
+              fill_rect(flash, cell_flash_color)
+            end
           end
 
-          # Change animation: white borders on cells with active highlights (skip when idle)
+          # Change animation: a white wash on each highlighted cell box, once per box (at the strongest
+          # alpha of its cells), where the box is painted. Skipped when idle.
           if (adapter = @matrix.adapter) && adapter.has_active_highlights?
+            strongest = {} of Region => UInt8
             @matrix.@visible_rows.each do |r|
               @matrix.@visible_cols.each do |c|
                 alpha = adapter.cell_highlight_alpha(r, c)
                 next if alpha == 0
-                cell_y = ruler_y + (0...r).sum { |ri| row_sizes[ri] }.to_f64 - scroll.y
-                cell_x = ruler_x + (0...c).sum { |ci| col_sizes[ci] }.to_f64 - scroll.x
-                cell_h = r < row_sizes.size ? row_sizes[r].to_f64 : 0.0
-                cell_w = c < col_sizes.size ? col_sizes[c].to_f64 : 0.0
-                glow_color = Color.new(255_u8, 255_u8, 255_u8, (alpha // 2).to_u8)
-                fill_rect(Rect.new(cell_x, cell_y, cell_w, cell_h), glow_color)
+                box = @matrix.get_bounding_box({r, c})
+                strongest[box] = {strongest[box]? || 0_u8, alpha}.max
+              end
+            end
+            unless strongest.empty?
+              painted = @matrix.painted_rects
+              strongest.each do |box, alpha|
+                next unless rect = painted[box]?
+                fill_rect(rect, Color.new(255_u8, 255_u8, 255_u8, (alpha // 2).to_u8))
               end
             end
           end
@@ -189,15 +181,8 @@ module CrymbleUI
       end
 
       def to_primitives(bounds : Rect) : Array(DrawPrimitive)
-        col_sizes = @matrix.@cached_col_sizes
-        row_sizes = @matrix.@cached_row_sizes
-        return [] of DrawPrimitive unless col_sizes && row_sizes
         adapter = @matrix.adapter
         return [] of DrawPrimitive unless adapter
-
-        scroll = @matrix.scroll_offset
-        ruler_x = @matrix.ruler_col_width_pixels
-        ruler_y = @matrix.ruler_row_height_pixels
 
         cells = [] of Tuple(Int32, Int32)
         # Source: painted only once the source is COMMITTED — a real drag has begun
@@ -214,14 +199,9 @@ module CrymbleUI
 
         primitives do
           cells.each do |drag_cell|
-            bb = adapter.cell_get_drag_bounding_box(drag_cell[0], drag_cell[1])
-            min_r, min_c = bb[0]
-            max_r, max_c = bb[1]
-            bb_y = ruler_y + (0...min_r).sum { |r| row_sizes[r] }.to_f64 - scroll.y
-            bb_x = ruler_x + (0...min_c).sum { |c| col_sizes[c] }.to_f64 - scroll.x
-            bb_h = (min_r..max_r).sum { |r| row_sizes[r] }.to_f64
-            bb_w = (min_c..max_c).sum { |c| col_sizes[c] }.to_f64
-            fill_rect(Rect.new(bb_x, bb_y, bb_w, bb_h), DRAG_HIGHLIGHT_COLOR)
+            # the drag box where it is painted (its visible part) - nothing when none of it is
+            box = adapter.cell_get_drag_bounding_box(drag_cell[0], drag_cell[1])
+            @matrix.painted_rect(box).try { |rect| fill_rect(rect, DRAG_HIGHLIGHT_COLOR) }
           end
         end
       end

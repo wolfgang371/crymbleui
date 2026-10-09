@@ -4,7 +4,7 @@ require "../../src/widgets/window"
 
 describe "WindowPanel with ScrollView z-index" do
   describe "scrollbar z-index bleeding (Issue D)" do
-    it "back panel scrollbar z-index is less than front panel layer z-index" do
+    it "a back panel's scrollbar composites below the front panel" do
       # Setup: Window with two overlapping panels, each containing a ScrollView
       window = CrymbleUI::Window.new("Test", 800, 600)
 
@@ -35,21 +35,12 @@ describe "WindowPanel with ScrollView z-index" do
       # Bring Panel B to front (it should already be front, but this triggers z-index update)
       panel_b.bring_to_front
 
-      # Get z-indices
-      panel_a_layer_z = panel_a.layer.not_nil!.z_index
-      panel_b_layer_z = panel_b.layer.not_nil!.z_index
-
-      # Get scrollbar layer z-indices (if they exist)
-      scroll_a_scrollbar_z = scroll_a.scrollbar_layer.try(&.z_index) || 0
-      scroll_b_scrollbar_z = scroll_b.scrollbar_layer.try(&.z_index) || 0
-
-      # The CRITICAL assertion: Back panel's scrollbar must be BELOW front panel's layer
-      # This should FAIL with current code because:
-      # - Panel A: z=1, scrollbar z=3 (1+2)
-      # - Panel B brought to front: z=2 (1+1), scrollbar z=4
-      # - Panel A scrollbar (3) > Panel B layer (2) -- BUG!
-      scroll_a_scrollbar_z.should be < panel_b_layer_z,
-        "Back panel (A) scrollbar z=#{scroll_a_scrollbar_z} should be < front panel (B) layer z=#{panel_b_layer_z}"
+      # The CRITICAL assertion: the back panel's scrollbar composites BELOW the front panel's layer
+      # (it once bled through when both took absolute z from their panels)
+      order = window.collect_all_layers
+      back_bar = order.index!(scroll_a.scrollbar_layer.not_nil!)
+      front = order.index!(panel_b.layer.not_nil!)
+      back_bar.should be < front, "back panel (A) scrollbar composites at #{back_bar}, over the front panel (B) at #{front}"
     end
 
     it "after multiple bring_to_front calls, scrollbars stay behind front panel" do
@@ -80,13 +71,11 @@ describe "WindowPanel with ScrollView z-index" do
       panel_b.bring_to_front  # B to front
       panel_a.bring_to_front  # A to front again
 
-      # Now Panel A is front, Panel B is back
-      panel_a_layer_z = panel_a.layer.not_nil!.z_index
-      scroll_b_scrollbar_z = scroll_b.scrollbar_layer.try(&.z_index) || 0
-
-      # Panel B's scrollbar must be below Panel A's layer
-      scroll_b_scrollbar_z.should be < panel_a_layer_z,
-        "Back panel (B) scrollbar z=#{scroll_b_scrollbar_z} should be < front panel (A) layer z=#{panel_a_layer_z}"
+      # Now Panel A is front, Panel B is back: B's scrollbar composites below A's layer
+      order = window.collect_all_layers
+      back_bar = order.index!(scroll_b.scrollbar_layer.not_nil!)
+      front = order.index!(panel_a.layer.not_nil!)
+      back_bar.should be < front, "back panel (B) scrollbar composites at #{back_bar}, over the front panel (A) at #{front}"
     end
   end
 end

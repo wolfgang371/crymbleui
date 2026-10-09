@@ -14,16 +14,15 @@ class GrowPerfAutotest < CrymbleUI::App
   DELAY =  50
 
   @phase = 0
-  @scheduled = false
   @move = 0
   @start_x = 0.0
 
-  def build : CrymbleUI::Widget
-    if @phase == 0 && !@scheduled && scheduler_ready?
-      @scheduled = true
-      schedule_next(700)
-    end
+  # The first phase, once the window is up.
+  def on_start
+    schedule_next(700)
+  end
 
+  def build : CrymbleUI::Widget
     window("GrowPerf Autotest", 1600, 950) do
       window_panel(title: "Floored", x: 20.0, y: 60.0, width: 600.0, height: 620.0, resizable: true, id: "floored") do
         vstack(spacing: 2.0) do
@@ -49,15 +48,8 @@ class GrowPerfAutotest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    CrymbleUI::Widget.scheduler
-    true
-  rescue
-    false
-  end
-
   private def schedule_next(delay_ms : Int32)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000)) do
+    after(delay_ms.milliseconds) do
       run_phase
     end
   end

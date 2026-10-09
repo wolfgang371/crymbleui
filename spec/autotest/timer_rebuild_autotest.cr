@@ -13,10 +13,12 @@ require "../../src/crymble-ui"
 # entirely; it must keep climbing.
 class TimerRebuildAutotest < CrymbleUI::App
   state ticks : Int32 = 0
-  @clock : Int32? = nil
+
+  def on_start
+    every(500.milliseconds) { self.ticks += 1 }
+  end
 
   def build : CrymbleUI::Widget
-    ensure_clock
     window("Timer Rebuild Autotest", 640, 260) do
       vstack(spacing: 10.0) do
         text("Idle timer-driven rebuild test", font_scale: 3, color: CrymbleUI::Color.new(0, 100, 180, 255))
@@ -25,23 +27,6 @@ class TimerRebuildAutotest < CrymbleUI::App
         text("(before the loop fix it froze until you moved the mouse, then jumped)", font_scale: -2)
       end
     end
-  end
-
-  # Start the one repeating clock as soon as the scheduler exists (it does by the loop's rebuild of the
-  # tree). @clock guards against re-scheduling on every rebuild.
-  private def ensure_clock
-    return if @clock
-    return unless scheduler_ready?
-    @clock = CrymbleUI::Widget.scheduler.schedule(500.milliseconds, repeating: true) do
-      self.ticks += 1
-    end
-  end
-
-  private def scheduler_ready? : Bool
-    CrymbleUI::Widget.scheduler
-    true
-  rescue
-    false
   end
 end
 

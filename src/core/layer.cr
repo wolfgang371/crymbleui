@@ -4,19 +4,10 @@ require "../rendering/render_backend"
 require "../rendering/pixel_snap"
 
 module CrymbleUI
-  # Entry in a blit-plan: describes one cached widget texture to blit onto a layer
-  struct BlitEntry
-    property source : RenderBackend
-    property dest_x : Int32
-    property dest_y : Int32
-    property width : Int32
-    property height : Int32
-
-    def initialize(@source : RenderBackend, @dest_x : Int32, @dest_y : Int32)
-      @width = source.width
-      @height = source.height
-    end
-  end
+  # Entry in a blit-plan: one widget's cached texture to blit onto a layer. It names the WIDGET and the texture
+  # generation it saw, never the texture: a texture replaced (released) between the plan's build and its run is
+  # seen by the generation, and a plan holds nothing that could outlive a release.
+  record BlitEntry, widget : Widget, generation : Int32, dest_x : Int32, dest_y : Int32
 
   # Axis of a content-layer resize blit-shift (see ResizeShift / handle_content_resize_shift).
   enum ShiftAxis
@@ -47,11 +38,11 @@ module CrymbleUI
   end
 
   # Layer represents a render target with its own backend
-  # Layers form a tree hierarchy and are composited by z-index
+  # Layers are composited in the order of the widget tree (Layer.composite_order)
   #
   # Design principles:
   # - Each layer has content-sized backend (with buffer) for memory efficiency
-  # - Absolute z-index determines rendering order (tree is for organization)
+  # - z_index orders an owner's OWN layers; where they go among the others is the tree's business
   # - Always dynamic rendering (re-render when contents change)
   # - Widgets own their layers (WindowPanel has @internal_layer)
   # - Backend is renderer-specific (SFML or test), assigned by renderer
@@ -75,13 +66,32 @@ module CrymbleUI
     property opacity : Float64 # 0.0 - 1.0
     property blend_mode : BlendMode
 
-    # Pull-based bounds: ask owner widget for current bounds, fall back to cached
-    def bounds : Rect
+    # Where the layer's content lies in its owner's CONTENT space - the render origin: widgets are painted into
+    # the buffer at `absolute position - content_rect.position`, so an ancestor's scroll changes nothing in the
+    # buffer (only where it is composited). The owner states it (compute_bounds_for_layer); an ownerless layer
+    # (the drag ghost, the drop highlight) is its bounds.
+    def content_rect : Rect
       if (owner = @owner_widget) && owner.responds_to?(:compute_bounds_for_layer)
         owner.compute_bounds_for_layer(self)
       else
         @cached_bounds
       end
+    end
+
+    # Where the layer is composited, in WINDOW space: its content rect minus the shift its owner's ancestors
+    # paint it with (Widget#enclosing_scroll) - the same rect when nothing above scrolls.
+    def bounds : Rect
+      rect = content_rect
+      if owner = @owner_widget
+        s = owner.enclosing_scroll
+        rect = Rect.new(rect.x - s.x, rect.y - s.y, rect.width, rect.height) unless s.x == 0.0 && s.y == 0.0
+      end
+      rect
+    end
+
+    # Its size - the same in both spaces, so a reader of the size alone takes no scroll walk.
+    def size : Size
+      content_rect.size
     end
 
     # Setter: updates cached_bounds (used for drag ghost layer and initial creation)
@@ -111,7 +121,14 @@ module CrymbleUI
     end
 
     # Rendering backend (assigned by renderer: CrSFMLBackend or TestRenderBackend)
-    property backend : RenderBackend?
+    getter backend : RenderBackend?
+
+    # The surface it replaces - nil included - is released, as Widget#widget_backend= does: one release point.
+    def backend=(surface : RenderBackend?) : Nil
+      old = @backend
+      @backend = surface
+      old.try(&.dispose) unless old.same?(surface)
+    end
 
     # Track bounds from last render for change detection
     @last_rendered_bounds : Rect?
@@ -123,6 +140,14 @@ module CrymbleUI
     property widgets : Array(Widget)
     # Owner widget (e.g., WindowPanel that owns this layer)
     property owner_widget : Widget?
+    # The widget an ownerless layer is composited WITH (the drop highlight's target), or nil: the renderer
+    # puts the layer, each frame, directly after the last layer that paints the widget - so whatever covers
+    # the widget covers it too - and composites it not at all while no layer of the frame paints the widget.
+    # Its owner re-places it before every render (DragManager#follow_pointer runs in prepare_layout), so a
+    # moved, closed or replaced widget needs no check here. A re-place alone never wakes a frame (the render
+    # trigger sums owned layers); every re-place today rides an event that renders anyway - a layer that
+    # changed by itself (an animated wash) would have to feed the trigger.
+    property composite_anchor : Widget? = nil
 
     # Blit-plan: when set, render_layer uses fast path (clear + blit cached textures)
     # instead of full widget render pipeline. Used for sticky layers on scroll.
@@ -324,8 +349,8 @@ module CrymbleUI
     # margin (empty integer range) uses floor(scroll) — the sub-pixel-best whole origin, tear-free.
     def compute_buffer_origin(buffer_width : Int32, buffer_height : Int32) : Vec2
       Vec2.new(
-        compute_buffer_origin_axis(@scroll_offset.x, buffer_width, bounds.width),
-        compute_buffer_origin_axis(@scroll_offset.y, buffer_height, bounds.height)
+        compute_buffer_origin_axis(@scroll_offset.x, buffer_width, size.width),
+        compute_buffer_origin_axis(@scroll_offset.y, buffer_height, size.height)
       )
     end
 
@@ -345,8 +370,8 @@ module CrymbleUI
     # viewport, which only relaxes the clamp, so a `true` here never yields a shift (a `false` in the
     # clipped band is at worst a harmless extra recenter).
     def viewport_fits_buffer?(buffer_width : Int32, buffer_height : Int32) : Bool
-      vw = PixelSnap.cover(bounds.width)
-      vh = PixelSnap.cover(bounds.height)
+      vw = PixelSnap.cover(size.width)
+      vh = PixelSnap.cover(size.height)
       sample = viewport_sample_origin(buffer_width, buffer_height, vw, vh)
       unclamped = { PixelSnap.origin(@scroll_offset.x - @buffer_origin.x), PixelSnap.origin(@scroll_offset.y - @buffer_origin.y) }
       sample == unclamped
@@ -440,6 +465,34 @@ module CrymbleUI
       @@all_layers.delete(self)
     end
 
+    # This layer is gone: its surface is disposed, it leaves the registry, and the widgets standing on it
+    # that `root` cannot reach (with no root, none can) are released. Those fall through both teardown
+    # nets - dispose_subtree only recurses @children, and a widget a layer still lists after it left its parent's
+    # @children is not in it - and they are the bulk of a discarded panel's GPU memory: one
+    # widget_backend plus one background_backend per cell. A reachable one lives on (a layer holds widgets
+    # it does not own), so the layer lets go of it without releasing it.
+    def release(root : Widget?) : Nil
+      self.backend = nil
+      Layer.release_unreachable_widgets(self, root)
+      @widgets.clear
+      unregister
+    end
+
+    # This layer's owner has LEFT the tree, and may come back (a grid detaches a cell an adapter can hand back):
+    # its surface is disposed and it leaves the registry, but it keeps its widgets, so returning needs no rebuild.
+    # Marked for a full render on the fresh surface it gets when it is collected again (as a zoom change does).
+    def retire : Nil
+      self.backend = nil
+      reset_first_render
+      mark_needs_layout
+      unregister
+    end
+
+    # Rejoins the registry - the mirror of retire, for an owner that came back. Idempotent.
+    def register : Nil
+      @@all_layers << self
+    end
+
     # Clear all layers from registry (useful for tests)
     def self.clear_registry
       @@all_layers.clear
@@ -448,16 +501,18 @@ module CrymbleUI
     # Drop and RELEASE every widget on `layer` that `root` can no longer reach.
     #
     # Both orphan sweeps below need exactly this, because it is one rule: a widget whose parent
-    # chain no longer reaches the root can never be rendered again (the renderer walks from the
+    # chain no longer reaches the root is not rendered again from here (the renderer walks from the
     # root and from this list, and this removes it from the list), so its surfaces are dead — and
     # under SFML a surface is a driver texture the collector cannot see, which makes releasing it
-    # the only thing that frees the memory. Everything under it via @children is unreachable for
+    # the only thing that frees the memory. (A grid cell an adapter may hand back is never among them: the
+    # grid takes a cell off its layer's list when it detaches it, and releases it itself - release_detached.)
+    # Everything under it via @children is unreachable for
     # the same reason, which is what makes dispose_subtree the right instrument.
     #
     # Reachability is asked per widget rather than inferred from the layer's own state: a layer
     # holds widgets it does not own, so "this layer is dying" does not by itself mean "this widget
     # is dead".
-    private def self.release_unreachable_widgets(layer : Layer, root : Widget) : Nil
+    protected def self.release_unreachable_widgets(layer : Layer, root : Widget?) : Nil
       layer.widgets.reject! do |widget|
         orphaned = !reachable_from?(widget, root)
         widget.dispose_subtree if orphaned
@@ -467,7 +522,7 @@ module CrymbleUI
 
     # Is `widget` still part of the live tree? Walks the parent chain to `root`. A layer holds
     # widgets it does not own, so both orphan sweeps ask this before discarding anything.
-    private def self.reachable_from?(widget : Widget, root : Widget) : Bool
+    private def self.reachable_from?(widget : Widget, root : Widget?) : Bool
       current : Widget? = widget
       while current
         return true if current == root
@@ -480,25 +535,14 @@ module CrymbleUI
     # Called during app rebuild to prevent memory accumulation
     # An orphaned layer is one whose owner_widget is not in the active widget tree
     # This fixes the issue where rapid rebuilds cause @@all_layers to grow unboundedly
+    #
+    # Only OWNED layers are judged: an ownerless one (the drag ghost, the drop highlight) is in no tree by
+    # construction, lives across rebuilds, and is released by whoever created it.
     def self.cleanup_orphaned_layers(root : Widget)
       # Collect orphaned layers (can't modify Set while iterating)
-      orphaned = @@all_layers.reject { |layer| layer.in_tree?(root) }
-
-      # Remove orphaned layers and dispose their backends
+      orphaned = @@all_layers.select { |layer| layer.owner_widget && !layer.in_tree?(root) }
       orphaned.each do |layer|
-        if backend = layer.backend
-          backend.dispose # Release GPU memory
-          layer.backend = nil
-        end
-        # ALSO release the widgets STANDING on the layer. They fall through both teardown nets:
-        # dispose_subtree only recurses @children, and a layer-hosted widget (VirtualMatrix cells
-        # live in layer.widgets, not in any parent's @children) is not in it — so until now only
-        # the layer's own surface was freed while every per-widget surface on it was stranded.
-        # That is the bulk of a discarded panel's GPU memory: one widget_backend plus one
-        # background_backend per cell.
-        release_unreachable_widgets(layer, root)
-        layer.widgets.clear
-        @@all_layers.delete(layer)
+        layer.release(root)
 
         {% if flag?(:DEBUG_RENDER) %}
           puts "[LAYER CLEANUP] Removed orphaned layer: #{layer.id}"
@@ -672,7 +716,7 @@ module CrymbleUI
     def size_changed? : Bool
       last = @last_rendered_bounds
       return false if last.nil? # First render, not a "change"
-      current = bounds
+      current = size
       last.width != current.width || last.height != current.height
     end
 
@@ -681,7 +725,7 @@ module CrymbleUI
     def grew? : Bool
       last = @last_rendered_bounds
       return false if last.nil?
-      bounds.width > last.width || bounds.height > last.height
+      size.width > last.width || size.height > last.height
     end
 
     # A layer whose widgets are CachePolicy::Never partial-painters (e.g. a cursor highlight band)
@@ -693,7 +737,7 @@ module CrymbleUI
     # Check if current backend is large enough for current bounds
     def backend_fits_bounds? : Bool
       return false unless b = @backend
-      b.width >= PixelSnap.cover(bounds.width) && b.height >= PixelSnap.cover(bounds.height)
+      b.width >= PixelSnap.cover(size.width) && b.height >= PixelSnap.cover(size.height)
     end
 
     # Get last rendered bounds (for debugging)
@@ -712,10 +756,14 @@ module CrymbleUI
     end
 
     # Reset layer for recovery after exception (graceful degradation)
-    # Clears: backend, dirty_widgets, last_rendered_bounds
+    # Releases its surface; clears dirty_widgets, last_rendered_bounds and the one-shot requests a frame that
+    # raised may have left (a blit plan, a resize blit-shift) - they describe a buffer that is gone.
     # Forces full re-render on next frame
     def reset_for_recovery
-      @backend = nil
+      self.backend = nil
+      @blit_plan = nil
+      @blit_plan_render_widgets = nil
+      @resize_shift = nil
       @dirty_widgets.clear
       @last_rendered_bounds = nil
       @state = WidgetState::NeedsLayout
@@ -739,7 +787,7 @@ module CrymbleUI
     # Calculate buffer size for viewport_cache layers including cache extent
     # Buffer = viewport + 2×cache_extent (margin on each side)
     def calculate_buffer_size_with_cache : {Int32, Int32}
-      current = bounds
+      current = size
       width = (current.width + 2 * @cache_extent).ceil.to_i
       height = (current.height + 2 * @cache_extent).ceil.to_i
       {width, height}
@@ -755,7 +803,7 @@ module CrymbleUI
         # ScrollView resize storm), and NOT when the viewport merely moved (a scroll — that is the recenter's
         # blit-shift job, not a resize). A grow that still fits keeps the buffer; the recenter re-positions
         # buffer_origin (clamped so the viewport fits — see compute_buffer_origin) to avoid a shifted composite.
-        bounds.width > backend.width || bounds.height > backend.height
+        size.width > backend.width || size.height > backend.height
       else
         content_width > backend.width || content_height > backend.height
       end
@@ -777,7 +825,7 @@ module CrymbleUI
     # Get the viewport rectangle in content space
     # This represents what portion of the content is currently visible
     def viewport_rect : Rect
-      current = bounds
+      current = size
       Rect.new(@scroll_offset.x, @scroll_offset.y, current.width, current.height)
     end
 

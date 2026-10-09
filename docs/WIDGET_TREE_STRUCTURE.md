@@ -81,7 +81,7 @@ content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(WindowPanel) }
 WindowPanel includes `LayerOwner`, the required mixin for any widget that owns a rendering layer. The mixin provides:
 - `can_skip_layout?` — returns `false` while the widget has a live layer, preventing stale `layer.widgets`
 - `compute_bounds_for_layer` — default implementation; WindowPanel overrides it to return `Rect(x, y, width, height)`
-- `on_ancestor_z_index_changed` — default no-op; overridden when the widget needs to propagate z-index updates
+- `on_ancestor_raised` — default no-op; overridden when the widget's layers must repaint after its panel is raised (order follows the panel's z by itself)
 
 Any new layer-owning widget must `include LayerOwner` and create its layer in `initialize`.
 

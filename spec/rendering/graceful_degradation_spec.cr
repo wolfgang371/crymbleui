@@ -285,4 +285,18 @@ describe "Graceful Degradation" do
       button.widget_backend.should be_nil
     end
   end
+
+  it "counts frame exceptions swallowed by any renderer, and keeps the last message" do
+    before = CrymbleUI::Testing::TestRenderer.frame_exceptions_swallowed
+    2.times do
+      exploding = ExplodingWidget.new
+      app = TestApp.new
+      window = CrymbleUI::Window.new("Test", 400, 300)
+      window.add_child(exploding)
+      app.root_widget = window
+      CrymbleUI::Testing::TestRenderer.new.render_frame(app)
+    end
+    (CrymbleUI::Testing::TestRenderer.frame_exceptions_swallowed - before).should eq 2
+    CrymbleUI::Testing::TestRenderer.last_frame_exception_message.to_s.should contain("Intentional explosion")
+  end
 end

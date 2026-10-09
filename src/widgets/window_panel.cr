@@ -32,23 +32,26 @@ module CrymbleUI
         include PrimitiveBuilder
         include LayerOwner
 
-        # Pull-based layer bounds: panel bounds = self-positioned Rect(x, y, width, height)
+        # Pull-based layer bounds: panel bounds = self-positioned Rect(x, y, width, height) - the same in content
+        # and window space, as nothing above a panel scrolls.
         def compute_bounds_for_layer(layer : Layer) : Rect
+            {% if flag?(:verify_bounds) %}
+                s = enclosing_scroll
+                raise LayerSpaceError.new("panel '#{title}' under a scroller (#{s}): its rect is not window space") unless s.x == 0.0 && s.y == 0.0
+            {% end %}
             Rect.new(x, y, width, height)
         end
 
-        # The bounds DESCENDANT layers must be clipped to: the panel rectangle INSIDE
-        # its 1px border. The border is drawn fresh after content (at the panel edges),
-        # so a squeezed/overflowing child (e.g. a VirtualMatrix in a too-short panel)
-        # must be clipped one pixel in, or it overpaints the border. The compositor
-        # discovers this polymorphically (responds_to?) — it never type-checks the panel.
-        def descendant_layer_clip_bounds : Rect
+        # What the panel holds is shown INSIDE its 1px border. The border is drawn fresh after content (at the
+        # panel edges), so a squeezed/overflowing child (e.g. a VirtualMatrix in a too-short panel) must be
+        # clipped one pixel in, or it overpaints the border.
+        def clip_for(child : Widget) : Rect?
             Rect.new(x + 1, y + 1, Math.max(0.0, width - 2), Math.max(0.0, height - 2))
         end
 
-        # A WindowPanel is a compositing z-boundary: its layers (and its descendants')
-        # composite at the panel's z_index. The renderer asks this polymorphically
-        # (find_panel_z_index) instead of type-checking WindowPanel.
+        # A WindowPanel is a compositing z-boundary: among what is painted into the same layer it composites
+        # after plain content, by z_index, its descendants' layers with it (Layer.composite_order asks this
+        # polymorphically instead of type-checking WindowPanel).
         def compositing_z_index : Int32
             z_index
         end
@@ -170,8 +173,8 @@ module CrymbleUI
 
         reactive_property title : String
 
-        # Override label to return title for unique path_id
-        # This ensures find_by_path can distinguish between panels after rebuild
+        # Override label to return title for unique path_id - two id-less panels differ by title
+        # wherever a path names a widget (App#find_by_path, a panel's shortcut context)
         def label : String?
             title
         end
@@ -183,6 +186,12 @@ module CrymbleUI
 
         # Z-ordering for overlapping panels (higher = on top)
         reactive_property z_index : Int32, reconcile: true
+
+        # A new z re-orders the composite without a layout
+        def z_index=(value : Int32)
+            previous_def
+            Layer.reorder!
+        end
 
         # Close button support
         property closeable : Bool
@@ -695,9 +704,7 @@ module CrymbleUI
             # (ignoring position parameter - panels float)
             # Update internal layer (pull-based bounds reflect the live width/height)
             # Lazily create the compositing layer on first layout; carried across reconciles.
-            layer = (@internal_layer ||= Layer.new("panel_#{id}", Rect.zero, z_index: z_index, background_color: background_color, owner_widget: self))
-            # Sync layer z_index with panel z_index (important after reconciliation)
-            layer.z_index = z_index
+            layer = (@internal_layer ||= Layer.new("panel_#{id}", Rect.zero, background_color: background_color, owner_widget: self))
             # Sync layer background color with current theme (important after theme switch)
             layer.background_color = background_color
 
@@ -839,7 +846,7 @@ module CrymbleUI
             end
 
             # Check children first (front to back)
-            @children.reverse_each do |child|
+            children_in_hit_order do |child|
                 if hit = child.hit_test(point)
                     return hit
                 end
@@ -947,15 +954,17 @@ module CrymbleUI
                 new_x = point.x - drag_offset.x
                 new_y = point.y - drag_offset.y
 
-                # Constrain to window bounds (keep MIN_VISIBLE_MARGIN visible)
+                # Constrain to the panel area (keep MIN_VISIBLE_MARGIN visible): the title bar never goes under the
+                # menubar or the statusbar, which composite over panels - where it is drawn while dragging is
+                # where it lands (relayout constrains to the same area)
                 if window = find_window
-                    window_bounds = window.bounds
+                    area = window.panel_area_bounds
                     # Allow dragging left edge up to (width - MIN_VISIBLE_MARGIN) off-screen
-                    min_x = window_bounds.x - width + MIN_VISIBLE_MARGIN
-                    max_x = window_bounds.x + window_bounds.width - MIN_VISIBLE_MARGIN
-                    # Top edge must stay within window (can't drag above window)
-                    min_y = window_bounds.y
-                    max_y = window_bounds.y + window_bounds.height - title_bar_height
+                    min_x = area.x - width + MIN_VISIBLE_MARGIN
+                    max_x = area.x + area.width - MIN_VISIBLE_MARGIN
+                    # The title bar stays between the bars
+                    min_y = area.y
+                    max_y = area.y + area.height - title_bar_height
 
                     @x.set(new_x.clamp(min_x, max_x))  # in-place: hot drag loop
                     @y.set(new_y.clamp(min_y, max_y))  # in-place: hot drag loop
@@ -1162,36 +1171,17 @@ module CrymbleUI
             # Find the old topmost panel (if any) to mark it for re-render
             old_topmost = panels.find { |p| p != self && p.z_index == max_z }
 
-            # Use +10 gap to ensure front panel's base z > back panel's child layers
-            # (ScrollView uses +1 for content layer, +2 for scrollbar layer)
             new_z = max_z + 10
             if z_index != new_z
-                self.z_index = new_z  # write → setter
-                # Update layer z_index to match panel z_index (keeps visual z-order in sync with hit-test z-order)
-                if layer = @internal_layer
-                    layer.z_index = new_z
-                end
-                # Mark for render (z-order changed, need to re-render)
+                self.z_index = new_z # write → setter (re-orders the composite)
+                # Mark for render (the title bar shows the active state)
                 mark_needs_render
+                # What the panel holds repaints (blank content after a click otherwise - Issue A+B)
+                @content.notify_layer_owners_raised
 
-                # Propagate z-index to child ScrollView layers
-                # Fixes: scrollbar bleeding between overlapping panels (Issue D)
-                # Fixes: blank content after click (Issue A+B)
-                propagate_to_scrollviews(new_z)
-
-                # Mark old topmost panel for re-render so it updates its title color from active to inactive
-                # Also update its ScrollView z-indices so its scrollbar doesn't bleed through
-                if old_topmost
-                    old_topmost.mark_needs_render
-                    old_topmost.propagate_to_scrollviews(old_topmost.z_index)
-                end
+                # The old topmost panel repaints its title bar as inactive
+                old_topmost.try(&.mark_needs_render)
             end
-        end
-
-        # Propagate z-index change to child layer owners (ScrollView, etc.)
-        # Called when panel is brought to front (or when another panel takes front)
-        protected def propagate_to_scrollviews(new_z : Int32)
-          @content.notify_layer_owners_z_index_changed(new_z)
         end
 
         # Override mark_needs_render to also mark Chrome child

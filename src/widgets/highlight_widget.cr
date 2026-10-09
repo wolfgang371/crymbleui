@@ -10,7 +10,7 @@ module CrymbleUI
 
     @width : Float64
     @height : Float64
-    @color : Color
+    getter color : Color
 
     def initialize(@width, @height, @color)
       super(id: "highlight")

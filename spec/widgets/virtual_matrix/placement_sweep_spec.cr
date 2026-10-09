@@ -22,7 +22,7 @@ require "../../../src/testing/configurable_matrix_adapter"
 #   T  TOP       content is never further toward the top than plain top-alignment (Wolfgang's own
 #                statement of the rule, and the bound that makes the whole thing settle)
 #   B  BOTTOM    content is never further down than bottom-alignment: it leaves with its region
-#   S  SEEN      content is visible while its region can show it
+#   S  SEEN      content is visible while the rule's own answer is in the band
 #   X  BOX       content is never displaced outside its own box
 #
 # A fixture that trips nothing is not evidence the fixture is boring; it is evidence for those
@@ -93,21 +93,19 @@ private def build(adapter, vp_h)
   matrix
 end
 
-# The rule's own `natural_in`, mirrored (PrimitiveBuilder keeps it private). Kept to ONE line for
-# the same reason the rule is: every time this carried a term the rule had dropped, it reported
-# hundreds of violations that were its own arithmetic (3372 on 2026-09-10, then 369).
-# The rule's own `centred_in`, mirrored (PrimitiveBuilder keeps it protected). A MULTI-LINE block
-# does not come through here at all: it anchors at its region's top and scrolls out with its row
-# (UC-3), and modelling it as centred reported 496 violations that were this file's arithmetic.
+# The rule's own `centred_in`, mirrored (PrimitiveBuilder keeps it protected) - written out again on
+# purpose, so T and S judge the code's arithmetic against an independent statement of it, GIVEN the
+# region the matrix produced (its `hold` included: whether that hold is right is `one_line_hold_spec`'s
+# question, not this file's), and kept EXACTLY the rule: every time this carried a term the rule had dropped, it reported hundreds of violations
+# that were its own arithmetic (3372 on 2026-09-10, then 369; a compound branch the rule lost then
+# outlived it here until 2026-10-01). An end of the region moves in for the band by no more than the
+# region exceeds one line (`r.hold`), so a one-line region is centred where it sits and cut (UC-5).
+# A MULTI-LINE block does not come through here at all: it anchors at its region's top and scrolls
+# out with its row (UC-3), and modelling it as centred reported 496 violations of this file's own.
 private def natural_of(r, content : Float64) : Float64
-  lo, hi = r.pos, r.pos + r.size
-  if !r.compound
-    lo = Math.max(lo, r.band_lo)
-    hi = Math.min(hi, r.band_hi)
-  else
-    hi = Math.min(hi, r.band_hi)
-    lo = Math.max(lo, Math.min(r.band_lo, r.pos + r.size - (r.band_hi - r.band_lo))) if r.size > r.band_hi - r.band_lo
-  end
+  give = Math.max(0.0, r.size - r.hold)
+  lo = r.band_lo.clamp(r.pos, r.pos + give)
+  hi = r.band_hi.clamp(r.pos + r.size - give, r.pos + r.size)
   lo + Math.max(0.0, (hi - lo - content) / 2.0)
 end
 
@@ -144,7 +142,13 @@ private def capture(matrix, input) : Frame
       # rule and not a stale copy of it. It was a stale copy on 2026-09-10 and reported 3372
       # violations that were the harness's own arithmetic, the fifth instrument in this arc to
       # accuse the code and be wrong itself.
-      r ? (prims.size > 1 ? box_y + r.pos : box_y + natural_of(r, line)) : box_y,
+      # With no region (nothing can move it - a one-line row anywhere, any cell inside the band) a
+      # line is centred in its box, as the plain path places it.
+      if prims.size > 1
+        box_y + (r ? r.pos : 0.0)
+      else
+        box_y + (r ? natural_of(r, line) : Math.max(0.0, (w.bounds.height - line) / 2.0))
+      end,
       prims.size > 1 ? line * prims.size : line, band_lo, band_hi, compound_of(matrix, key), line)
   end
   Frame.new(input.to_f64, taken)
@@ -205,9 +209,10 @@ private def check(frames : Array(Frame), name : String) : Array(String)
       bad << "#{name} X #{id}: y=#{now.y.round(1)} outside box #{now.box_y.round(1)}..#{(now.box_y + now.box_h).round(1)} at #{b.input.round(0)}" if now.y < now.box_y - 1.0 || now.y > now.box_y + now.box_h + 1.0
       # S: visible WHENEVER THE RULE COULD HAVE PLACED IT SO — never "whenever its region can show
       # it", which is the pre-fix-point guarantee and asserts the opposite of UC-5. What the rule
-      # may do is bounded: a single line may not rise above its own line, a compound may rise to
-      # its span's top. If even that topmost position does not fit the band, being clipped is the
-      # correct answer and demanding otherwise would demand the tracking that #74/#75 reported.
+      # may do is bounded: a label slides in by no more than its region exceeds one line, so a
+      # one-line row's label stays where it sits. If the rule's own answer does not fit the band,
+      # being clipped is the correct answer and demanding otherwise would demand the tracking that
+      # #74/#75 reported.
       # A DEPARTING COMPOUND IS EXEMPT. Since 2026-09-10 a compound is not held at the leading edge
       # at all -- it rides its group and leaves with it (images #93-#96) -- so once its span's top
       # has passed above the band, the rule makes no promise about showing its label. The promise
@@ -221,9 +226,12 @@ private def check(frames : Array(Frame), name : String) : Array(String)
       vis_hi = Math.min(now.region_hi, now.band_hi)
       next unless vis_hi - vis_lo >= now.content
       next if now.content > now.band_hi - now.band_lo
-      next if top + now.content > now.band_hi     # cannot be made to fit from its highest place
+      # Judged by the RULE'S ANSWER, which keeps one line of its region: a label whose line the band
+      # has cut is cut with it (UC-5), wherever its box would let it go.
+      next if now.first_line + now.content > now.band_hi + 0.6
+      next if now.first_line < now.band_lo - 0.6
       next if now.region_hi - now.content < now.band_lo # its region has already left at the top
-      bad << "#{name} S #{id}: y=#{now.y.round(1)} not in band #{now.band_lo.round(0)}..#{now.band_hi.round(0)} though it could sit at #{top.round(1)} at #{b.input.round(0)}" if now.y < now.band_lo - 0.6 || now.y + now.content > now.band_hi + 0.6
+      bad << "#{name} S #{id}: y=#{now.y.round(1)} not in band #{now.band_lo.round(0)}..#{now.band_hi.round(0)} though the rule places it at #{now.first_line.round(1)} at #{b.input.round(0)}" if now.y < now.band_lo - 0.6 || now.y + now.content > now.band_hi + 0.6
     end
   end
   bad

@@ -25,24 +25,16 @@ class StressPanelDemo < CrymbleUI::App
   # Plain ivars — the flash must NOT go through app `state` (that rebuilds). @selected keys by grid prefix.
   @selected = {} of String => String # "gf" | "gs" => selected label
   @blink_on = false
-  @clock : Int32? = nil
+  @clock : CrymbleUI::Timer? = nil
 
   # One repeating clock (started on the first click). Each tick flips the phase and re-colours ONLY the
   # selected cell(s) in place — find(id) + colour setter marks that one widget for re-render, no rebuild.
   private def ensure_clock
     return if @clock
-    return unless scheduler_ready?
-    @clock = CrymbleUI::Widget.scheduler.schedule(400.milliseconds, repeating: true) do
+    @clock = every(400.milliseconds) do
       @blink_on = !@blink_on
       repaint_selected
     end
-  end
-
-  private def scheduler_ready? : Bool
-    CrymbleUI::Widget.scheduler
-    true
-  rescue
-    false
   end
 
   private def lit?(prefix : String, label : String) : Bool

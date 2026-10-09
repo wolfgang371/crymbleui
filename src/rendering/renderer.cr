@@ -8,7 +8,7 @@ module CrymbleUI
     # Render a single frame of the app
     abstract def render_frame(app : App)
 
-    # Render primitives directly (for direct drawing)
+    # Render primitives directly (for direct drawing) - no clip stack: a PushClip/PopClip raises WindowDirectClipError
     abstract def render_primitives(primitives : Array(DrawPrimitive))
 
     # Render a layer to its texture

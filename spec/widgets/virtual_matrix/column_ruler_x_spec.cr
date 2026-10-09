@@ -11,7 +11,9 @@ require "../../../src/testing/test_renderer"
 # `held_in_region` against the viewport's WIDTH. So that is what there is to guard.
 #
 # The case asserted is the X twin of #97/#98: a column WIDER than the viewport must still show its
-# label. On Y that defect was real and cost 66 off-band placements.
+# label. On Y that defect was real and cost 66 off-band placements. And the rule's other half, as on Y:
+# a column no wider than one default column (VirtualMatrix#column_extent) keeps its letter where it
+# sits, and the edge cuts both - only a wider column slides its letter, by as much as it is wider.
 private VP_W = 300
 private VP_H = 220
 
@@ -102,14 +104,13 @@ describe "the column ruler, on the X axis" do
         # 27 samples sit a pixel or two left of `band_lo`, every one of them a column on its way
         # out. What must never happen is the other end — a label placed past the right edge, where
         # it is clipped and the header simply looks empty (#97/#98 on Y).
-        # ...and only where the column's visible slice can HOLD the label. A column arriving with
-        # a sliver showing puts its label at the slice's start and lets it be clipped, appearing
-        # progressively exactly as the cells below it do; forcing it wholly into view would make it
-        # ride the edge, which is the 1:1 class of #74/#75 and #103/#104. `tall_row_visibility`
-        # scopes its Y twin the same way and for the same reason.
+        # ...and only while the column's visible slice can HOLD the label and is at least one
+        # default column wide (or the whole column, when it is narrower): a label slides in by no
+        # more than its column exceeds one default column, so below that it is cut with its column,
+        # appearing progressively exactly as the cells below it do (UC-5 on X).
         slice_lo = Math.max(col_lo, band_lo)
         slice_hi = Math.min(col_hi, band_hi)
-        next if slice_hi - slice_lo < w
+        next if slice_hi - slice_lo < Math.max(w, Math.min(col_hi - col_lo, matrix.column_extent))
         unless x + w <= band_hi + 1.0
           offband << "scroll_x #{sx}: '#{t.text}' at #{x.round(1)}..#{(x + w).round(1)}, " \
                      "band #{band_lo.round(1)}..#{band_hi.round(1)}"
@@ -130,5 +131,45 @@ describe "the column ruler, on the X axis" do
       "a column label was placed where it cannot be seen:\n  #{offband.first(6).join("\n  ")}"
     jumps.should be_empty,
       "a column label stepped:\n  #{jumps.first(6).join("\n  ")}"
+  end
+
+  # The rule's two halves, measured as the scroll carries columns across both edges: an ordinary column's
+  # letter at its rest offset in the column however far an edge has cut it; the wide column's letter (c2,
+  # 520px) in view while one default column of it shows - and, once less does, leaving with that last part.
+  it "cuts an ordinary column's letter where it sits, and a wide column gives the band only its excess" do
+    _r, matrix = wide_matrix
+    ruler = matrix.col_ruler_widget.not_nil!
+    hold = matrix.column_extent
+    ordinary_cut = 0
+    wide_held = 0
+    wide_leaving = 0
+    (0..560).each do |sx| # to the end, so c2 leaves
+      matrix.scroll_offset = CrymbleUI::Vec2.new(sx.to_f64, 0.0)
+      matrix.pre_render_flush
+      band_lo = matrix.ruler_col_width_pixels + matrix.sticky_col_width_pixels
+      band_hi = matrix.bounds.width
+      ruler.to_primitives(ruler.bounds).select(CrymbleUI::DrawText).each do |t|
+        col = t.text.lchop("c").to_i - 1
+        next if col < matrix.sticky_col_count
+        col_lo, pitch = matrix.painted_col(col)
+        col_hi = col_lo + pitch - matrix.grid_spacing
+        leading = col_lo < band_lo
+        next unless leading || col_hi > band_hi # cut by an edge
+        x = ruler.bounds.x + t.position.x
+        w = CrymbleUI::Widget.measure_text(t.text, t.size).width
+        if col_hi - col_lo <= hold
+          ordinary_cut += 1
+          (x - col_lo).should be_close((col_hi - col_lo - w) / 2.0, 0.001)
+        elsif Math.min(col_hi, band_hi) - Math.max(col_lo, band_lo) >= hold
+          wide_held += 1
+          (band_lo <= x && x + w <= band_hi).should be_true
+        else # centred in the default column of it that shows last
+          wide_leaving += 1
+          last_lo = leading ? col_hi - hold : col_lo
+          (x - last_lo).should be_close((hold - w) / 2.0, 0.001)
+        end
+      end
+    end
+    (ordinary_cut > 0 && wide_held > 0 && wide_leaving > 0).should be_true # instrument: every case reached
   end
 end

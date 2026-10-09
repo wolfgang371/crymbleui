@@ -217,7 +217,6 @@ class SFMLParityAutoTest < CrymbleUI::App
   @config = Config::A
   @phase = Phase::A_Settle
   @sub_step = 0
-  @scheduled_first = false
 
   @adapter_a = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
   @adapter_b = ParityTaskBoardAdapter.new
@@ -246,14 +245,14 @@ class SFMLParityAutoTest < CrymbleUI::App
     BG
   end
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::A_Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      CrymbleUI::CacheValidation.enable(:immediate_mode)
-      CrymbleUI::CacheValidation.clear_failures!
-      schedule(800) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    CrymbleUI::CacheValidation.enable(:immediate_mode)
+    CrymbleUI::CacheValidation.clear_failures!
+    after(800.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     window("SFML Parity Sweep", WINDOW_W, WINDOW_H) do
       case @config
       when Config::A
@@ -296,18 +295,6 @@ class SFMLParityAutoTest < CrymbleUI::App
         end
       end
     end
-  end
-
-  # ── scheduler plumbing ─────────────────────────────────────────────────────────────────────────
-  private def scheduler_ready? : Bool
-    CrymbleUI::Widget.scheduler
-    true
-  rescue
-    false
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000), &block)
   end
 
   # ── layer / widget access (config-aware) ───────────────────────────────────────────────────────
@@ -574,7 +561,7 @@ class SFMLParityAutoTest < CrymbleUI::App
     root.try(&.mark_needs_layout)
     rebuild
     @phase = next_phase
-    schedule(SWAP_MS) { run_phase }
+    after(SWAP_MS.milliseconds) { run_phase }
   end
 
   private def settle_and(next_phase : Phase)
@@ -582,7 +569,7 @@ class SFMLParityAutoTest < CrymbleUI::App
     rebuild if root.try(&.needs_layout?)
     content_layer.try(&.mark_needs_clear_and_render)
     @phase = next_phase
-    schedule(SETTLE_MS) { run_phase }
+    after(SETTLE_MS.milliseconds) { run_phase }
   end
 
   # ── the state machine ──────────────────────────────────────────────────────────────────────────
@@ -597,45 +584,45 @@ class SFMLParityAutoTest < CrymbleUI::App
       @phase = Phase::A_Diagonal
       begin_pattern
       @moves = diagonal_moves(20, 20)
-      schedule(STEP_MS) { run_phase }
+      after(STEP_MS.milliseconds) { run_phase }
 
     when Phase::A_Diagonal
       if @sub_step < @moves.size
         apply_move(@moves[@sub_step]); @sub_step += 1
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       else
-        schedule(SETTLE_MS) do
+        after(SETTLE_MS.milliseconds) do
           finalize_phase("diagonal", round_trip: true, recenter: :ignore)
           @phase = Phase::A_MultiV
           begin_pattern
           @moves = v_moves(10, 10)
-          schedule(STEP_MS) { run_phase }
+          after(STEP_MS.milliseconds) { run_phase }
         end
       end
 
     when Phase::A_MultiV
       if @sub_step < @moves.size
         apply_move(@moves[@sub_step]); @sub_step += 1
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       else
-        schedule(SETTLE_MS) do
+        after(SETTLE_MS.milliseconds) do
           finalize_phase("pure_V_multi_recenter", round_trip: true, recenter: :require)
           @phase = Phase::A_DeepV
           begin_pattern
           @moves = v_moves(24, 0) # deep, one-way: reach the row-39 band
-          schedule(STEP_MS) { run_phase }
+          after(STEP_MS.milliseconds) { run_phase }
         end
       end
 
     when Phase::A_DeepV
       if @sub_step < @moves.size
         apply_move(@moves[@sub_step]); @sub_step += 1
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       else
-        schedule(SETTLE_MS) do
+        after(SETTLE_MS.milliseconds) do
           finalize_phase("pure_V_deep_row39", round_trip: false, recenter: :require, invariant_axis: :vertical)
           @phase = Phase::B_Swap
-          schedule(STEP_MS) { run_phase }
+          after(STEP_MS.milliseconds) { run_phase }
         end
       end
 
@@ -652,17 +639,17 @@ class SFMLParityAutoTest < CrymbleUI::App
       @phase = Phase::B_HopsH
       begin_pattern
       @moves = h_moves(3, 6)
-      schedule(STEP_MS) { run_phase }
+      after(STEP_MS.milliseconds) { run_phase }
 
     when Phase::B_HopsH
       if @sub_step < @moves.size
         apply_move(@moves[@sub_step]); @sub_step += 1
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       else
-        schedule(SETTLE_MS) do
+        after(SETTLE_MS.milliseconds) do
           finalize_phase("pure_H_hops", round_trip: true, recenter: :require)
           @phase = Phase::B_Ctrl0
-          schedule(STEP_MS) { run_phase }
+          after(STEP_MS.milliseconds) { run_phase }
         end
       end
 
@@ -673,10 +660,10 @@ class SFMLParityAutoTest < CrymbleUI::App
       root.try(&.mark_needs_layout)
       content_layer.try(&.mark_needs_clear_and_render)
       rebuild if root.try(&.needs_layout?)
-      schedule(SETTLE_MS * 2) do
+      after((SETTLE_MS * 2).milliseconds) do
         finalize_phase("ctrl0_reset", round_trip: true, recenter: :ignore)
         @phase = Phase::C_Swap
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       end
 
     when Phase::C_Swap
@@ -692,24 +679,24 @@ class SFMLParityAutoTest < CrymbleUI::App
       @phase = Phase::C_SubRecenter
       begin_pattern
       @moves = v_moves(5, 5)
-      schedule(STEP_MS) { run_phase }
+      after(STEP_MS.milliseconds) { run_phase }
 
     when Phase::C_SubRecenter
       if @sub_step < @moves.size
         apply_move(@moves[@sub_step]); @sub_step += 1
-        schedule(STEP_MS) { run_phase }
+        after(STEP_MS.milliseconds) { run_phase }
       else
-        schedule(SETTLE_MS) do
+        after(SETTLE_MS.milliseconds) do
           finalize_phase("sub_recenter", round_trip: true, recenter: :forbid)
           @phase = Phase::Finish
-          schedule(STEP_MS) { run_phase }
+          after(STEP_MS.milliseconds) { run_phase }
         end
       end
 
     when Phase::Finish
       write_summary
       @phase = Phase::Done
-      schedule(300) { run_phase }
+      after(300.milliseconds) { run_phase }
 
     when Phase::Done
       quit

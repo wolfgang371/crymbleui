@@ -33,7 +33,7 @@ describe "headless shortcuts" do
     renderer.settle_rendering(app)
 
     panel = app.find("dlg").not_nil!
-    CrymbleUI::Widget.shortcut_manager.trigger("Escape", panel.path_id).should be_true
+    CrymbleUI::Widget.shortcut_manager.trigger("Escape", panel).should be_true
     app.fired.should eq(1)
   end
 end

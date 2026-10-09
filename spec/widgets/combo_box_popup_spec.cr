@@ -123,12 +123,13 @@ describe CrymbleUI::ComboBoxPopup do
             popup.layer.should_not be_nil
         end
 
-        it "layer has high z-index (1000)" do
+        it "composites among the overlays at z 1000" do
             popup = CrymbleUI::ComboBoxPopup.new
             constraints = CrymbleUI::BoxConstraints.new
             popup.layout(constraints, CrymbleUI::Vec2.zero)
 
-            popup.layer.not_nil!.z_index.should eq(1000)
+            popup.composites_as_overlay?.should be_true
+            popup.compositing_z_index.should eq(1000)
         end
     end
 

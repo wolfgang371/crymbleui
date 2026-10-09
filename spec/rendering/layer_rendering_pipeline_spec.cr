@@ -245,7 +245,7 @@ describe "Layer Rendering Pipeline" do
       layers.should contain(panel2.layer.not_nil!)
     end
 
-    it "sorts layers by z-index for rendering order" do
+    it "orders the panels' layers by their z for rendering" do
       app = TestApp.new
       window = CrymbleUI::Window.new("Test", 800, 600)
       panel1 = CrymbleUI::WindowPanel.new("P1", 100.0, 100.0, 200.0, 150.0, z_index: 10)
@@ -263,18 +263,13 @@ describe "Layer Rendering Pipeline" do
 
       layers = window.collect_all_layers
 
-      # Layers should be sorted by z-index (ascending)
-      # root(0) < panel2(5) < panel1(10) < panel3(15)
+      # Composite order: the panels by z, back to front - root, panel2 (5), panel1 (10), panel3 (15)
       layers.size.should eq(4)
-      layers[0].z_index.should be < layers[1].z_index
-      layers[1].z_index.should be < layers[2].z_index
-      layers[2].z_index.should be < layers[3].z_index
 
-      # Specific order
-      layers[0].should eq(window.root_layer.not_nil!)  # z=0
-      layers[1].should eq(panel2.layer.not_nil!)        # z=5
-      layers[2].should eq(panel1.layer.not_nil!)        # z=10
-      layers[3].should eq(panel3.layer.not_nil!)        # z=15
+      layers[0].should eq(window.root_layer.not_nil!)
+      layers[1].should eq(panel2.layer.not_nil!)
+      layers[2].should eq(panel1.layer.not_nil!)
+      layers[3].should eq(panel3.layer.not_nil!)
     end
   end
 

@@ -117,54 +117,6 @@ module CrymbleUI
             #       20.times { |i| button("Button #{i}") { } }
             #     end
             #   end
-            # Sugar over VirtualMatrix for a small static tabular view
-            # without writing a MatrixAdapter. Optional header row, optional
-            # sticky leading rows / columns, cells are any Widget.
-            #
-            # Example:
-            #   matrix(max_height: 200.0, sticky_row_count: 1, id: "summary") do |m|
-            #     m.header "Name", "Value"
-            #     rows.each do |entry|
-            #       m.row do |r|
-            #         r << text(entry.name)
-            #         r << text(entry.value.to_s)
-            #       end
-            #     end
-            #   end
-            def matrix(id : String? = nil,
-                       sticky_row_count : Int32 = 0,
-                       sticky_col_count : Int32 = 0,
-                       max_height : Float64? = nil,
-                       max_width : Float64? = nil,
-                       &block : SimpleMatrixBuilder ->)
-                ensure_container_stack
-                builder = SimpleMatrixBuilder.new
-                block.call(builder)
-                # Header row counts against sticky_row_count if set; sticky
-                # defaults to "at least the header rows" so headers stay
-                # visible when scrolling.
-                effective_sticky_rows = {sticky_row_count, builder.header_count}.max
-                adapter = SimpleMatrixAdapter.new(
-                  rows: builder.rows,
-                  sticky_row_count: effective_sticky_rows,
-                  sticky_col_count: sticky_col_count,
-                  header_row_count: builder.header_count,
-                )
-                vm = VirtualMatrix.new(adapter: adapter, id: id)
-                # Sugar defaults for the "embedded small table" use case:
-                # - shrink_to_content: don't take over the parent's space
-                # - show_rulers: false — `m.header` supplies headers
-                # - interactive_cells: false — cell widgets (Checkbox,
-                #   Button, ...) get direct clicks; no cursor navigation
-                #   or cell-highlight overlay.
-                vm.shrink_to_content = true
-                vm.show_rulers = false
-                vm.interactive_cells = false
-                vm.max_height = max_height if max_height
-                current_container.add_child(vm)
-                vm
-            end
-
             def scroll_view(id : String? = nil, direction : ScrollDirection = ScrollDirection::Vertical,
                             spacing : Float64 = 0.0, padding : Float64 = 0.0,
                             max_height : Float64? = nil, max_width : Float64? = nil,
@@ -1147,6 +1099,7 @@ module CrymbleUI
 
             # Create a drop zone container with content block
             # Background changes from background_color to hover_color when dragging over
+            # `on_drop` gets the dropped data and the WINDOW point (to place a menu or popup there)
             #
             # Example:
             #   drop_zone(accept_types: ["text"], on_drop: ->(d : DragData, p : Vec2) { puts d }) do
@@ -1273,7 +1226,7 @@ module CrymbleUI
                 # Determine context: Panel (inside a WindowPanel) or Global (root-level)
                 if panel = find_current_panel
                     # Inside a panel — panel-scoped (even if inside that panel's menubar)
-                    manager.register(shortcut_str, ShortcutContext::Panel, panel.path_id, &block)
+                    manager.register(shortcut_str, ShortcutContext::Panel, panel, &block)
                 else
                     # Root-level (including root menubar) — global
                     manager.register(shortcut_str, ShortcutContext::Global, nil, &block)

@@ -1,11 +1,22 @@
 require "./types"
 
 module CrymbleUI
+    # A scheduled timer, as App#every / App#after return it: `cancel` stops it. Cancelling a timer
+    # that has already fired (or was cancelled) does nothing.
+    struct Timer
+        def initialize(@scheduler : Scheduler, @id : Int32)
+        end
+
+        def cancel : Nil
+            @scheduler.cancel(@id)
+        end
+    end
+
     # Timer-based scheduler for animations and delayed actions
     # Manages a priority queue of timers sorted by wake time
     class Scheduler
         # Timer entry in the queue
-        private class Timer
+        private class Entry
             getter id : Int32
             property wake_time : Time::Instant  # Monotonic time
             getter interval : Time::Span?
@@ -19,12 +30,12 @@ module CrymbleUI
             end
         end
 
-        @timers : Array(Timer)
+        @timers : Array(Entry)
         @next_id : Int32
         @cancelled_ids : Set(Int32) = Set(Int32).new
 
         def initialize
-            @timers = [] of Timer
+            @timers = [] of Entry
             @next_id = 0
         end
 
@@ -37,7 +48,7 @@ module CrymbleUI
             wake_time = Time.instant + delay
             interval = repeating ? delay : nil
 
-            timer = Timer.new(id, wake_time, interval, block)
+            timer = Entry.new(id, wake_time, interval, block)
             @timers << timer
 
             # Keep sorted by wake time
@@ -86,7 +97,7 @@ module CrymbleUI
             fired_count = 0
 
             # Find all expired timers
-            expired = [] of Timer
+            expired = [] of Entry
             @timers.each do |timer|
                 break if timer.wake_time > now
                 expired << timer

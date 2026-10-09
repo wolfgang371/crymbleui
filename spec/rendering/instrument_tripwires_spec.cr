@@ -1,4 +1,5 @@
 require "spec"
+require "../spec_helper"
 
 # INSTRUMENT TRIPWIRES — incident-named, allowlist-updatable-with-justification.
 # These are NOT correctness claims about the render pipeline; each one pins the
@@ -16,10 +17,10 @@ require "spec"
 #     never issue raw GL scissor state itself. Raw glEnable/glScissor does not survive
 #     SFML's own state application inside RenderTarget#draw, so the FIRST draw after any
 #     render-target re-activation escaped its clip — cell text ran across its neighbours
-#     into empty panel space. Two textual rules: no LibGL/GL_SCISSOR_TEST in
-#     crsfml_backend.cr, and `.view =` there ONLY inside install_scissor (the view IS the
-#     clip's carrier, so setting it elsewhere silently replaces the clip — install_scissor
-#     is the single door). Headless CANNOT catch this: TestRenderBackend clips in software
+#     into empty panel space. Two textual rules: no raw GL scissor anywhere in src/ (the
+#     last raw-GL path, a dead paint context, is deleted), and `.view =` in crsfml_backend.cr
+#     ONLY inside install_scissor (the view IS the clip's carrier, so setting it elsewhere
+#     silently replaces the clip — install_scissor is the single door). Headless CANNOT catch this: TestRenderBackend clips in software
 #     with no GL context, and CI has no display, so tools/clip-containment-probe.cr never
 #     runs there. This textual guard is the only CI-visible protection the fix has.
 # (g) one clip conversion: both backends must derive the clip's device box from the
@@ -35,6 +36,17 @@ require "spec"
 #     on its blend mode, and a widget overhanging its layer clip left content in the
 #     headless buffer that production scissors away. The recurrence mode is a NEW bulk
 #     primitive bypassing the clamp; CI has no display so the SFML witness cannot see it.
+# (i) one mouse path: SFMLRenderer and TestRenderer both hand mouse presses, releases and moves
+#     to MouseDispatch. The focus a press gives lived in SFMLRenderer alone, so TestRenderer's
+#     presses never focused, and TestRenderer's moves hovered during a drag; focus now lives in
+#     App#handle_mouse_down (every path gets it), the move rule in MouseDispatch - a renderer
+#     calling App's mouse handlers itself would drift from the other again, unseen headless.
+# (j) one frame end: both renderers end render_frame with `@render_trigger.record(app)` then
+#     `app.finish_frame`, and record nowhere else. finish_frame applies the structural work of
+#     grids that did not paint (occlusion culling skipped them) before the next input; stamped
+#     after it, the trigger would absorb its marks, and a renderer that skipped it would let the
+#     next keystroke reach a grid whose cells were being replaced. SFMLRenderer's loop must not
+#     idle on the flag it returns - the one path no headless spec runs.
 
 # Replicated from pixel_snap_lint_spec.cr: strip string literals then trailing
 # comments, so a pattern can't be tripped (or hidden) by text inside a comment/string.
@@ -154,16 +166,17 @@ describe "instrument tripwires" do
   end
 
   describe "(f) clip ownership: the view carries the clip, not raw GL scissor" do
-    it "issues NO raw GL scissor state from crsfml_backend.cr" do
-      path = "src/rendering/crsfml_backend.cr"
+    it "issues NO raw GL scissor state anywhere in src/" do
       offenders = [] of String
-      File.read_lines(path).each_with_index do |raw, i|
-        code = tripwire_strip(raw)
-        next unless code.matches?(/LibGL|GL_SCISSOR_TEST/)
-        offenders << "#{path}:#{i + 1}: #{raw.strip}"
+      src_glob("src/**/*.cr").each do |path|
+        File.read_lines(path).each_with_index do |raw, i|
+          code = tripwire_strip(raw)
+          next unless code.matches?(/LibGL|GL_SCISSOR_TEST|glScissor|glEnable|0x0C11/)
+          offenders << "#{path}:#{i + 1}: #{raw.strip}"
+        end
       end
       offenders.should be_empty,
-        "CrSFMLBackend must not issue raw GL scissor state — SFML resets it inside " \
+        "Nothing may issue raw GL scissor state — SFML resets it inside " \
         "RenderTarget#draw, so the first draw after any re-activation escapes the clip. " \
         "Express the clip as the view's scissor instead. Sites found:\n  " + offenders.join("\n  ")
     end
@@ -233,7 +246,8 @@ describe "instrument tripwires" do
       # Only defs that CAN legitimately write pixels. `initialize`/`release_payload` are
       # deliberately absent: they REBIND @pixels wholesale rather than index into it, so
       # they never match below — listing them would assert a coverage this has not got.
-      allowed = {"set_pixel", "fill_span", "blit_to"}
+      # composite_rows is the kernel blit_to and blit_region_to share: it asserts its rect lies in writable_box.
+      allowed = {"set_pixel", "fill_span", "blit_to", "composite_rows"}
       # Indexed assignment, and the bulk mutators a new primitive would plausibly reach
       # for. `[^=]` after `=` so a comparison (`@pixels[i] == x`) is not a false offender.
       bulk = /@pixels\s*(\[[^\]]*\]\s*=[^=]|\.(fill|map!|to_unsafe|copy_from|\[\]=))/
@@ -254,4 +268,42 @@ describe "instrument tripwires" do
     end
   end
 
+  describe "(j) one frame end" do
+    it "ends both renderers' render_frame with record, then finish_frame, and records nowhere else" do
+      %w(src/rendering/sfml_renderer.cr src/testing/test_renderer.cr).each do |path|
+        code = File.read_lines(path).map { |l| tripwire_strip(l) }
+        records = code.each_index.select { |i| code[i].includes?("@render_trigger.record(") }.to_a
+        records.size.should eq(1), "#{path}: the render trigger is stamped #{records.size} times; once, at the frame's end"
+        code[records.first + 1].should contain("app.finish_frame"), "#{path}: finish_frame must follow the stamp"
+        # Every way out of render_frame passes end_frame: a `return` in its body comes right after one.
+        start = code.index! { |l| l.matches?(/^\s*def render_frame\b/) }
+        stop = code.index!(start + 1) { |l| l.matches?(/^\s*(private )?def /) }
+        body = code[start...stop]
+        body.count { |l| l.includes?("end_frame(app)") }.should be >= 1, "#{path}: render_frame never ends the frame"
+        body.each_with_index do |l, i|
+          next unless l.matches?(/\breturn\b/) && !l.includes?("@window")
+          body[i - 1].should contain("end_frame(app)"), "#{path}: a return in render_frame skips the frame's end"
+        end
+      end
+      sfml = File.read_lines("src/rendering/sfml_renderer.cr").map { |l| tripwire_strip(l) }.join("\n")
+      sfml.should match(/def end_frame.*?rescue ex.*?app\.report_event_exception\(ex\)/m),
+        "SFMLRenderer#end_frame must report a flush that raised - the loop runs it outside the frame's rescue"
+      sfml.should match(/unless app\.input_waits_for_frame\? \|\| @flushed_after_frame/),
+        "SFMLRenderer must not block in wait_event after a frame whose end applied work"
+    end
+  end
+
+  describe "(i) one mouse path" do
+    it "keeps both renderers off App's mouse handlers - they go through MouseDispatch" do
+      offenders = %w(src/rendering/sfml_renderer.cr src/testing/test_renderer.cr).flat_map do |path|
+        File.read_lines(path).each_with_index.compact_map do |raw, i|
+          code = tripwire_strip(raw)
+          "#{path}:#{i + 1}: #{raw.strip}" if code.matches?(/\.handle_mouse_(down|up|move)\b/)
+        end.to_a
+      end
+      offenders.should be_empty,
+        "a renderer dispatches the mouse itself instead of through MouseDispatch - the two renderers " \
+        "drift (focus on press, hover during a drag). Sites found:\n  " + offenders.join("\n  ")
+    end
+  end
 end

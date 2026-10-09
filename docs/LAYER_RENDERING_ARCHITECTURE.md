@@ -36,14 +36,65 @@ Window                       RootLayer (z=0)
 - Most widgets DON'T have layers - they render to their parent's layer
 - Only specific widgets create layers: Window, WindowPanel, Popup
 - Layer tree is SPARSE - much fewer nodes than widget tree
-- Layers form a hierarchy for organization, but render by z-index
+- Layers composite in the order of the widget tree - see [The Composite Order](#the-composite-order)
+
+### The Composite Order
+
+`Layer.composite_order(root)` (core/composite_order.cr) is the ONE order in which layers composite, back to
+front. The renderer, a frame capture (`SFMLRenderer#capture_composited_frame`), `Window#collect_all_layers` and
+`RenderDebug.dump` all use it; hit testing walks the same order backwards.
+
+- **A layer composites directly above the layer it is painted into, and below that layer's next sibling** - at
+  any depth. The layer a widget is painted into is `Widget#painting_layer`: its own `render_layer` if set (a
+  VirtualMatrix sticky header cell is painted into the sticky band), else the nearest ancestor's layer. So what
+  covers a widget covers the layers inside it: a grid's sticky header covers a scroll view nested in a cell, the
+  scroll view's scrollbar included.
+- **z orders an owner's OWN layers only** (ScrollView: content 1 < sticky 2..4 < scrollbar 5; VirtualMatrix:
+  content 1 < cursor band 2 < drag decal 3). What is painted into the content layer composites right after it,
+  before the owner's next layer - a grid's cells' layers and its chrome under its cursor band.
+- **Owners painted into the same layer X** order by (the rank X's owner gives them - `Widget#composite_rank`,
+  asked when `ranks_children?`; boundaries after plain content; a boundary's z; tree order). A VirtualMatrix
+  ranks its chrome ScrollView (sticky bands, scrollbars) over its cells; a Window ranks its own menubar and
+  statusbar over every panel.
+- **Boundaries are local**: a WindowPanel or LayerBox (`compositing_z_index`) orders by its z among what is
+  painted into the same layer - a LayerBox in a panel stays within the panel.
+- **Overlays come after the whole tree** (`composites_as_overlay?` - Popup): popups in the tree by (z, tree
+  order), then the Window's overlays by (z, opening order). The drag ghost, ownerless, is appended last by the
+  renderer; the drop highlight is inserted after its target's last layer (below).
+- **A click lands where things are drawn**: every `hit_test` that walks children walks
+  `Widget#children_in_hit_order` (the reverse of the composite child order; plain reverse order, no allocation,
+  unless the container ranks its children or holds a boundary - a Window does both); Window checks its overlays, then tree popups, then its children, each
+  front to back. Hit order and paint order agree because siblings never overlap: a plain sibling orders by tree
+  order, while an owner's layers composite after everything painted into its X - an overlapping container would
+  need an "owns a layer" tier.
+- **Re-ordering**: the renderer re-collects after a layout, and when `Layer.order_version` moved - bumped by a
+  WindowPanel, LayerBox or Popup z change (a raise re-orders without a layout).
+- **Every layer has a place**: a layer owner painted into a layer no widget owns (a stale `render_layer`, on it or
+  inherited from its cell) raises `CompositeOrderError` under `Layer.strict_nesting` (specs, checked builds); a
+  release build places it under the nearest ancestor layer that IS in the tree and counts
+  `Layer.orphaned_nestings`.
+
+```
+composite order, one frame (back to front)        a grid in a panel, a scroll view in a cell
+  window content layer
+    [plain content owners]
+    panel P (z 1)                                  <- a boundary, by z
+      grid content layer
+        cell's scroll view: content, scrollbar     <- painted into the grid content (rank 0)
+        grid chrome: content, sticky row/col/corner, scrollbar   <- rank 1: over every cell
+      grid cursor band, drag decal                 <- the grid's own later layers
+    panel Q (z 2)
+    the window's menubar, statusbar                <- rank 1 under the window: over every panel
+  popups in the tree, then opened popups (by z)
+  drag ghost
+```
 
 ### What is a Layer?
 
 ```crystal
 class Layer
   property id : String
-  property z_index : Int32           # Rendering order (higher = on top)
+  property z_index : Int32           # Order among its OWNER's layers (higher = on top); see The Composite Order
   property bounds : Rect             # Position and size in window coordinates
   property opacity : Float64         # 0.0 - 1.0
   property blend_mode : BlendMode
@@ -92,7 +143,7 @@ Every frame goes through exactly 3 phases:
 ┌──────────────────▼──────────────────────────────┐
 │  PHASE 3: COMPOSITE                             │
 │  - Copy layer textures to window                │
-│  - Apply z-index ordering, opacity, blending    │
+│  - Composite order, opacity, blending           │
 │  - Performance: O(layers) - very few layers     │
 │  - Triggered by: ALWAYS (even if no re-render)  │
 │  - Handles layer position changes               │
@@ -316,14 +367,14 @@ def on_ancestor_position_changed(delta : Vec2)    # Ancestor dragged
 def on_ancestor_resize_start                       # Ancestor resize started
 def on_ancestor_resize_move(dw, dh)               # Ancestor resizing (delta from start)
 def on_ancestor_resize_end                         # Ancestor resize ended
-def on_ancestor_z_index_changed(base_z : Int32)   # Ancestor z-index changed
+def on_ancestor_raised                             # Ancestor panel raised (repaint)
 
 # Broadcasting (call from parent widget)
 notify_layer_owners_position_changed(delta)
 notify_layer_owners_resize_start
 notify_layer_owners_resize_move(dw, dh)
 notify_layer_owners_resize_end
-notify_layer_owners_z_index_changed(new_z)
+notify_layer_owners_raised
 ```
 
 **Example**: `WindowPanel` broadcasts position changes to `@content`, which propagates to any nested `ScrollView` widgets. Each `ScrollView` updates its own layer bounds without WindowPanel needing to know about ScrollView-specific internals.
@@ -437,7 +488,7 @@ Each layer is an independent render target:
 1. **Root layer** has opaque background (window background color)
 2. **Child layers** can have transparent backgrounds (show parent layers through)
 3. **Each layer renders independently** to its own texture/backend
-4. **Compositor blits all layers** on top of each other (sorted by z-index)
+4. **Compositor blits all layers** on top of each other (in composite order)
 
 **Example: Button hover in WindowPanel**
 ```
@@ -459,7 +510,7 @@ Button hover in panel
 **When layers DO need coordination:**
 
 Layers should coordinate ONLY for structural changes:
-- Z-index changes (affects composite ordering)
+- Boundary z changes - a panel raised, a LayerBox/popup re-z'd (Layer.order_version: re-orders the composite)
 - Layer added/removed (compositor needs to know)
 - Layer opacity changes (affects alpha blending)
 
@@ -472,16 +523,17 @@ Drag-and-drop uses overlay layers to provide visual feedback without triggering 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Window                                                       │
-│  ├─ Root Layer (z=0)         ← Normal widget content        │
-│  ├─ Highlight Layer (z=1000) ← Drop zone feedback (40% opacity) │
-│  └─ Ghost Layer (z=9999)     ← Drag preview (70% opacity)   │
-└─────────────────────────────────────────────────────────────┘
+composite order, one frame (back to front)
+  Root Layer                   ← normal widget content
+  panel B's layers             ← the TARGET's panel: its content layer, then its scroll views' ...
+    Highlight Layer            ← inserted right after the last layer that paints the target
+  panel C's layers             ← a panel in front of B: covers the target AND its highlight
+  popups ...
+  Ghost Layer (z=9999)         ← drag preview (70% opacity), above everything
 ```
 
 **Components:**
-- `DragManager` - Coordinates drag operations, creates/destroys overlay layers
+- `DragManager` - Coordinates drag operations, creates the overlay layers and releases them when the drag ends
 - `Draggable` mixin - Widgets that can be dragged (`get_drag_data`, `on_drag_start/end`)
 - `DropTarget` mixin - Widgets that accept drops (`accepts_drop?`, `on_drop`)
 - `GhostWidget` - Semi-transparent preview in ghost layer
@@ -492,8 +544,35 @@ Drag-and-drop uses overlay layers to provide visual feedback without triggering 
 | Operation | Cost | Why |
 |-----------|------|-----|
 | Ghost position update | O(1) | Only `layer.bounds` changes, no re-render |
-| Drop target enter/leave | O(1) | New highlight layer created, old destroyed |
+| Drop target enter/leave | O(1) + O(target subtree) once | The one highlight layer is re-placed (or hidden between targets), never recreated; the layers painting the new target are found once (again after a re-collect) |
+| Drop target follow, per frame while a drag is active | O(depth) + O(layers) | The hit test is re-run at the still pointer (the tree may have moved under it); the highlight re-renders only when its target's visible rect, colour or opacity changed; the frame's layer list is the cached one with the highlight inserted - no re-collect, no re-sort |
 | Drag start | O(1) | Create ghost layer + one render |
+
+### Where the highlight composites
+
+The highlight shows the target as the user sees it, so it follows two rules:
+
+- **Only over what shows.** Its bounds are the target's `Widget#visible_bounds`: `viewport_bounds` cut by
+  `Widget#ancestor_clip` - every ancestor's `clip_for` the target (a scroll view's viewport, a panel's
+  interior, a popup's layer), up to the first overlay - the same clip its layers composite through. A target
+  half scrolled out is washed on the half that shows; one entirely out has no highlight.
+- **In the target's place in the stack.** The layer is not in the collected layer list. Each frame
+  `render_all_layers` inserts it into a copy, directly after the LAST layer that paints the target - its
+  containing layer plus every layer (primary and auxiliary) its subtree owns (`Layer#composite_anchor`
+  names the target). So what covers the target covers the wash: a panel in front, a grid's sticky band, a
+  popup above; and what the target contains lies under it, a scroll view's scrollbar inside it included.
+  A new target re-collects and re-sorts nothing. While no layer of the frame paints the target, the
+  highlight is composited nowhere - put on top instead, it would wash over whatever covers the target.
+
+DragManager re-places the highlight in `follow_pointer`, which runs in `prepare_layout` before every render,
+so a scrolled, closed or rebuilt-away target is handled before the renderer reads the anchor. A re-place does
+not wake a frame by itself (the render trigger sums owned layers): today every re-place rides an event that
+renders anyway. The wash is placed with the composite order's own rule (Widget#painting_layer, the target's
+subtree layers), so a target in a sticky header cell is washed over the band, and a target holding a scroll view
+in a grid cell under the header is covered by the header.
+
+The ghost and highlight layers are OWNERLESS: in no tree, they survive rebuilds (the rebuild's orphan sweep
+judges owned layers only), and DragManager releases them (`Layer#release`) when the drag ends.
 
 **Key insight:** Ghost movement is O(1) because we only update `layer.bounds`:
 
@@ -626,7 +705,7 @@ per-layer version, `content_rev` (= `scroll_rev + clear_rev + render_rev + Σ vi
 push flags (`needs_render?`/`needs_clear`), a pending resize `resize_shift`, and `size_changed?`. Crucially it
 **excludes `position_rev`**: a WindowPanel *drag* bumps only the layer's composite position, and the
 unconditional composite already re-blits the cached buffer at the pulled `bounds` (`compute_bounds_for_layer` →
-`absolute_bounds`, live parent chain). So a position-only frame skips the whole pass — the matrix drags as a
+`absolute_bounds`, live parent chain, less the enclosing scroll). So a position-only frame skips the whole pass — the matrix drags as a
 pure composite, exactly like a button panel (this was the fix for a ~90%-CPU maximized-drag). `content_rev` is
 the same per-layer sum `frame_aggregate_rev` folds for the render trigger (minus `position_rev`), so trigger
 and gate cannot drift; the stamp of "what was last rendered" lives in `clear_render_state`.
@@ -773,6 +852,46 @@ strip. It was tested and **refuted** — the renderer *clips*, it does not skip 
 special case to guard. The coherency hazards that remain are the two above: the wrong signal *channel*
 (transient vs persistent) and an *incomplete footprint release*.
 
+## Backend Lifecycle: One Owner, Release Is Real
+
+A render backend (a widget's `widget_backend` / `background_backend`, a layer's surface) holds a
+native payload under SFML - a RenderTexture - so dropping the reference frees nothing. The rules:
+
+- **`dispose` releases.** It is abstract on `RenderBackend`: the inherited no-op it replaced is what
+  let every "release GPU memory" call site free nothing for months (d8bdd09).
+- **The setter is the release point.** `Widget#widget_backend=`, `#background_backend=` and `Layer#backend=`
+  release the backend they replace - nil included - so no path drops one without freeing it (a zoom step, a
+  buffer recenter, a ScrollView exit, a tab switch, a resize, recovery: each used to strand surfaces). The
+  one write that must not release is reconciliation's TRANSFER (`copy_state_from` writes the ivar and the
+  old widget relinquishes); `initialize` is the other ivar write. `spec/core/backend_release_on_drop_spec.cr`
+  asks each path, both ways (nothing unreachable unreleased, nothing reachable released).
+- **No second holder.** A sticky layer's blit plan names a widget and the texture GENERATION it saw
+  (`BlitEntry`; `widget_backend=` moves `backend_generation` on every replace), never the texture. Nothing
+  between a plan's build and its run may replace a texture it names - a content recenter spares the sticky
+  cells, a detach voids the plan - and the blit asserts the generation it recorded still holds. A layer
+  resize creates the new surface, blits the old one into it, THEN assigns - so the old one is read before it
+  is released.
+- **Destruction happens at one point per frame.** `CrSFMLBackend#dispose` only enqueues; the
+  renderer drains the queue after `window.display` (`sfml_renderer.cr`, `CrSFMLBackend.drain_reaper`),
+  where no layer's RenderTexture is the active target. Destroying mid-render - while another layer
+  is bound - disturbs the GL state SFML tracks; a finalizer-driven destroy crashed exactly so.
+- **Use after release raises.** Anything touching the payload of a disposed backend raises
+  `DisposedBackendError`; size and counters stay answerable (`spec/rendering/disposed_backend_contract_spec.cr`).
+  The frame rescue re-raises it rather than recovering, so it is never swallowed.
+- **Teardown reaches every backend.** `dispose_subtree` walks `@children`; widgets hosted by a layer
+  (VirtualMatrix cells live in `layer.widgets`, never in a parent's `@children`) are released by
+  `Layer#release` - from `Layer.cleanup_orphaned_layers` for an owned layer whose owner left the tree,
+  from DragManager for its own two - once unreachable. Missing that second net stranded two textures per
+  cell - 160 per open/close cycle of 16 panels (`spec/core/layer_hosted_backend_release_spec.cr`).
+  Reconciliation TRANSFERS a background to the new twin (`relinquish_background_backend`) instead
+  of sharing it.
+
+**The trade.** A holder of a backend that this section does not know about - something keeping one across a
+call that may replace it - is now a use after release, which raises `DisposedBackendError` and is never
+recovered from: a crash where there used to be a silent leak. Re-read a backend through its owner; never
+keep one. Under SFML a recovered frame's releases are queued and drained after its own display (unless that display
+raised; see GRACEFUL_DEGRADATION.md).
+
 ## `buffer_origin` Reader/Writer Invariant
 
 `viewport_cache` layers carry a `buffer_origin : Vec2` that records which content coordinate sits at the
@@ -821,7 +940,7 @@ button.bounds  = Rect(110, 130, 50, 24)       # Absolute position
 
 **Used for:**
 - Layout calculations (parent → child positioning)
-- Layer positioning (where to draw cached texture)
+- A layer's CONTENT rect (`Layer#content_rect` - the origin its widgets are painted from)
 
 These are CONTENT-space positions. They are the same as window positions only while nothing
 between the widget and the root scrolls — see the next section before using them against a
@@ -848,9 +967,9 @@ a class:
 | scroller | shifts | holds still |
 |---|---|---|
 | `ScrollView` | its content widget, by `scroll_offset` | its scrollbars |
-| `VirtualMatrix` | its cells, by `scroll_offset` | sticky rows (Y) and columns (X) |
+| `VirtualMatrix` | its content cells, by `scroll_offset` | its sticky cells - it MOVES them (their bounds hold the scroll), so they shift by nothing |
 
-A matrix keeps its cells' laid-out bounds and paints them shifted exactly as a ScrollView does —
+A matrix keeps its content cells' laid-out bounds and paints them shifted exactly as a ScrollView does —
 measured: a cell stays at x=143 while the matrix scrolls 46 → 60 — so anything anchored to a cell
 (a cell editor's dropdown, a ghost, a highlight) needs this too. Teaching the hook to a new
 scroller is the whole integration.
@@ -861,7 +980,8 @@ everyone must remember:**
 1. **A widget always sees points in its own space.** `hit_test` had always worked that way
    (`ScrollView#hit_test` converts for its children); delivery does too, so the line
    every handler writes — `point - absolute_bounds` — is right by construction, scrolled or not.
-   The conversion lives in ONE place, `App`'s four dispatch sites, via `Widget#to_content`.
+   The conversion lives where points are delivered — `App`'s four dispatch sites and `DragManager`'s
+   two drop-target hooks — always via `Widget#to_content`.
 2. **Anything that LEAVES the widget tree works in window space** — a ghost, a drop highlight, a
    popup, a menu position — because it is drawn by the window, not by the scrolled layer. Those
    convert outward, explicitly, with `Widget#to_window` / `viewport_bounds`.
@@ -874,12 +994,18 @@ wrong. Concretely:
 | `ScrollView#hit_test` | converts the POINT inward | `point + scroll_offset`, then tests children's `absolute_bounds` |
 | mouse handlers (`on_mouse_down/move/up/wheel`) | receive the widget's OWN space | `App` converts with `widget.to_content(point)` before delivering |
 | `on_right_click_handler` | window | `to_window(point)` — the handler exists to place something on the screen |
-| drag ghost, drop highlight, drop-target hit test | converts the WIDGET outward | `viewport_bounds` (`drag_manager.cr`) |
+| drop-target hooks (`on_drop`, `on_drag_over`) | receive the target's OWN space | `DragManager` converts with `target.to_content(point)` before delivering |
+| a `DropZoneBox`'s `on_drop_handler` | window | `to_window(point)` — like a right-click handler, it exists to place something on the screen |
+| drop-target hit test | converts the POINT inward | `root.hit_test(point)` (`drag_manager.cr#find_drop_target`), as a click finds its widget |
+| drag ghost | converts the WIDGET outward | `viewport_bounds` (`drag_manager.cr`) |
+| drop highlight | converts the WIDGET outward, then clips | `visible_bounds` (`widget.cr`): `viewport_bounds` cut by `ancestor_clip` |
 | combo / multi-combo popups | converts the WIDGET outward | `viewport_bounds` (`popup_host.cr`) — they mount into `Window.overlays`, and the flip-above test compares against the WINDOW height |
-| a layer's bounds | converts the WIDGET outward | `compute_bounds_for_layer` → `viewport_bounds`: a layer composites onto the WINDOW, so a layer-owning widget inside a scroller must place it where it is painted |
-| foreground primitives | buffer space | `slot_axis(abs, layer.bounds, buffer_origin)` — the same rule the widget's own primitives use |
+| a layer's content rect | content | `compute_bounds_for_layer` → `absolute_bounds` (never `viewport_bounds`): `Layer#content_rect`, the origin its widgets are painted from - see below |
+| a layer's bounds | converts the LAYER outward | `Layer#bounds` = `content_rect - owner.enclosing_scroll`: where it composites onto the WINDOW |
+| a layer's composite clip | window | `owner.ancestor_clip`, through `LayerRenderer#composite_region` - see below |
+| foreground primitives | buffer space | `slot_axis(abs, layer.content_rect, buffer_origin)` — the same rule the widget's own primitives use |
 | Tab order / arrow navigation | painted | `viewport_bounds`: "the next one down" is a statement about the screen |
-| `VirtualMatrix#drag_ghost_bounds` | converts by hand | `absolute_bounds - scroll_offset`, the matrix scrolls itself |
+| `VirtualMatrix#drag_ghost_bounds` | asks the placed cells | `viewport_bounds.position + painted_rect(drag box)` - where the box is painted (its visible part) |
 
 Mixing the two costs exactly the scroll amount, and the symptom names the culprit: an overlay
 that is correct at the top of a list and drifts further down the further you scroll. That was the
@@ -889,6 +1015,56 @@ highlighted the wrong row (it never showed up while the only draggables lived in
 panels). The same walk found the combo popups, which opened at the unscrolled position AND took
 the flip-above decision there. A VirtualMatrix cell editor is NOT affected: its parent chain is
 the matrix alone, so the two spaces coincide.
+
+### A layer inside scrolled content: painted in its owner's space, composited where drawn, clipped by its scrollers
+
+A layer owner can sit in scrolled content - a ScrollView in a ScrollView, a grid in a ScrollView, a LayerBox in
+a panel's stack. Its layer has two rects, and each side of the pipeline uses its own:
+
+| | rect | who uses it |
+|---|---|---|
+| `Layer#content_rect` | the owner's rect in CONTENT space - what `compute_bounds_for_layer` returns (`absolute_bounds`-based for every owner; a WindowPanel's and the Window's rects are the same in both spaces, nothing above them scrolls - for a panel asserted under `-Dverify_bounds`; the Window is the root) | RENDER: widgets are painted at `abs - content_rect` (+ `buffer_origin`); the viewport-cache visibility window, the blit-shift slot keys, the sticky blit plans |
+| `Layer#bounds` | `content_rect - owner.enclosing_scroll`: WINDOW space | COMPOSITE: where the buffer is blitted; occlusion; the drop highlight's place |
+| `Layer#size` | the size, the same in both | size-only readers - no scroll walk |
+
+An ancestor's scroll therefore changes nothing in the buffer - it only moves the composite - and a repaint
+paints the content where it is laid out. Unscrolled, both rects are one, so an unscrolled scene renders exactly
+as before. The origin is stated in content space, never recovered from the window rect: `(a - s) + s` loses the
+last bit for some values (`scrolled_layer_space_spec`, "render origin exactly").
+
+**The composite clip is declared per child**, like the shift: `Widget#clip_for(child)` (window space, nil for no
+limit) - a layer owner clips its children to its primary layer's bounds; a `ScrollView` clips its content child
+to its viewport and not its own scrollbars; a `VirtualMatrix` clips a cell to the layer painting it and not its
+chrome ScrollView; a `WindowPanel` clips to its interior. `Widget#ancestor_clip` intersects them along the parent
+chain - all four sides, every depth. Both walks (`enclosing_scroll`, `ancestor_clip`) STOP after an overlay: a
+popup places itself in window space and is clipped by nothing above it, wherever it is parented.
+
+`LayerRenderer#composite_region(layer, clip, ...)` turns that into whole device pixels - the one rule for the
+SFML composite, the headless composite and `capture_composited_frame`: an edge the clip does not reach keeps the
+unclipped arithmetic (`snap(bounds)`, `cover(extent)`); a clipped left/top edge moves both the destination and
+the source sample; a clipped right/bottom edge shortens the extent. The viewport-cache sample is asserted on the
+unclipped rect.
+
+A layer COUNTS as what it shows (`shown_rect`: bounds cut by the clip): occlusion compares shown rects, so an
+opaque layer is never credited with covering what its clip cut away. A layer showing nothing is skipped - asked
+at ITS turn in the render loop, after the flushes of the layers before it (an owner's flush runs in its
+`render_layer`), so a layer a flush reveals - a panel's deferred resize layout, a grid's scroll - is painted in the
+frame it appears. Under `-Dverify_bounds` each rendered layer's shown rect at the composite must equal the one it
+had after its turn (`LayerSpaceError`).
+
+A flush may also change the composite SET - a grid attaching cells that own layers, or detaching them - which it
+announces with `Layer.reorder!`. The loop then re-collects the frame's list (`collect_frame_layers`: the composite
+order, the ghost, the drop highlight) and turns every layer it has not yet visited, WHEREVER it sorts (an owner with
+several layers - a grid: content, cursor and drag overlays - may flush at a later one's turn); the new layers are
+prepared (a backend, the size checks) and occlusion is decided again. Occlusion is decided before the loop and
+re-asked: at a covered layer's turn (a flush before it may have moved what covered it), and once the flushes are done
+for a layer still skipped as covered (its occluder sorts after it, so it flushes after its turn) - which then gets
+its turn. A layer is rendered at most once a frame. A layer owner is painted only in the layers it owns, never into
+a layer it merely stands on (a grid cell that is a ScrollView stands on the grid's content layer).
+
+Pinned by `spec/rendering/scrolled_layer_space_spec.cr` (headless) and `spec/autotest/scrolled_layer_space_autotest.cr`
+(SFML, window and capture); a layer owner INSIDE a grid cell by `spec/widgets/virtual_matrix/layer_owning_cell_spec.cr`
+and the loop's re-collect and re-asks by `spec/rendering/flush_changes_composite_spec.cr`.
 
 ### Widget-Local Coordinates (primitives)
 
@@ -947,8 +1123,8 @@ So primitive renders at (10, 30) within layer texture
 (negative by the cache extent, e.g. -100), so the full rule has a third term:
 
 ```
-non-viewport_cache: buffer position = abs - layer.bounds
-viewport_cache:     buffer position = abs - layer.bounds - buffer_origin      # = slot_axis()
+non-viewport_cache: buffer position = abs - layer.content_rect
+viewport_cache:     buffer position = abs - layer.content_rect - buffer_origin      # = slot_axis()
 ```
 
 `scroll_offset` does NOT appear here, and that is the point: the buffer stores CONTENT, and the
@@ -997,7 +1173,7 @@ the rendering core (`src/rendering/`), the headless instruments, the matrix blit
 | Blit destinations — SPLIT BY TARGET | compositor layer→window: `snap` · cell-texture→layer: `origin` | per the target's frame | A cell blitted INTO a layer must land on the render path's slot origin (same `origin` arithmetic) or it jumps 1px between blit-frames and render-frames; the whole-layer composite to the window snaps (half-up) like every draw position. |
 | Vector shapes: fills, lines, borders, circles | RAW (no snapping) | — | Sub-pixel BY DESIGN: the GPU rasterizes them by center coverage (the headless backend models the same rule). Snapping them would cause fill seams. Only glyph-atlas text and texture-blit destinations snap. |
 | Sizes (font size, zoom-scaled metrics like grid spacing) | RAW | their single owner | One producer, all consumers see the same value — no cross-frame invariant at stake. Migrating them would CHANGE layout at tie values (e.g. a zoom-scaled spacing hitting exactly .5). |
-| CONTENT-SPACE values (scroll grids, scroll-into-view targets, visible cell ranges) | RAW, or content-quantized via the `x.to_i.to_f64` round-trip | matrix scroll sites | Content pixels, not device pixels: the round-trip RETURNS to `Float64`, so it is never a device conversion (the lint recognizes the idiom and leaves it in scope-exempt content space). LAW: every consumer of the same content-space predicate must use the SAME quantized value — the sticky park predicates in `sticky_reposition` and `blit_plan` both compare against `scroll.to_i` per axis, so the reposition pass and the blit plan can never disagree about whether a header is parked. |
+| CONTENT-SPACE values (scroll grids, scroll-into-view targets, visible cell ranges) | RAW, or content-quantized via the `x.to_i.to_f64` round-trip | matrix scroll sites | Content pixels, not device pixels: the round-trip RETURNS to `Float64`, so it is never a device conversion (the lint recognizes the idiom and leaves it in scope-exempt content space). LAW: every consumer of the same content-space predicate must use the SAME quantized value — the sticky park predicates in `sticky_reposition` and `blit_plan` both read `VirtualMatrix#painted_scroll` (the floor of the scroll, what the content layer composites at), so the reposition pass and the blit plan can never disagree about whether a header is parked. |
 
 **FBO surface orientation (the Y-flip convention):** owned by `src/rendering/fbo_math.cr` —
 its header carries the full convention table (RenderTexture.texture is bottom-up; the window and
@@ -1496,7 +1672,8 @@ enclosed by nothing. Run the suite.
 - Background memorization becomes ambiguous (which sibling's content?)
 - Rendering order between siblings would matter (breaks declarative model)
 
-**Future relaxation**: Will allow explicit z-index for overlapping siblings, but requires careful ordering logic.
+**Relaxation today**: boundaries (a WindowPanel, a LayerBox) may overlap their siblings - they composite in their own
+layers, ordered by z (The Composite Order). Plain siblings may not.
 
 **Enforcement**:
 ```crystal
@@ -1736,7 +1913,6 @@ class TestRenderer
   getter primitive_count : Int32         # ✅ Counts rendering
   getter compositor_call_count : Int32   # ✅ Counts composites
   getter backend_clear_count : Int32     # ✅ Counts buffer clears
-  getter render_layer_count : Int32      # ✅ Counts layer render calls
   getter backend_blit_count : Int32      # ✅ Counts widget-backend blits to layer
   def layout_count : Int32               # ✅ Delegates to Widget.layout_count
 end
@@ -1770,8 +1946,7 @@ At the time of the drag bug discovery, layout was not instrumented:
 
 **Current state**: `layout_count` is implemented. `TestRenderer#layout_count` (`test_renderer.cr:39`)
 delegates to `Widget.layout_count` (a class-variable counter incremented inside `Widget#layout`).
-`render_layer_count` (`test_renderer.cr:25`) and `backend_blit_count` (`test_renderer.cr:28`) are also
-present. Do not re-add hand-rolled versions of these counters.
+`backend_blit_count` is also present; layers rendered per frame are `LayerRenderer.frame_layer_count`. Do not re-add hand-rolled versions of these counters.
 
 ### Using the Instrumentation in Tests
 
@@ -2078,7 +2253,7 @@ SFMLRenderer.render_frame(app)
         │
         └─► Composite phase
             ├─► clear_window_background()
-            └─► For each layer (sorted by z_index):
+            └─► For each layer (composite order):
                 └─► composite_layer_to_window(layer)
                     └─► Draw cached texture at NEW position ← Only this!
 ```
@@ -2246,8 +2421,9 @@ This ensures that an open popup is not lost when the DSL app rebuilds.
 
 ### Hit Testing and Click-Outside Behavior
 
-`Window.hit_test` checks overlays first (before DSL children), sorted by `z_index`
-descending, so the topmost overlay always receives clicks first.
+`Window.hit_test` checks the opened overlays first, then popups in the tree, then its children - each front to
+back, the reverse of their composite order (overlays: z, then opening order; tree popups: z, then tree order) -
+so the topmost one always receives the click.
 
 `Window.notify_overlays_of_click(point)` is called by `App` on every `mouse_down`
 event. Any `Popup` overlay whose bounds do not contain the click receives

@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.6.0**
+**Version 1.7.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~38573 LOC
-- spec/: ~75256 LOC
+- src/: ~40477 LOC
+- spec/: ~84266 LOC
 
 ## Used by
 
@@ -62,6 +62,9 @@ ghosted logo behind a resized panel -- were found by using it, not by testing it
 - **Disabled buttons and menu items** (since v0.4.0) - visual feedback, no click handling
 - **Right-click context menus** - handler bubbling up the widget tree
 - **Window title sync** - dynamic window title from root widget
+- **Headless use-case testing** (since v1.7.0) - a test Driver clicks, types, drags and reads
+  widgets by id, the way a use case reads: no window, no pixels, no coordinates. See tutorial-29.cr
+  and [Testing](docs/TESTING.md)
 - **Tabs widget** (since v1.5.0) - several pages in one panel, a tab strip on top. Every page
   is built, not just the visible one, so a hidden page keeps its widget ids and the keyboard
   shortcuts it declares keep firing for the panel
@@ -115,6 +118,114 @@ and many more in examples/
 
 ## New Features
 
+### v1.7.0
+
+#### Tutorial 29: Testing it headless
+A small to-do app and its use-case spec, which runs headless: no window, no pixels, no coordinates. The spec acts on widgets by id through the test Driver and reads what the user would see.
+
+
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+class TodoApp < CrymbleUI::App
+  record Item, number : Int32, title : String, done : Bool = false
+
+  state items : Array(Item) = [] of Item
+  state draft : String = ""
+  @next_number = 1
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 29: Testing it headless", 420, 320) do
+      vstack(spacing: 8.0, padding: 16.0) do
+        hstack(spacing: 8.0) do
+          text_input(value: draft, placeholder: "What needs doing?", width: 260.0, id: "new_title") do |value|
+            self.draft = value
+          end
+          button("Add", id: "add") { add }
+        end
+
+        items.each do |item|
+          hstack(spacing: 8.0) do
+            checkbox(item.title, checked: item.done, id: "done_#{item.number}") { toggle(item) }
+            button("Remove", id: "remove_#{item.number}") { remove(item) }
+          end
+        end
+
+        text("#{items.count { |item| !item.done }} open", id: "open_count")
+      end
+    end
+  end
+
+  private def add : Nil
+    return if draft.blank?
+    self.items = items + [Item.new(@next_number, draft.strip)]
+    @next_number += 1
+    self.draft = ""
+  end
+
+  private def toggle(item : Item) : Nil
+    self.items = items.map { |i| i.number == item.number ? i.copy_with(done: !i.done) : i }
+  end
+
+  private def remove(item : Item) : Nil
+    self.items = items.reject { |i| i.number == item.number }
+  end
+end
+
+CrymbleUI.run(TodoApp.new)
+```
+
+</details>
+
+Its use-case spec, `spec/tutorials/tutorial_29_spec.cr` - headless, part of the suite:
+
+```crystal
+require "../spec_helper"
+require "../../src/testing/driver"
+require "../../tutorials/tutorial-29"
+
+describe TodoApp do
+  it "adds items and counts the open ones" do
+    ui = CrymbleUI::Testing::Driver.new(TodoApp.new)
+
+    ui.type "new_title", "Milk"
+    ui.click "add"
+    ui.type "new_title", "Bread"
+    ui.click "add"
+
+    ui.text("done_1").should eq("Milk")
+    ui.text("done_2").should eq("Bread")
+    ui.text("new_title").should eq("")
+    ui.text("open_count").should eq("2 open")
+
+    ui.click "done_1"
+    ui.checked?("done_1").should be_true
+    ui.text("open_count").should eq("1 open")
+  end
+
+  it "keeps an item's ids when an item above it goes" do
+    ui = CrymbleUI::Testing::Driver.new(TodoApp.new)
+    ui.type "new_title", "Milk"
+    ui.click "add"
+    ui.type "new_title", "Bread"
+    ui.click "add"
+    ui.click "done_2"
+
+    ui.click "remove_1"
+
+    ui.present?("done_1").should be_false
+    ui.text("done_2").should eq("Bread")
+    ui.checked?("done_2").should be_true
+    ui.text("open_count").should eq("0 open")
+  end
+end
+```
+
+---
 ### v1.5.0
 
 #### Tutorial 28: Tabs
@@ -2240,6 +2351,112 @@ CrymbleUI.run(Tutorial28App.new)
 </details>
 
 ---
+### Tutorial 29: Testing it headless
+A small to-do app and its use-case spec, which runs headless: no window, no pixels, no coordinates. The spec acts on widgets by id through the test Driver and reads what the user would see.
+
+
+
+<details>
+<summary>View source code</summary>
+
+```crystal
+require "../src/crymble-ui"
+
+class TodoApp < CrymbleUI::App
+  record Item, number : Int32, title : String, done : Bool = false
+
+  state items : Array(Item) = [] of Item
+  state draft : String = ""
+  @next_number = 1
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 29: Testing it headless", 420, 320) do
+      vstack(spacing: 8.0, padding: 16.0) do
+        hstack(spacing: 8.0) do
+          text_input(value: draft, placeholder: "What needs doing?", width: 260.0, id: "new_title") do |value|
+            self.draft = value
+          end
+          button("Add", id: "add") { add }
+        end
+
+        items.each do |item|
+          hstack(spacing: 8.0) do
+            checkbox(item.title, checked: item.done, id: "done_#{item.number}") { toggle(item) }
+            button("Remove", id: "remove_#{item.number}") { remove(item) }
+          end
+        end
+
+        text("#{items.count { |item| !item.done }} open", id: "open_count")
+      end
+    end
+  end
+
+  private def add : Nil
+    return if draft.blank?
+    self.items = items + [Item.new(@next_number, draft.strip)]
+    @next_number += 1
+    self.draft = ""
+  end
+
+  private def toggle(item : Item) : Nil
+    self.items = items.map { |i| i.number == item.number ? i.copy_with(done: !i.done) : i }
+  end
+
+  private def remove(item : Item) : Nil
+    self.items = items.reject { |i| i.number == item.number }
+  end
+end
+
+CrymbleUI.run(TodoApp.new)
+```
+
+</details>
+
+Its use-case spec, `spec/tutorials/tutorial_29_spec.cr` - headless, part of the suite:
+
+```crystal
+require "../spec_helper"
+require "../../src/testing/driver"
+require "../../tutorials/tutorial-29"
+
+describe TodoApp do
+  it "adds items and counts the open ones" do
+    ui = CrymbleUI::Testing::Driver.new(TodoApp.new)
+
+    ui.type "new_title", "Milk"
+    ui.click "add"
+    ui.type "new_title", "Bread"
+    ui.click "add"
+
+    ui.text("done_1").should eq("Milk")
+    ui.text("done_2").should eq("Bread")
+    ui.text("new_title").should eq("")
+    ui.text("open_count").should eq("2 open")
+
+    ui.click "done_1"
+    ui.checked?("done_1").should be_true
+    ui.text("open_count").should eq("1 open")
+  end
+
+  it "keeps an item's ids when an item above it goes" do
+    ui = CrymbleUI::Testing::Driver.new(TodoApp.new)
+    ui.type "new_title", "Milk"
+    ui.click "add"
+    ui.type "new_title", "Bread"
+    ui.click "add"
+    ui.click "done_2"
+
+    ui.click "remove_1"
+
+    ui.present?("done_1").should be_false
+    ui.text("done_2").should eq("Bread")
+    ui.checked?("done_2").should be_true
+    ui.text("open_count").should eq("0 open")
+  end
+end
+```
+
+---
 
 ---
 
@@ -2266,6 +2483,7 @@ Run a specific tutorial:
 - [Rendering Pipelines](docs/RENDERING_PIPELINES.md) - Rendering pipelines, cache validation, widget author guide
 - [Reactivity](docs/REACTIVITY.md) - the pull-based, auto-capturing render model
 - [Migration](docs/MIGRATION.md) - upgrade notes & breaking changes (Source-backed reactive fields)
+- [Testing](docs/TESTING.md) - use-case specs by widget id: the test Driver
 
 ## License
 

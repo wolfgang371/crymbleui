@@ -8,14 +8,10 @@ require "../../src/dsl/builder"
 # DSL-style app: WindowPanel containing a ComboBox.
 # Creates NEW widget instances on each build() - exactly like real apps.
 #
-# Bug: sort_layers_for_compositing groups layers by parent-panel z-index.
-#   - The ComboBoxPopup's layer has owner_widget=ComboBoxPopup, whose parent=Window.
-#   - find_panel_z_index walks up: ComboBoxPopup → Window → nil → returns Int32::MIN.
-#   - The WindowPanel's layer has find_panel_z_index → WindowPanel.z_index = 1.
-#   - After sort: Int32::MIN group (Window base + popup) comes before group 1 (panel).
-#   - Compositing order: Window(z=0) → Popup(z=1000) → Panel(z=1).
-#   - The panel's texture blits OVER the popup → popup is invisible to user.
-#   - User sees no dropdown, clicks again → notify_overlays_of_click fires → collapse.
+# A ComboBox's dropdown is a ComboBoxPopup, a Window overlay: it must composite above the panel whose combo
+# opened it. Once the order grouped layers by the nearest panel's z, and the popup (no panel above it) fell in the
+# window's group, BELOW every panel - the panel's texture blitted over it, the user saw no dropdown, clicked again,
+# and notify_overlays_of_click collapsed it. Overlays now come after the whole tree (Layer.composite_order).
 #
 # The test detects this by checking PIXEL COLORS in the composited window buffer:
 #   - popup_background = #FFFFFF (white) — from light.json "popup.background"
@@ -40,17 +36,8 @@ class ComboBoxPanelApp < CrymbleUI::App
 end
 
 describe "ComboBox inside WindowPanel - compositing order" do
-  # Regression test for sort_layers_for_compositing breaking ComboBox popup visibility.
-  #
-  # With simple sort_by!(&.z_index):
-  #   popup layer (z=1000) composited AFTER panel layer (z=1) → popup visible on top ✓
-  #
-  # With sort_layers_for_compositing (buggy):
-  #   popup gets group=Int32::MIN, panel gets group=1
-  #   Int32::MIN < 1, so popup composited BEFORE panel → panel covers popup → popup invisible ✗
-  #
-  # This test checks pixel color at the popup area: popup_background (#FFFFFF) vs
-  # panel_background (#F0F0F0). These are guaranteed distinct in the light theme.
+  # Checks the pixel colour at the popup area: popup_background (#FFFFFF) vs panel_background (#F0F0F0). These are
+  # guaranteed distinct in the light theme.
   it "popup layer is composited above panel layer (popup pixels visible in window buffer)" do
     renderer = CrymbleUI::Testing::TestRenderer.new(600, 400)
     app = ComboBoxPanelApp.new
@@ -113,7 +100,7 @@ describe "ComboBox inside WindowPanel - compositing order" do
         "rgb(#{popup_bg.r},#{popup_bg.g},#{popup_bg.b}), " \
         "but got rgb(#{px.r},#{px.g},#{px.b}). " \
         "Panel bg is rgb(#{panel_bg.r},#{panel_bg.g},#{panel_bg.b}). " \
-        "Bug: sort_layers_for_compositing placed panel layer AFTER popup layer, covering it."
+        "the panel layer composited AFTER the popup layer, covering it"
     end
   end
 

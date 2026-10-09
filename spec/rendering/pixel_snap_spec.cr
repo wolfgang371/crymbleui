@@ -2,7 +2,7 @@ require "spec"
 require "../../src/rendering/pixel_snap"
 
 # PixelSnap.snap is the single position-snapping used by every SFML text draw
-# (CrSFMLBackend#draw_text, SFMLPaintContext#draw_text). Its load-bearing property is
+# (CrSFMLBackend#draw_text). Its load-bearing property is
 # TRANSLATION INVARIANCE: snap(v + n) == snap(v) + n for integer n — a widget's text
 # must land on the same device pixel whether rasterized widget-local into its own
 # texture (blitted at an integer offset) or layer-local (offset added first).

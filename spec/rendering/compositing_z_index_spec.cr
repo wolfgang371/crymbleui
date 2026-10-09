@@ -5,11 +5,9 @@ require "../../src/widgets/window_panel"
 require "../../src/core/layer_owner"
 require "../../src/dsl/primitive_builder"
 
-# The compositor orders layers by the NEAREST ancestor that
-# declares a compositing z-boundary, asked POLYMORPHICALLY (responds_to?
-# :compositing_z_index) — not by type-checking WindowPanel/LayerBox/Popup. So
-# (1) overlapping panels still order by z_index, and (2) ANY widget that opts into
-# the capability participates — impossible under the old is_a?(WindowPanel).
+# A compositing z-boundary (compositing_z_index) orders by its z among what is painted into the same layer
+# (Layer.composite_order), asked POLYMORPHICALLY (responds_to?) - not by type-checking WindowPanel/LayerBox. So
+# (1) overlapping panels order by z_index, and (2) ANY widget that opts into the capability participates.
 
 # A minimal custom layer-owning widget that declares compositing_z_index — a type
 # the renderer never heard of. Under is_a?(WindowPanel/LayerBox/Popup) its layer

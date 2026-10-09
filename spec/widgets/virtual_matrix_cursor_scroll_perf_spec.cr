@@ -323,25 +323,31 @@ end
 #
 # The placement rule ends that by design. A partially-visible cell centres its content in the part
 # you can SEE, so when the visible part moves the content must move with it: the cell is repainted
-# although its value never changed. There is no longer any such thing as a scroll frame that
-# repaints no cells, and no amount of narrowing brings one back.
+# although its value never changed. Since 2026-10-01 that is true only of cells TALLER than one line:
+# a one-line row gives the band nothing (it is cut where it sits) and carries no ink region, so a step
+# over one-line rows inside the cache margin repaints no cell at all - the Y-step below asserts it.
 #
 # What survives — and is what these specs exist to protect — is that the cost is bounded by the
-# EDGE, not by the grid or even by the viewport height. MEASURED on the 1200x800 drag fixture:
-# 3 rows of the 33 visible repaint, and they are the top band, the bottom band, and the row the step
+# EDGE, not by the grid or even by the viewport height. MEASURED on the 1200x800 drag fixture
+# (2026-09-17, before one-line rows were cut): 3 rows of the 33 visible repainted, and they are the top band, the bottom band, and the row the step
 # crosses. So the honest bound is
 #
 #     cells = (rows the step crosses + one partial row at each edge) * columns in play
 #     frame = cells + CHROME_WIDGETS
 #
-# which is O(1) in the number of rows and in the grid size. Derived, not fitted: on the 400x300
-# Y-step fixture it predicts 3*6+4 = 22 against an observed 16, and on the drag 4*14+4 = 60 against
-# observed ordinary frames of 46 and 60, with real recenters standing clear at 160..186.
+# which is O(1) in the number of rows and in the grid size - a CEILING, reached by rows whose ink
+# moves at the band (rows taller than one line). Derived, not fitted: measured before one-line rows
+# were cut (2026-09-17), the 400x300 Y-step fixture repainted 16 against 3*6+4 = 22, and the drag
+# ordinary frames of 46 and 60 against 4*14+4 = 60, with real recenters standing clear at 160..186.
 CHROME_WIDGETS = 4 # column ruler, row ruler, ScrollView, cursor overlay
-# A repainted cell draws its background, its text and its grid edges. Measured 3.7 per widget on the
-# Y-step fixture; the bound exists to catch a widget that starts emitting per-ROW or per-CELL
-# primitives, not to pin today's number.
+# A repainted cell draws its background, its text and its grid edges: 3.7 per cell, measured while the
+# Y-step still repainted its edge cells; the bound exists to catch a widget that starts emitting
+# per-ROW or per-CELL primitives, not to pin today's number.
 MAX_PRIMITIVES_PER_WIDGET = 5
+# Fixed per frame, whatever the grid: the ScrollView's two scrollbars (track, thumb and two arrows
+# each) and the cursor overlay's three rects. Measured on the Y-step fixture (2026-10-01).
+SCROLLVIEW_PRIMITIVES     = 8
+CURSOR_OVERLAY_PRIMITIVES = 3
 
 def scroll_frame_budget(matrix, scrolled_px : Float64) : Int32
   row_h = CrymbleUI::VirtualMatrix::GRID_SPACING + CrymbleUI::VirtualMatrix::DEFAULT_ROW_HEIGHT * 20
@@ -350,9 +356,25 @@ def scroll_frame_budget(matrix, scrolled_px : Float64) : Int32
   rows_touched * cols_in_play + CHROME_WIDGETS
 end
 
-# Which ROWS a frame repainted. The shape matters more than the count: the placement rule costs the
-# EDGE BANDS, so a frame that repaints rows spread through the middle is a different bug from one
-# that repaints a few more columns.
+# What a frame that repainted `widgets` may DRAW, for a grid of default-sized lines. A ruler draws a
+# background, its first edge, and a number and a line per line its band can show (a partial line at
+# each end included) - per visible LINE by nature, so it is bounded by the band, not by a per-widget
+# ratio (a frame that repaints only the chrome would otherwise carry both rulers' labels over 4
+# widgets). Then the fixed chrome, and every other repainted widget is a cell, a handful each.
+# Measured on the Y-step fixture: rulers 26 + 10 against 28 + 12, the rest exact.
+def frame_primitive_budget(matrix, widgets : Int32) : Int32
+  ruler = ->(band : Float64, pitch : Float64) { 2 + 2 * ((band / pitch).ceil.to_i + 1) }
+  rows = ruler.call(matrix.bounds.height - matrix.ruler_row_height_pixels - matrix.sticky_row_height_pixels,
+    matrix.line_extent + matrix.grid_spacing)
+  cols = ruler.call(matrix.bounds.width - matrix.ruler_col_width_pixels - matrix.sticky_col_width_pixels,
+    matrix.column_extent + matrix.grid_spacing)
+  cells = Math.max(0, widgets - CHROME_WIDGETS)
+  rows + cols + SCROLLVIEW_PRIMITIVES + CURSOR_OVERLAY_PRIMITIVES + cells * MAX_PRIMITIVES_PER_WIDGET
+end
+
+# Which ROWS a frame repainted. The shape matters more than the count: the placement rule costs at
+# most the EDGE BANDS (rows taller than a line whose ink moves), so a frame that repaints rows spread
+# through the middle is a different bug from one that repaints a few more columns.
 def repainted_rows(names : Array(String)) : Array(Int32)
   names.compact_map { |n| n =~ /\/(\d+),(\d+)$/ ? $1.to_i : nil }.uniq.sort
 end
@@ -398,48 +420,48 @@ describe "VirtualMatrix single-step cursor scroll cost", tags: "slow" do
     # can't be missed). So the real perf metric is RE-RENDERED cells, not VISITED cells; the overlap
     # cells are visited (a cheap O(1) slot-check → return nil) but never reach to_primitives or a blit.
     #
-    # TIGHT guarantee — the re-renders are the EDGE BANDS, and the budget is derived from the step
-    # rather than pinned to a number (see scroll_frame_budget). Measured here: 12 cells over exactly
-    # two rows, the top edge and the bottom edge, plus four chrome widgets.
+    # The ceiling — the re-renders are at most the EDGE BANDS, and the budget is derived from the step
+    # rather than pinned to a number (see scroll_frame_budget). Measured here: the four chrome widgets
+    # and no cell (the shape check below).
     scrolled = matrix.scroll_offset.y - old_scroll_y
     budget = scroll_frame_budget(matrix, scrolled)
     lr.frame_widget_count.should be <= budget,
       "Y-step RE-RENDERED #{lr.frame_widget_count} widgets after a #{scrolled.round(1)}px step " \
       "(budget #{budget} = edge bands x columns in play + chrome)"
-    # ...and the SHAPE: only edge rows, never the middle of the viewport. This is the assertion that
-    # would catch the placement rule being applied to fully-visible cells, which the count alone
-    # cannot distinguish from a slightly wider viewport.
+    # ...and the SHAPE: no row at all. Every row here is one line, which gives the band nothing and
+    # carries no ink region, and the step stays inside the cache margin - so the cells' cached pixels
+    # are their answer and nothing repaints but the chrome. A cell repainted here is ink that moved
+    # where the rule moves none, or a region handed to a cell that cannot use it.
     rows = repainted_rows(lr.rendered_widgets)
-    rows.size.should be <= 3,
-      "Y-step repainted #{rows.size} distinct rows #{rows} — expected the edge bands only "
+    rows.should be_empty,
+      "Y-step repainted rows #{rows} — a one-line row's cells have nothing to move "
     # LOOSE sanity guard — iteration is O(visible buffer cells) (~137 here), bounded by the viewport,
     # NOT the 1M-cell grid. This only catches a regression to O(total content); the line above is the
     # real cost bound.
     lr.frame_widgets_iterated.should be <= 300,
       "Y-step VISITED #{lr.frame_widgets_iterated} cells (expected O(visible) ~137, must stay << O(total)=1M)"
-    # Primitives follow the repainted widgets, so this is stated PER WIDGET rather than as a total:
-    # the invariant worth protecting is that no widget explodes into an unbounded number of
-    # primitives, not that a frame happens to draw 11 of them. The old total (<=55, "observed 11")
-    # was the pre-placement cell count in disguise and went red for the same reason as the budget
-    # above — more cells repaint, each drawing its own handful.
-    lr.frame_primitive_count.should be <= lr.frame_widget_count * MAX_PRIMITIVES_PER_WIDGET,
+    # Primitives follow what was repainted - the rulers' lines and the cells - so the bound is derived
+    # from those (frame_primitive_budget): the invariant worth protecting is that nothing explodes
+    # into per-row or per-cell primitives, not that a frame happens to draw 47 of them. A per-widget
+    # ratio broke when a one-line row stopped repainting at the edge (the frame then repaints only
+    # the chrome, whose rulers draw per line); a total pinned to a count breaks when cells repaint.
+    allowed = frame_primitive_budget(matrix, lr.frame_widget_count)
+    lr.frame_primitive_count.should be <= allowed,
       "Y-step drew #{lr.frame_primitive_count} primitives for #{lr.frame_widget_count} widgets " \
-      "(#{(lr.frame_primitive_count / lr.frame_widget_count.to_f).round(1)} each, budget " \
-      "#{MAX_PRIMITIVES_PER_WIDGET})"
+      "(budget #{allowed}: the rulers' visible lines, the chrome, and #{MAX_PRIMITIVES_PER_WIDGET} per cell)"
     lr.frame_layer_count.should be <= 10,
       "Y-step rendered #{lr.frame_layer_count} layers (expected <=10, observed 4)"
     lr.frame_layers_needing_render.should be <= 10,
       "Y-step had #{lr.frame_layers_needing_render} layers needing render (expected <=10, observed 4)"
     lr.frame_layers_total.should be <= 10,
       "Y-step had #{lr.frame_layers_total} total layers (expected <=10, observed 5)"
-    lr.frame_composite_count.should be <= 5,
-      "Y-step had #{lr.frame_composite_count} composites (expected <=5, observed 0)"
-    lr.frame_viewport_cache_count.should be <= 5,
-      "Y-step had #{lr.frame_viewport_cache_count} viewport cache composites (expected <=5, observed 0)"
+    # One frame composites each collected layer at most once (headless counts it as SFML does).
+    lr.frame_composite_count.should be <= lr.frame_layers_total,
+      "Y-step composited #{lr.frame_composite_count} times for #{lr.frame_layers_total} layers in one frame"
+    lr.frame_viewport_cache_count.should be <= lr.frame_composite_count,
+      "Y-step: #{lr.frame_viewport_cache_count} viewport-cache composites, more than all #{lr.frame_composite_count}"
     lr.frame_pure_container_skips.should be <= 5,
       "Y-step skipped #{lr.frame_pure_container_skips} containers (expected <=5, observed 0)"
-    renderer.render_layer_count.should be <= 5,
-      "Y-step rendered #{renderer.render_layer_count} layers via TestRenderer (expected <=5, observed 0)"
     renderer.compositor_call_count.should be <= 5,
       "Y-step had #{renderer.compositor_call_count} compositor calls (expected <=5, observed 1)"
     renderer.backend_blit_count.should be <= 15,
@@ -505,14 +527,13 @@ describe "VirtualMatrix single-step cursor scroll cost", tags: "slow" do
       "X-step had #{lr.frame_layers_needing_render} layers needing render (expected <=10, observed 4)"
     lr.frame_layers_total.should be <= 10,
       "X-step had #{lr.frame_layers_total} total layers (expected <=10, observed 5)"
-    lr.frame_composite_count.should be <= 5,
-      "X-step had #{lr.frame_composite_count} composites (expected <=5, observed 0)"
-    lr.frame_viewport_cache_count.should be <= 5,
-      "X-step had #{lr.frame_viewport_cache_count} viewport cache composites (expected <=5, observed 0)"
+    # One frame composites each collected layer at most once (headless counts it as SFML does).
+    lr.frame_composite_count.should be <= lr.frame_layers_total,
+      "X-step composited #{lr.frame_composite_count} times for #{lr.frame_layers_total} layers in one frame"
+    lr.frame_viewport_cache_count.should be <= lr.frame_composite_count,
+      "X-step: #{lr.frame_viewport_cache_count} viewport-cache composites, more than all #{lr.frame_composite_count}"
     lr.frame_pure_container_skips.should be <= 5,
       "X-step skipped #{lr.frame_pure_container_skips} containers (expected <=5, observed 0)"
-    renderer.render_layer_count.should be <= 5,
-      "X-step rendered #{renderer.render_layer_count} layers via TestRenderer (expected <=5, observed 0)"
     renderer.compositor_call_count.should be <= 5,
       "X-step had #{renderer.compositor_call_count} compositor calls (expected <=5, observed 1)"
     renderer.backend_blit_count.should be <= 15,

@@ -37,16 +37,12 @@ class VirtualMatrixDemoApp < CrymbleUI::App
     # It drives the app's OWN wheel entry point on the renderer's own loop, which is what makes the
     # numbers real: the frames are rendered by SFML, through the same event path a hand-scroll takes.
     # Never a desktop tool -- nothing outside this process touches the window.
-    @autotest_started : Bool = false
     @autotest_frames : Int32 = 0
 
-    private def start_autotest
-      return if @autotest_started
-      return unless sched = CrymbleUI::Widget.scheduler? # nil on the pre-renderer build
-      @autotest_started = true
+    def on_start
       limit = (ENV["AUTOTEST_FRAMES"]? || "150").to_i
       at = CrymbleUI::Vec2.new(700.0, 450.0)
-      sched.schedule(8.milliseconds, repeating: true) do
+      every(8.milliseconds) do
         if @autotest_frames >= limit
           quit
         else
@@ -59,9 +55,6 @@ class VirtualMatrixDemoApp < CrymbleUI::App
   {% end %}
 
   def build : CrymbleUI::Widget
-    {% if flag?(:scroll_autotest) %}
-      start_autotest
-    {% end %}
     adapter = ensure_adapter
 
     window("VirtualMatrix Demo", 1400, 900) do

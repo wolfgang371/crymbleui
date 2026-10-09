@@ -178,6 +178,14 @@ module CrymbleUI
       true
     end
 
+    # false: a click acts without taking the keyboard from where it is (a text field the app keeps
+    # typing into). Tab still reaches it. Set it each build, like the label.
+    property focus_on_click : Bool = true
+
+    def takes_focus_on_click? : Bool
+      focus_on_click
+    end
+
     # Generate primitives for rendering
     # Primitives are in widget-local coordinates (0,0 origin)
     # Renderer will add widget.bounds offset when drawing

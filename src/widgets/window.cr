@@ -1,5 +1,6 @@
 require "../dsl/primitive_builder"
 require "../core/layer"
+require "../core/composite_order"
 
 module CrymbleUI
     # Window widget - container that defines window properties
@@ -35,6 +36,16 @@ module CrymbleUI
             @root_layer = Layer.new("__window_content_#{id}", Rect.zero, z_index: 0, owner_widget: self)
         end
 
+        # The window's own menubar and statusbar composite over every panel (by position: a panel's own menubar
+        # stays in its panel).
+        def ranks_children? : Bool
+            true
+        end
+
+        def composite_rank(owner : Widget) : Int32
+            owner.parent.same?(self) && (owner.is_a?(MenuBar) || owner.is_a?(StatusBar)) ? 1 : 0
+        end
+
         # Add overlay (popup, tooltip, modal) - separate from DSL children
         def add_overlay(widget : Widget)
             widget.parent = self
@@ -58,7 +69,9 @@ module CrymbleUI
         # Notify overlays of click for click-outside-to-close behavior
         # Called by App on mouse_down events
         def notify_overlays_of_click(point : Vec2)
-            @overlays.each do |overlay|
+            # A copy: closing an overlay removes it from @overlays, and walking the live list then
+            # skipped the next one - a click outside two open popups closed only the first.
+            @overlays.dup.each do |overlay|
                 # Check if click is outside overlay bounds
                 if overlay.is_a?(Popup) && !overlay.bounds.contains_point(point)
                     overlay.on_click_outside
@@ -146,7 +159,7 @@ module CrymbleUI
             # Separate children into menubar, statusbar, layered widgets, and content
             menubar = children.find { |c| c.is_a?(MenuBar) }
             statusbar = children.find { |c| c.is_a?(StatusBar) }
-            # Own-layer widgets (WindowPanel, LayerBox, Popup) declare a compositing z-boundary
+            # Self-positioned own-layer widgets (WindowPanel, LayerBox, Popup) answer compositing_z_index
             # and render in their own layers. Ask the capability polymorphically instead of the
             # `layer != nil` proxy — that proxy is FRAME-DEPENDENT now the owners create their
             # layer lazily (nil frame-1 → content, non-nil frame-2 → layered); compositing_z_index
@@ -244,58 +257,34 @@ module CrymbleUI
             [] of DrawPrimitive
         end
 
-        # Override hit_test to respect z-ordering
-        # Check overlays first (highest z-index), then children in reverse z-order
+        # A click lands where things are drawn: the Window's overlays, then popups in the tree, then the children
+        # - each front to back, the reverse of their composite order (Layer.composite_order).
         def hit_test(point : Vec2) : Widget?
             return nil unless absolute_bounds.contains_point(point)
-
-            # First check overlays (popups, tooltips, modals) - highest z-index first
-            # Overlays are managed separately from DSL children
-            overlay_popups = @overlays.select { |o| o.is_a?(Popup) }.map(&.as(Popup))
-            overlay_popups.sort_by(&.z_index).reverse.each do |popup|
-                if hit = popup.hit_test(point)
-                    return hit
-                end
-            end
-
-            # Also check legacy popups in widget tree (for backwards compatibility)
-            # TODO: Remove once all popup users migrate to add_overlay
-            tree_popups = find_all_popups.reject { |p| @overlays.includes?(p) }
-            tree_popups.sort_by(&.z_index).reverse.each do |popup|
-                if hit = popup.hit_test(point)
-                    return hit
-                end
-            end
-
-            # Then check children in reverse z-order (highest z-index first)
-            sorted_children.reverse_each do |child|
-                if hit = child.hit_test(point)
-                    return hit
-                end
-            end
-
-            # Return self if no child was hit
+            opened = @overlays.compact_map(&.as?(Popup))
+            opened.each_with_index.to_a.sort_by! { |(p, i)| {p.z_index, i} }
+                .reverse_each { |(popup, _)| popup.hit_test(point).try { |hit| return hit } }
+            find_all_popups.reject { |p| @overlays.includes?(p) }.sort_by! { |p| {p.z_index, tree_path(p)} }
+                .reverse_each { |popup| popup.hit_test(point).try { |hit| return hit } }
+            children_in_hit_order { |child| child.hit_test(point).try { |hit| return hit } }
             self
         end
 
-        # Collect all layers for rendering (root + panels + menubar + popups)
-        # Returns layers sorted by z-index (ascending)
-        def collect_all_layers : Array(Layer)
-            # Use Layer registry for efficient O(k × d) lookup
-            # Filters to only layers in the active widget tree, sorted by z_index
-            Layer.active_layers(self).sort_by(&.z_index)
+        # Where `widget` sits in this window's tree: the child index at each level (tree order compares these
+        # as the composite order's walk visits them).
+        private def tree_path(widget : Widget) : Array(Int32)
+            path = [] of Int32
+            node = widget
+            while (parent = node.parent) && !node.same?(self)
+                path.unshift(parent.children.index(node) || -1)
+                node = parent
+            end
+            path
         end
 
-        # Get children sorted by z_index (lowest to highest)
-        # Content first, then panels, then MenuBar on top
-        # (Popups are rendered separately - they're not direct Window children)
-        def sorted_children : Array(Widget)
-            menubar = children.select { |c| c.is_a?(MenuBar) }
-            panels = children.select { |c| c.is_a?(WindowPanel) }.map(&.as(WindowPanel)).reject(&.closed)
-            content = children.reject { |c| c.is_a?(MenuBar) || c.is_a?(WindowPanel) }
-
-            # Content first (bottom), panels (sorted by z_index), MenuBar last (top)
-            content + panels.sort_by(&.z_index) + menubar
+        # Every layer of this window's tree, in composite order (back to front) - the renderer's order
+        def collect_all_layers : Array(Layer)
+            Layer.composite_order(self)
         end
 
         # Get menubar child for direct compositing

@@ -65,10 +65,19 @@ class TestDropTarget < CrymbleUI::Widget
   end
 end
 
-# Simple concrete widget for testing (root container)
+# A drop target that refuses by raising, as embrace's configurator does for a move it cannot make.
+class RefusingDropTarget < TestDropTarget
+  def on_drop(data : CrymbleUI::DragData, position : CrymbleUI::Vec2)
+    raise "cannot move that here"
+  end
+end
+
+# Simple concrete widget for testing (root container), laid out as a root always is - the drop
+# search starts from a hit test, which needs the root's bounds.
 class TestContainerWidget < CrymbleUI::Widget
   def initialize
     super(id: nil)
+    @bounds = CrymbleUI::Rect.new(0, 0, 800, 600)
   end
 
   def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
@@ -271,6 +280,23 @@ describe CrymbleUI::DragManager do
       target.drop_position.should eq(drop_pos)
     end
 
+    it "ends the drag even when the target refuses by raising in on_drop" do
+      manager = CrymbleUI::DragManager.new
+      draggable = TestDraggableWidget.new("hello")
+      draggable.perform_layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(800, 600)), CrymbleUI::Vec2.new(10, 10))
+      target = RefusingDropTarget.new
+      target.perform_layout(CrymbleUI::BoxConstraints.loose(CrymbleUI::Size.new(800, 600)), CrymbleUI::Vec2.new(200, 200))
+      root = TestContainerWidget.new
+      root.add_child(draggable)
+      root.add_child(target)
+      manager.begin_drag_tracking(draggable, CrymbleUI::Vec2.new(20, 20))
+      manager.update_drag(CrymbleUI::Vec2.new(30, 30), root)
+      manager.update_drag(CrymbleUI::Vec2.new(250, 250), root)
+      manager.state.active?.should be_true # control: the drag is live and over the target
+      expect_raises(Exception, "cannot move that here") { manager.end_drag(CrymbleUI::Vec2.new(250, 250)) }
+      manager.state.phase.idle?.should be_true # else the next drag cannot start
+    end
+
     it "rejects incompatible data types" do
       manager = CrymbleUI::DragManager.new
 
@@ -362,5 +388,88 @@ describe CrymbleUI::DragState do
 
     # More than 5 pixels
     state.passed_threshold?(CrymbleUI::Vec2.new(20, 20)).should be_true
+  end
+end
+
+# A drag source that logs its hooks and offers what it is given.
+private class HookedDraggable < CrymbleUI::Widget
+  include CrymbleUI::Draggable
+  getter log = [] of String
+  property offer : CrymbleUI::DragData?
+
+  def initialize(@offer : CrymbleUI::DragData? = nil, id : String = "src")
+    super(id: id)
+  end
+
+  def get_drag_data : CrymbleUI::DragData?
+    @offer
+  end
+
+  def on_drag_start(data : CrymbleUI::DragData)
+    @log << "start"
+  end
+
+  def on_drag_end(data : CrymbleUI::DragData, dropped : Bool)
+    @log << "end"
+  end
+
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    CrymbleUI::Size.new(100, 50)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(100, 50))
+  end
+
+  def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    [] of CrymbleUI::DrawPrimitive
+  end
+end
+
+private def rooted(*children : CrymbleUI::Widget) : CrymbleUI::Widget
+  root = CrymbleUI::VStack.new(id: "root")
+  children.each { |c| root.add_child(c) }
+  root
+end
+
+# A rebuild replaces the source of a drag still PENDING: the payload is the gesture's, taken from the source
+# that was pressed (DragManager#rebind). Each case names the mutation that turns it red.
+describe "DragManager: a rebuild during a pending drag" do
+  # Mutation: cancel_drag calls on_drag_end for a pending drag - it never announced itself.
+  it "cancels a pending drag holding a payload without a drag end" do
+    old = HookedDraggable.new(CrymbleUI::TextDragData.new("x"))
+    rooted(old)
+    manager = CrymbleUI::DragManager.new
+    manager.begin_drag_tracking(old, CrymbleUI::Vec2.new(20, 20))
+    fresh = HookedDraggable.new # the rebuilt instance offers nothing
+    manager.rebind { |w| w.same?(old) ? fresh : nil } # the rebuild replaced the pressed one with `fresh`
+    manager.state.source_widget.same?(fresh).should be_true # instrument: the source was replaced
+    manager.payload.as(CrymbleUI::TextDragData).text.should eq("x") # the pressed one's payload
+    manager.cancel_drag
+    fresh.log.should be_empty
+    old.log.should be_empty
+  end
+
+  # Mutation: take the payload after the re-find (still from the old source) - its widget is not re-pointed.
+  it "re-points a widget payload at the rebuilt widget" do
+    old = HookedDraggable.new
+    old.offer = CrymbleUI::WidgetDragData.new(old)
+    rooted(old)
+    manager = CrymbleUI::DragManager.new
+    manager.begin_drag_tracking(old, CrymbleUI::Vec2.new(20, 20))
+    fresh = HookedDraggable.new
+    manager.rebind { |w| w.same?(old) ? fresh : nil } # the rebuild replaced the pressed one with `fresh`
+    manager.payload.as(CrymbleUI::WidgetDragData).widget.same?(fresh).should be_true
+  end
+
+  # Mutation: drag_onto continuing any pending drag - it continues only the one pressed on this source.
+  it "refuses to drag another source while one is pending" do
+    a = HookedDraggable.new(CrymbleUI::TextDragData.new("a"), id: "a")
+    b = HookedDraggable.new(CrymbleUI::TextDragData.new("b"), id: "b")
+    target = TestDropTarget.new
+    rooted(a, b, target)
+    manager = CrymbleUI::DragManager.new
+    manager.begin_drag_tracking(a, CrymbleUI::Vec2.new(20, 20))
+    expect_raises(Exception, /in progress/) { manager.drag_onto(b, target, CrymbleUI::Vec2.new(20, 120)) }
   end
 end

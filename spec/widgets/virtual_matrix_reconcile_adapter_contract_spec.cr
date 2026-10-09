@@ -32,6 +32,7 @@ private class ContractAdapter
 
   property row_count_val : Int32
   property col_count_val : Int32
+  property merged = false # rows 2-3 of column 3 as one cell - case (g) splits it
 
   def initialize(@row_count_val : Int32, @col_count_val : Int32)
   end
@@ -46,6 +47,11 @@ private class ContractAdapter
 
   def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
     TestVisibleCell.new("R#{row}C#{col}")
+  end
+
+  def cell_get_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+    return { {2, 3}, {3, 3} } if @merged && col == 3 && (row == 2 || row == 3)
+    { {row, col}, {row, col} }
   end
 end
 
@@ -79,6 +85,25 @@ end
 
 private def content_backend(matrix : CrymbleUI::VirtualMatrix) : CrymbleUI::Testing::TestRenderBackend
   matrix.content_layer.not_nil!.backend.as(CrymbleUI::Testing::TestRenderBackend)
+end
+
+# The content-buffer pixels of the gutter band below `cell`, `from` px under its top and grid_spacing tall,
+# sampled every 4px across. A sample outside the buffer is dropped, so the caller's size check sees it.
+private def band_pixels(matrix : CrymbleUI::VirtualMatrix, cell : CrymbleUI::Widget, from : Float64) : Array(CrymbleUI::Color)
+  layer = matrix.content_layer.not_nil!
+  backend = content_backend(matrix)
+  out = [] of CrymbleUI::Color
+  top = cell.absolute_bounds.y + from
+  (0...matrix.grid_spacing).each do |dy|
+    x = cell.absolute_bounds.x + 2.0
+    while x <= cell.absolute_bounds.x + cell.bounds.width - 2.0
+      bx = (x - layer.bounds.x - layer.buffer_origin.x).to_i
+      by = (top + dy - layer.bounds.y - layer.buffer_origin.y).to_i
+      backend.get_pixel(bx, by).try { |px| out << px }
+      x += 4.0
+    end
+  end
+  out
 end
 
 # This file provokes the contract violation on purpose and asserts the SELF-HEAL, not the message.
@@ -221,6 +246,7 @@ describe "VirtualMatrix reconcile adapter contract", tags: "slow" do
 
   # (f) The mid-drag carry: a rebuild landing between mouse_down and mouse_up must keep
   # the in-flight width (adapter-side persistence only happens at mouse_up).
+
   it "(f) mid-drag rebuild keeps the in-flight column width" do
     app = ContractHeldAdapterApp.new
     renderer, matrix = contract_setup(app)
@@ -240,4 +266,40 @@ describe "VirtualMatrix reconcile adapter contract", tags: "slow" do
 
     app.handle_mouse_up(CrymbleUI::Vec2.new(CONTRACT_COL_BORDER_0 + 40.0, 10.0))
   end
+
+  # (g) The supported path for a structural change that keeps the row and column COUNT: a 2-row merge
+  # splits into two rows, ANNOUNCED before the rebuild - in either legal ordering. The split vacates
+  # the gutter band between the two rows (cells sit at pitch minus grid_spacing); the announce is what
+  # repaints it (it marks the matrix for layout, so the carried layer takes a full-render clear, and its
+  # flush clears every VM layer - either route alone suffices). Unannounced, the band keeps the old
+  # cell's fill - measured 75 of 75 pixels: the contract violation's consequence, which is why the
+  # contract says announce. RED: the adapter's invalidate_all! as a no-op fails both orderings (75).
+  {% for order in [{"g1", false, "rebuild"}, {"g2", true, "flushed frame"}] %}
+  it "({{order[0].id}}) an announced same-count un-merge repaints the vacated gutter band, {{order[2].id}} first" do
+    app = ContractHeldAdapterApp.new
+    app.held_adapter.merged = true
+    renderer, matrix = contract_setup(app)
+    backend = content_backend(matrix)
+    background = matrix.content_layer.not_nil!.background_color
+    # Precondition: rows 2-3 are one cell, and the band that will be vacated is painted with its fill.
+    merged = matrix.active_cells[{2, 3}]
+    single = (merged.bounds.height + matrix.grid_spacing) / 2 - matrix.grid_spacing # one row's cell: the band starts there
+    painted = band_pixels(matrix, merged, single)
+    painted.size.should be >= 60 # every sampled pixel lies in the buffer - measured: 75
+    painted.count { |px| px != background }.should eq painted.size
+
+    app.held_adapter.merged = false
+    app.held_adapter.invalidate_all!
+    renderer.settle_rendering(app) if {{order[1]}}
+    app.rebuild
+    renderer.settle_rendering(app)
+
+    new_matrix = app.find("contract_grid").as(CrymbleUI::VirtualMatrix)
+    content_backend(new_matrix).should be backend # oracle self-validation: the SAME retained buffer
+    top = new_matrix.active_cells[{2, 3}]
+    band = band_pixels(new_matrix, top, top.bounds.height)
+    band.size.should eq painted.size # the same band, all of it inside the buffer
+    band.count { |px| px != background }.should eq 0
+  end
+  {% end %}
 end

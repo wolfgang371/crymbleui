@@ -89,6 +89,8 @@ module CrymbleUI
         # is O(content·depth) — the shape of the resize regression a per-frame grow walk re-introduced
         # (the repaint marking walk). This counter guards the grow path against re-introducing an
         # O(content) absolute_bounds storm: a pure grow must call it O(1) in content size, not O(n).
+        # It counts parent-chain STEPS, one per level, in every geometry walk - absolute_bounds (a call
+        # per level), viewport_bounds, enclosing_scroll, ancestor_clip - so walks compare by what they cost.
         @@absolute_bounds_count : Int32 = 0
 
         # mark_needs_render PROPAGATION instrumentation. Each call walks the parent chain to a
@@ -270,10 +272,13 @@ module CrymbleUI
         # Use with draw_text() which automatically compensates for SFML local_bounds offsets
         # How many distinct strings a per-string memo may retain before it is dropped
         # wholesale. Dynamic text (cell values, labels a user types) has no natural bound, so
-        # an unbounded memo grows for the life of the process; a full clear rather than an LRU
-        # because the working set is whatever is on screen and repopulates in one frame.
+        # an unbounded memo grows for the life of the process; a full clear rather than an LRU.
+        # It must still hold a WHOLE TABLE: auto-size measures every cell, not only the ones on
+        # screen, and a table larger than the limit clears the memo in the middle of every pass,
+        # so each re-measure measured every cell again - measured on 3000 rows x 11 columns
+        # (~33,000 strings), a re-measure took 455 ms at 20,000 and 85 ms at this limit.
         # Shared by every memo keyed on a string — see CrymbleUI::TextLines.
-        TEXT_MEMO_LIMIT = 20_000
+        TEXT_MEMO_LIMIT = 200_000
 
         def self.measure_text(text : String, size : Float64) : Size
             return Size.new(0.0, 0.0) unless font = @@font
@@ -338,7 +343,7 @@ module CrymbleUI
             @@measure_count += 1
         end
 
-        # Get absolute_bounds invocation count for testing
+        # Parent-chain steps counted so far (see @@absolute_bounds_count)
         def self.absolute_bounds_count : Int32
             @@absolute_bounds_count
         end
@@ -451,14 +456,16 @@ module CrymbleUI
         # `pos`/`size` are the REGION the content names — its line, or a whole span for a compound
         # header, which is NOT the same as the box once that box has been pinned. `band_lo`/
         # `band_hi` are the part of the world on screen. nil is not "no adjustment": it means "my
-        # region IS my box, and all of it is visible", so a widget that loses this silently starts
-        # placing against a different region. A compound must never be without one.
+        # region IS my box, and nothing can move it" - all of it visible, or no taller than one line
+        # (`hold`) - so a widget that loses this silently starts placing against a different region.
+        # A compound must never be without one. `hold` is one default line's box: the part of the
+        # region the band never takes (PrimitiveBuilder#centred_in).
         #
         # `compound` says the region is a GROUP of lines rather than one. THE PLACEMENT RULE DOES
         # NOT READ IT — `centred_in` treats every region identically, and stopped taking the flag
         # at all on 2026-09-11. What reads it is the carrier gate (VirtualMatrix#ink_region_for): a
-        # one-line region withdraws when it sits wholly inside the band, because the widget's own
-        # answer is then the rule's answer, while a compound must keep its region wherever it sits,
+        # one-line region withdraws when nothing can move it, because the widget's own answer is
+        # then the rule's answer, while a compound must keep its region wherever it sits,
         # since its span is not its box and losing it would switch the label to being placed
         # against the box (measured as a 6px jump for 1px of scroll).
         #
@@ -473,7 +480,7 @@ module CrymbleUI
         # the geometry until 2026-09-11 (`region reaches outside box`), which is the same answer
         # only by luck: a pinned box whose span happens to fit reads as unpinned.
         record InkRegion, pos : Float64, size : Float64, band_lo : Float64, band_hi : Float64,
-          compound : Bool = false, pinned : Bool = false
+          hold : Float64, compound : Bool = false, pinned : Bool = false
 
         property ink_region : InkRegion? = nil
 
@@ -505,21 +512,96 @@ module CrymbleUI
         # ONE walk, like `absolute_bounds`: sum the chain and subtract what each parent shifts its
         # child by, so this costs the same as the position it corrects.
         def viewport_bounds : Rect
-            Widget.increment_absolute_bounds_count  # same parent walk, same budget
+            Widget.increment_absolute_bounds_count # one per step of the walk, as absolute_bounds counts
             x = @bounds.x
             y = @bounds.y
+            shifting = !Layer.overlay?(self) # nothing above an overlay shifts it (it places itself in window space)
             node : Widget = self
             current = @parent
             while current
+                Widget.increment_absolute_bounds_count
                 x += current.bounds.x
                 y += current.bounds.y
-                shift = current.paint_shift_for(node)
-                x -= shift.x
-                y -= shift.y
+                if shifting
+                    shift = current.paint_shift_for(node)
+                    x -= shift.x
+                    y -= shift.y
+                    shifting = !Layer.overlay?(current)
+                end
                 node = current
                 current = current.parent
             end
             Rect.new(x, y, @bounds.width, @bounds.height)
+        end
+
+        # Does this widget rank the layer owners painted into its layers (composite_rank)? Most do not, and the
+        # hit test takes its fast path over their children.
+        def ranks_children? : Bool
+            false
+        end
+
+        # Where `owner`, painted into one of this widget's layers, composites among the others painted there:
+        # a higher rank comes later (on top). Asked only when ranks_children?.
+        def composite_rank(owner : Widget) : Int32
+            0
+        end
+
+        # The layer this widget is PAINTED into: its own render_layer if it has one (a sticky header cell is
+        # painted into the sticky band), else the nearest ancestor's layer, or its render_layer. What the
+        # composite order nests this widget's own layers under, and what a drop highlight over it follows.
+        def painting_layer : Layer?
+            if own = render_layer
+                return own
+            end
+            node = @parent
+            while node
+                if l = node.layer || node.render_layer
+                    return l
+                end
+                node = node.parent
+            end
+            nil
+        end
+
+        # The part of this widget the compositor SHOWS, in window coordinates, or nil when none of it shows: its
+        # viewport_bounds cut by ancestor_clip.
+        def visible_bounds : Rect?
+            rect = viewport_bounds
+            if clip = ancestor_clip
+                rect = rect.intersection(clip) || return nil
+            end
+            rect
+        end
+
+        # The window rect `child` is shown within, or nil for no limit. Per CHILD, like paint_shift_for, because
+        # one widget clips one child and not another: a ScrollView clips its content, not its own scrollbars. By
+        # default a layer owner clips what it contains to its layer.
+        def clip_for(child : Widget) : Rect?
+            layer.try(&.bounds)
+        end
+
+        # Where this widget can show at all, in window space: the intersection of every ancestor's clip_for along
+        # the chain, up to the first overlay (a popup is clipped by nothing above it) - or nil for no limit. A
+        # clip that excludes everything is an EMPTY rect, never nil. What the compositor clips a layer to (its
+        # owner's ancestor_clip) and what visible_bounds cuts by. `memo` shares the walk between the widgets of one
+        # phase (a frame's occlusion, its composite): each widget's clip is computed once.
+        def ancestor_clip(memo : Hash(Widget, Rect?)? = nil) : Rect?
+            return nil if Layer.overlay?(self)
+            parent = @parent || return nil
+            if m = memo
+                return m[self] if m.has_key?(self)
+            end
+            Widget.increment_absolute_bounds_count
+            clip = Widget.intersect_clips(parent.ancestor_clip(memo), parent.clip_for(self))
+            memo.try { |m| m[self] = clip }
+            clip
+        end
+
+        # nil is no limit; an empty intersection is an empty rect (at the first rect's corner), not nil.
+        def self.intersect_clips(a : Rect?, b : Rect?) : Rect?
+            return b unless a
+            return a unless b
+            a.intersection(b) || Rect.new(a.x, a.y, 0.0, 0.0)
         end
 
         # How much THIS widget shifts the given child when painting it. A widget that scrolls its
@@ -527,21 +609,24 @@ module CrymbleUI
         # position is its laid-out position minus this. Default: nothing moves.
         #
         # Per-CHILD, not per-widget, because the same parent shifts one child and not another: a
-        # ScrollView's scrollbars stay put while its content scrolls, and a matrix's sticky rows
-        # and columns hold one axis still. Only the shifting widget knows which is which.
+        # ScrollView's scrollbars stay put while its content scrolls, and a matrix's sticky cells
+        # are moved by the matrix itself (their bounds hold the scroll). Only the shifting widget
+        # knows which is which.
         def paint_shift_for(child : Widget) : Vec2
             Vec2.zero
         end
 
         # The shift a point must cross between this widget's space and the window's: the sum of
-        # `paint_shift_for` along the parent chain. `to_window` subtracts it, `to_content` adds it
-        # back, and they are inverses, so there is no third rule to get wrong.
-        protected def enclosing_scroll : Vec2
+        # `paint_shift_for` along the parent chain, up to the first overlay (a popup places itself in window
+        # space: nothing above it shifts it). `to_window` subtracts it, `to_content` adds it back, and they are
+        # inverses, so there is no third rule to get wrong; a layer's window position is its content rect minus it.
+        def enclosing_scroll : Vec2
             x = 0.0
             y = 0.0
             node : Widget = self
             current = @parent
-            while current
+            while current && !Layer.overlay?(node)
+                Widget.increment_absolute_bounds_count
                 shift = current.paint_shift_for(node)
                 x += shift.x
                 y += shift.y
@@ -788,16 +873,7 @@ module CrymbleUI
             invalidate_last_constraints
 
             # Layout changed, so the saved background must be recaptured from the new
-            # position. RELEASE it rather than dropping the pointer: under SFML the
-            # payload is a driver texture the collector cannot see, and this method walks
-            # the parent chain, so nil-ing alone strands one full-size surface for every
-            # ancestor holding a background — per invalidation, unbounded over a session.
-            #
-            # Unshared by construction (copy_state_from TRANSFERS a background rather than
-            # copying it), so this widget is its only owner — the argument dispose_subtree
-            # already relies on. The SETTER must stay non-disposing for exactly that
-            # reason; it is used here only to reset the rendered_to_layer flag.
-            @background_backend.try(&.dispose)
+            # position (the setter releases the old one).
             self.background_backend = nil
 
             @parent.try &.mark_needs_layout
@@ -1147,10 +1223,19 @@ module CrymbleUI
         def pre_render_flush
         end
 
-        # Get children in render order (for z-order sorting)
-        # Override to customize rendering order (e.g., Window sorts panels by z-index)
-        def sorted_children : Array(Widget)
-            @children  # Default: normal order
+        # True when an Escape given to this widget now would abort an edit or close something the user sees -
+        # each editor answers for its own Escape branch (a container that forwards keys, for what it forwards
+        # to). A host that handles Escape BEFORE the focused widget (App#handle_escape) asks the focused
+        # widget first. False by default.
+        def consumes_escape? : Bool
+          false
+        end
+
+        # Structural work the next input depends on, applied by App#finish_frame for a widget that
+        # registered it (request_frame_before_input / register_input_flush) - whether or not it painted
+        # this frame. True when something ran. Nothing by default.
+        def flush_before_input : Bool
+          false
         end
 
         # Get menubar child if this widget has one (for direct compositing)
@@ -1211,7 +1296,7 @@ module CrymbleUI
             # would demand a buffer clear. That is not theoretical: VirtualMatrix lays out freshly
             # created cells on the frames a scroll reveals them.
             return if @last_rendered_layer_position.nil?
-            if l = containing_layer_for_repair
+            if l = containing_layer
                 # Layers that own a geometry-repair mechanism opt out, because clearing them here
                 # would throw away a pending blit-shift. That used to be spelled `viewport_cache`,
                 # which claimed it for every layer of the type: the repair in question is
@@ -1228,7 +1313,7 @@ module CrymbleUI
         # I mark dirty?"): for a widget that OWNS a layer, moving means the whole LAYER moved, which the
         # compositor already handles by blitting it elsewhere. Its buffer is not stale; the container it
         # moved WITHIN is the one holding the vacated pixels.
-        protected def containing_layer_for_repair : Layer?
+        def containing_layer : Layer?
             current = @parent
             while current
                 if l = current.layer
@@ -1442,7 +1527,12 @@ module CrymbleUI
             # a background still present on a discarded widget is provably UNSHARED, which is what
             # lets dispose_subtree release it. Uses the direct seam so it cannot be mistaken for a
             # release of the object itself.
-            if old_bg = old_widget.background_backend
+            # A build that returns the SAME instance reconciles a widget with itself: nothing to transfer, and its
+            # background stays (going through the release below would leave the field naming a released surface).
+            # A twin that already holds a background (a kept instance placed anew) has it superseded: released,
+            # then the old one adopted.
+            if !old_widget.same?(self) && (old_bg = old_widget.background_backend)
+                self.background_backend = nil
                 @background_backend = old_bg
                 old_widget.relinquish_background_backend
                 {% if flag?(:DEBUG_RENDER) %}
@@ -1588,25 +1678,40 @@ module CrymbleUI
             @widget_backend
         end
 
-        # Set widget's render backend (managed by renderer)
+        # Set widget's render backend (managed by renderer). The ONE release point: the backend it replaces -
+        # nil included - is released, so no path can drop a surface without freeing it (under SFML a dropped
+        # one is a driver texture the collector cannot see). Assigned first, so the field never names a
+        # released surface. A different surface bumps `backend_generation`, which a blit plan checks.
         def widget_backend=(backend : RenderBackend?)
+            old = @widget_backend
             @widget_backend = backend
             @last_rendered_layer_position = nil if backend.nil?
+            unless old.same?(backend)
+                @backend_generation &+= 1
+                old.try(&.dispose)
+            end
         end
+
+        # Moves each time this widget's widget_backend is replaced: a blit plan names the surface it saw by it,
+        # without holding the surface itself.
+        getter backend_generation : Int32 = 0
 
         # Get background backend (nil if not yet captured)
         def background_backend : RenderBackend?
             @background_backend
         end
 
-        # Set background backend (managed by renderer)
+        # Set background backend (managed by renderer). Releases the one it replaces, as widget_backend= does.
+        # The one write that must NOT release is reconcile's transfer (copy_state_from), which writes the ivar.
         def background_backend=(backend : RenderBackend?)
+            old = @background_backend
             @background_backend = backend
             # When background is invalidated (set to nil), reset the rendered flag
             # This allows re-capturing background at new position/size
             if backend.nil?
                 @rendered_to_layer_at_current_bounds = false
             end
+            old.try(&.dispose) unless old.same?(backend)
         end
 
         # Check if widget has rendered to layer at current bounds (for invariant h)
@@ -1689,7 +1794,7 @@ module CrymbleUI
         def hit_test(point : Vec2) : Widget?
             # If children can escape bounds, check them first even if point is outside parent
             if @children_escape_bounds
-                @children.reverse_each do |child|
+                children_in_hit_order do |child|
                     if hit = child.hit_test(point)
                         return hit
                     end
@@ -1701,7 +1806,7 @@ module CrymbleUI
 
             # Check children (if we haven't already due to escape_bounds)
             unless @children_escape_bounds
-                @children.reverse_each do |child|
+                children_in_hit_order do |child|
                     if hit = child.hit_test(point)
                         return hit
                     end
@@ -1710,6 +1815,19 @@ module CrymbleUI
 
             # Return self if no child was hit
             self
+        end
+
+        # The children front to back - the reverse of the order they composite in (Layer.sibling_key), so a click
+        # lands where things are drawn. Every hit_test that walks children walks them through this. Plain
+        # reverse order unless one of them is ranked or a boundary (no allocation on the common path).
+        def children_in_hit_order(& : Widget ->) : Nil
+            if ranks_children? || @children.any? { |child| Layer.boundary?(child) }
+                @children.each_with_index.to_a
+                    .sort_by! { |(child, i)| Layer.sibling_key(self, child, i) }
+                    .reverse_each { |(child, _)| yield child }
+            else
+                @children.reverse_each { |child| yield child }
+            end
         end
 
         # Trigger click event (for testing)
@@ -1738,20 +1856,24 @@ module CrymbleUI
         def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
             # Bring containing panel to front if inside one
             bring_containing_panel_to_front
-            if button == MouseButton::Right
-                # Bubble up: find nearest ancestor with right-click handler
-                # `point` is in MY space; a right-click handler exists to put something on the
-                # SCREEN (embrace hangs its context menus off this), so it is handed window
-                # coordinates. The one place the direction is reversed, and it says so.
-                current : Widget? = self
-                while current
-                    if handler = current.on_right_click_handler
-                        handler.call(to_window(point))
-                        break
-                    end
-                    current = current.parent
+            # `point` is in MY space; the handler is handed window coordinates (trigger_right_click).
+            trigger_right_click(to_window(point)) if button == MouseButton::Right
+        end
+
+        # Run the nearest right-click handler at or above this widget, handing it `at` - a WINDOW
+        # point: a right-click handler exists to put something on the SCREEN (embrace hangs its
+        # context menus off this). on_mouse_down calls it for a real right-click; the test Driver
+        # calls it for a right-click by id, at the widget's centre. Returns whether a handler ran.
+        def trigger_right_click(at : Vec2 = viewport_bounds.center) : Bool
+            current : Widget? = self
+            while current
+                if handler = current.on_right_click_handler
+                    handler.call(at)
+                    return true
                 end
+                current = current.parent
             end
+            false
         end
 
         def on_mouse_move(point : Vec2)
@@ -1782,6 +1904,12 @@ module CrymbleUI
         # Override in focusable widgets (TextInput, etc.)
         def focusable? : Bool
             false
+        end
+
+        # Whether a mouse press on this widget moves the keyboard focus to it (App#handle_mouse_down).
+        # Focusable widgets do by default; Button and Checkbox can opt out (focus_on_click).
+        def takes_focus_on_click? : Bool
+            focusable?
         end
 
         # Called when widget gains keyboard focus
@@ -1919,8 +2047,10 @@ module CrymbleUI
 
         # === END FOCUS AND KEYBOARD INPUT ===
 
-        # Find and bring to front any WindowPanel ancestor
-        private def bring_containing_panel_to_front
+        # Find and bring to front any WindowPanel ancestor. Public because a mouse-down does it for
+        # every button, and the test Driver does it for every act by id. Starts at the parent, so
+        # a WindowPanel does not raise itself here.
+        def bring_containing_panel_to_front
             current = @parent
             while current
                 if current.is_a?(WindowPanel)
@@ -2018,16 +2148,14 @@ module CrymbleUI
         # === LAYER OWNER NOTIFICATION BROADCASTING ===
         # These methods broadcast notifications to all LayerOwner descendants.
         # Used by WindowPanel to notify ScrollView (and other layer owners) of
-        # size/z-index changes without direct type coupling.
+        # size changes and raises without direct type coupling.
         # Position changes are handled by pull-based bounds (compute_bounds_for_layer).
 
-        # Broadcast z-index change to all LayerOwner descendants
-        protected def notify_layer_owners_z_index_changed(new_z : Int32)
+        # Tell every LayerOwner descendant its panel was raised
+        protected def notify_layer_owners_raised
           @children.each do |child|
-            if child.responds_to?(:on_ancestor_z_index_changed)
-              child.on_ancestor_z_index_changed(new_z)
-            end
-            child.notify_layer_owners_z_index_changed(new_z)
+            child.on_ancestor_raised if child.responds_to?(:on_ancestor_raised)
+            child.notify_layer_owners_raised
           end
         end
 
@@ -2044,9 +2172,7 @@ module CrymbleUI
         def reset_render_caches_recursive
             @cached_primitives = nil
             @primitives_node.try(&.touch)
-            @widget_backend = nil
-            @background_backend = nil
-            @rendered_to_layer_at_current_bounds = false
+            free_own_surfaces
             @children.each(&.reset_render_caches_recursive)
         end
 
@@ -2061,7 +2187,8 @@ module CrymbleUI
         # The OVERRIDE SEAM: the base owns @primitives_node (the sole pull node today); a subclass that
         # owns another (e.g. a future KeyedCached buffer that reads zoom) overrides as `super` + disposes
         # its own. Contract: every pull node a widget owns is released here. Does NOT touch
-        # @background_backend (carried into the new tree by copy_state_from) or focus/parent.
+        # @background_backend (carried into the new tree by copy_state_from) or focus/parent. A widget released
+        # this way may be shown again (a grid cell handed back): get_primitives then mints a fresh node.
         def dispose_pull_nodes
             @primitives_node.try(&.dispose)
             @primitives_node = nil
@@ -2081,10 +2208,10 @@ module CrymbleUI
         #      per-cycle heap floor climb ~240 MB -> ~150 MB. It is a large term, NOT the whole
         #      report: the remaining climb is a separate defect — see the backlog.)
         #
-        # REFERENCES ONLY — this never destroys a backend. `copy_state_from` hands the reconciled
-        # widget the old widget's @background_backend (ONE shared object), so dropping the old side's
-        # pointer is safe by construction, while destroying it would corrupt the LIVE tree.
-        # Recurse BEFORE clearing @children, or the walk loses its own subtree.
+        # It destroys only what this widget alone OWNS (release_own, below): `copy_state_from`
+        # TRANSFERS @background_backend to the reconciled widget rather than sharing it, so what is
+        # still held here is this widget's own. Recurse BEFORE clearing @children, or the walk loses
+        # its own subtree.
         #
         # @parent is deliberately KEPT. Clearing the DOWNWARD links is what breaks the cascade (a
         # retained node would otherwise pin every descendant and every descendant's backend); an
@@ -2096,19 +2223,46 @@ module CrymbleUI
         # Window#copy_state_from re-points a migrated overlay's parent to the NEW window.)
         # Guarded by spec/widgets/combo_box_reconcile_focus_spec.cr.
         def dispose_subtree
-            dispose_pull_nodes
+            release_own
             @children.each(&.dispose_subtree)
             @children.clear
-            # RELEASE, don't just unlink: under SFML the payload is a driver texture the collector
-            # cannot see, so dropping the pointer frees nothing at all.
-            # Both are unshared by construction, which is what makes releasing them safe:
-            # copy_state_from deliberately never carries @widget_backend, and it TRANSFERS
-            # @background_backend (adopt + relinquish) rather than copying it — so anything still
-            # held here was never adopted and this widget is its only owner.
-            @widget_backend.try(&.dispose)
-            @widget_backend = nil
-            @background_backend.try(&.dispose)
-            @background_backend = nil
+        end
+
+        # What this widget HOLDS for the tree it was shown in, let go of, its structure left intact: its pull
+        # node (the subscription to the global zoom/theme Sources - get_primitives re-creates it lazily), its own
+        # surfaces, and its slot stamp in the layer it stood on. A widget shown again - a grid cell an adapter
+        # hands back - renders afresh.
+        def release_own : Nil
+            dispose_pull_nodes
+            free_own_surfaces
+            invalidate_slot
+        end
+
+        # The same for this whole subtree (a grid cell that left).
+        def release_subtree : Nil
+            release_own
+            @children.each(&.release_subtree)
+        end
+
+        # This widget's own GPU surfaces, RELEASED, not just unlinked: under SFML the payload is a driver
+        # texture the collector cannot see, so dropping the pointer frees nothing at all. Both are unshared
+        # by construction, which is what makes releasing them safe: copy_state_from deliberately never
+        # carries @widget_backend, and it TRANSFERS @background_backend (adopt + relinquish) rather than
+        # copying it - so anything still held here was never adopted and this widget is its only owner.
+        # Through the SETTERS, which release them and reset the rendered-at-bounds bookkeeping (invariant h):
+        # a widget that is shown again - a grid cell an adapter hands back - renders afresh.
+        def free_own_surfaces : Nil
+            self.widget_backend = nil
+            self.background_backend = nil
+        end
+
+        # Every layer of this subtree: the layer each widget owns, the ones it owns besides (a ScrollView's
+        # scrollbar layers), and its descendants'.
+        def each_layer_in_subtree(&block : Layer ->) : Nil
+            layer.try { |owned| block.call(owned) }
+            me = self
+            me.each_owned_layer { |owned| block.call(owned) } if me.responds_to?(:each_owned_layer)
+            @children.each { |child| child.each_layer_in_subtree(&block) }
         end
 
         # Debug: print widget tree
@@ -2124,3 +2278,5 @@ module CrymbleUI
         end
     end
 end
+
+require "./composite_order" # Layer.sibling_key (children_in_hit_order)

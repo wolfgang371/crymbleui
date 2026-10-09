@@ -102,7 +102,32 @@ class LeakAdapter
   end
 
   def get_scrollorder : {Array(Int32), Array(Int32)}
-    {(0...40).to_a, (0...6).to_a}
+    {(0...400).to_a, (0...6).to_a} # tall enough that a far scroll recenters the cell buffer
+  end
+end
+
+# Raises while armed, in RENDER (after the grids' textures exist this frame), from a panel composited last; samples
+# the textures alive at each raise - what a failing frame's recovery released and (under SFML) parked in the reaper.
+class FailBomb < CrymbleUI::Widget
+  include CrymbleUI::PrimitiveBuilder
+
+  class_property armed = false
+  class_getter samples = [] of Int32
+
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    CrymbleUI::Size.new(80.0, 20.0)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, measure(constraints))
+  end
+
+  def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    if FailBomb.armed
+      FailBomb.samples << SF::RenderTexture.probe_created - SF::RenderTexture.probe_destroyed
+      raise "bomb"
+    end
+    primitives { fill_rect(CrymbleUI::Rect.new(0.0, 0.0, bounds.width, bounds.height), CrymbleUI::Color.new(200, 60, 60, 255)) }
   end
 end
 
@@ -120,6 +145,9 @@ class LeakApp < CrymbleUI::App
             width: 620.0, height: 420.0, id: "p#{i}") do
             widget(CrymbleUI::VirtualMatrix.new(LeakAdapter.new((60 + i * 10).to_u8), id: "m#{i}"))
           end
+        end
+        window_panel("Bomb", x: 900.0, y: 700.0, width: 200.0, height: 80.0, id: "bomb_panel") do
+          widget(FailBomb.new(id: "bomb"))
         end
       end
     end
@@ -143,7 +171,41 @@ class Driver
   @pending_peak = false
   @baseline = 0.0
   @survivors = [] of Int32
+  # The same ordinal witness for the two routine paths that dropped textures without releasing them: a zoom
+  # step (every texture on screen) and a far scroll (the cell textures a buffer recenter drops).
+  @zoom_survivors = [] of Int32
+  @scroll_survivors = [] of Int32
+  @fail_timer : Int32? = nil
+  @fail_ticks = 0
   getter? failed = false
+
+  ZOOM_START   = 16
+  ZOOM_PAIRS   = 10
+  SCROLL_START = ZOOM_START + 1 + 2 * ZOOM_PAIRS
+  SCROLL_TRIPS = 10
+  FAIL_START   = SCROLL_START + 2 * SCROLL_TRIPS
+  FAILURES     = 40
+  VERDICT      = FAIL_START + 2
+
+  private def alive : Int32
+    SF::RenderTexture.probe_created - SF::RenderTexture.probe_destroyed
+  end
+
+  private def grids : Array(CrymbleUI::VirtualMatrix)
+    (0...4).compact_map { |i| @app.root.try(&.find_by_id("m#{i}")).as?(CrymbleUI::VirtualMatrix) }
+  end
+
+  # Fails when the series GROWS from its first sample to its last - the same threshold-free rule as the cycles.
+  private def judge(name : String, series : Array(Int32)) : Nil
+    log("#{name} survivors = #{series}")
+    growth = series.size >= 2 ? series[-1] - series[0] : 0
+    if growth > 0
+      log("VERDICT (#{name}): FAIL - #{growth} more textures alive after #{series.size} rounds than after the first")
+      @failed = true
+    else
+      log("VERDICT (#{name}): PASS - the count does not grow")
+    end
+  end
 
   def initialize(@app : LeakApp)
   end
@@ -175,8 +237,43 @@ class Driver
       @survivors << (SF::RenderTexture.probe_created - SF::RenderTexture.probe_destroyed)
       prev = @floors.size == 1 ? @baseline : @floors[-2]
       log("after cycle %d drop  : %8.1f MB   (delta %+7.1f)  textures created %d / destroyed %d" % [@floors.size, f, f - prev, SF::RenderTexture.probe_created, SF::RenderTexture.probe_destroyed])
+    when ZOOM_START
+      @app.panels = 4
+      @app.request_rebuild
+    when (ZOOM_START + 1)...SCROLL_START
+      if (@step - ZOOM_START).odd?
+        CrymbleUI::FontSizing.zoom_in
+      else
+        CrymbleUI::FontSizing.zoom_out
+        @zoom_survivors << alive
+      end
+    when SCROLL_START...FAIL_START
+      far = (@step - SCROLL_START).even?
+      grids.each { |g| g.scroll_offset = CrymbleUI::Vec2.new(0.0, far ? 6000.0 : 0.0) }
+      @scroll_survivors << alive unless far
+    when FAIL_START
+      # A frame that keeps raising: a fast timer re-triggers the bomb's frame (a failing frame does not trigger
+      # the next one by itself); each failure's recovery releases the working set.
+      FailBomb.armed = true
+      @fail_timer = CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: 10_000_000), repeating: true) do
+        @app.root.try(&.find_by_id("bomb")).try(&.mark_needs_render)
+        nil
+      end
+    when FAIL_START + 1
+      @fail_ticks += 1
+      if FailBomb.samples.size < FAILURES # wait, re-ticking, until enough failures - or fail when they never come
+        return true if @fail_ticks < 50
+        log("VERDICT (failing frames): FAIL - only #{FailBomb.samples.size} failures in #{@fail_ticks} ticks")
+        @failed = true
+      end
+      FailBomb.armed = false
+      @fail_timer.try { |id| CrymbleUI::Widget.scheduler.cancel(id) }
     else
       log("")
+      judge("zoom", @zoom_survivors)
+      judge("far scroll", @scroll_survivors)
+      # Each failure's own sample; the first few frames of the run still build the panels' textures up.
+      judge("failing frames", FailBomb.samples[5..])
       log("peaks  = #{@peaks.map(&.round(1))}")
       log("floors = #{@floors.map(&.round(1))}")
       if @peaks.size > 0 && @floors.size > 0

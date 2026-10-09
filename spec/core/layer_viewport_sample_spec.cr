@@ -2,8 +2,8 @@ require "../spec_helper"
 
 # Viewport-cache sampling math — THE single source of truth for "where
 # inside an oversized layer buffer does the visible viewport start".
-# Extracted from composite_viewport_cache_layer so the live compositor
-# and capture_composited_frame can never diverge again: the 2026-06-05
+# Read by LayerRenderer#composite_region, which the live compositor and
+# capture_composited_frame share, so they can never diverge again: the 2026-06-05
 # "VirtualMatrix content offset" hunt ended with correct buffers, a
 # correct live compositor — and a capture function that plain-blitted
 # viewport-cache layers from (0,0), shifting every captured PNG by the

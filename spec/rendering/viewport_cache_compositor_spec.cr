@@ -35,7 +35,7 @@ describe "Viewport cache compositor blitting" do
       end
 
       # Composite to window
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       # Check that content appears at expected position (layer.bounds = 0,0)
       window_backend = renderer.backend
@@ -59,7 +59,7 @@ describe "Viewport cache compositor blitting" do
         end
       end
 
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       # With scroll_offset (10,10), content at texture (20,20) should appear at screen (10,10)
       # Because viewport shows content from (10,10) to (110,110), and texture(20,20) = content(20,20)
@@ -98,7 +98,7 @@ describe "Viewport cache compositor blitting" do
         end
       end
 
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       window_backend = renderer.backend
 
@@ -136,7 +136,7 @@ describe "Viewport cache compositor blitting" do
         end
       end
 
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       window_backend = renderer.backend
 
@@ -172,7 +172,7 @@ describe "Viewport cache compositor blitting" do
       backend.set_pixel(60, 120, CrymbleUI::Color.new(255, 0, 0, 255))   # Q3: Red
       backend.set_pixel(120, 120, CrymbleUI::Color.new(255, 255, 0, 255)) # Q4: Yellow
 
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       window_backend = renderer.backend
 
@@ -195,7 +195,7 @@ describe "Viewport cache compositor blitting" do
       layer.backend = backend
 
       renderer.reset_counters
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       renderer.backend_blit_count.should eq(1)
     end
@@ -212,7 +212,7 @@ describe "Viewport cache compositor blitting" do
       layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       # Content is rendered at viewport-relative positions, so no wrap needed at compositor
       renderer.backend_blit_count.should eq(1)
@@ -227,7 +227,7 @@ describe "Viewport cache compositor blitting" do
       layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       renderer.backend_blit_count.should eq(1)
     end
@@ -241,7 +241,7 @@ describe "Viewport cache compositor blitting" do
       layer.recenter_origin!(backend.width, backend.height) # fitting origin (production recenters at high scroll) — blit count is origin-independent, and this keeps -Dverify_bounds clean
 
       renderer.reset_counters
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       renderer.backend_blit_count.should eq(1)
     end
@@ -259,7 +259,7 @@ describe "Viewport cache compositor blitting" do
       # Draw at texture position (10, 10)
       backend.set_pixel(10, 10, CrymbleUI::Color.new(255, 0, 0, 255))
 
-      renderer.composite_layer_to_window(layer)
+      renderer.composite_layer_to_window(layer, nil)
 
       window_backend = renderer.backend
       # For non-viewport_cache, scroll_offset should be ignored

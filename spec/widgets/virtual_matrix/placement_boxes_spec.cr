@@ -15,7 +15,7 @@ require "../../../src/testing/configurable_matrix_adapter"
 # own widget, or sitting on a different line from its neighbour, is then a fact about two
 # rectangles, with no rule in the middle to be wrong.
 #
-#   B1  a text box that has room is not cut, by the band or by its own widget
+#   B1  a text box that has room (one line of its cell showing) is not cut, by the band or by its own widget
 #   B2  the text boxes of one row occupy the SAME rows (one line, not three)
 #   B3  a text box never moves further than the input that moved it
 #
@@ -29,6 +29,8 @@ class BoxPivot < ConfigurableMatrixAdapter
   def initialize(@lines : Int32 = 6)
     super(1, 1, 1, 1, 5, 3)
   end
+
+  include EveryThirdRowTall
 
   def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
     return super unless row == 1 && col == 3
@@ -96,6 +98,7 @@ describe "placement, judged by text bounding boxes" do
     _r, _a, matrix = box_matrix
     band_lo, band_hi = band_of(matrix)
     cut = [] of String
+    judged_cut = 0 # boxes judged while an edge cuts their cell: where the rule has work to do
 
     (0..90).each do |i|
       matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, i.to_f64 * 2.0)
@@ -103,16 +106,21 @@ describe "placement, judged by text bounding boxes" do
       text_boxes(matrix).each do |t|
         height = t.bottom - t.top
         # room in the band, and room in its own widget: if either cannot hold it, being cut is the
-        # honest answer and the rule is not at fault
+        # honest answer and the rule is not at fault. And room means ONE LINE of the cell showing (or
+        # all of it, when it is shorter): a label slides in by no more than its cell exceeds one line,
+        # so below that it is cut with its row, as the cell's background is (UC-5).
         visible_lo = Math.max(t.cell_top, band_lo)
         visible_hi = Math.min(t.cell_bottom, band_hi)
-        next unless visible_hi - visible_lo >= height
+        held = Math.min(t.cell_bottom - t.cell_top, matrix.line_extent)
+        next unless visible_hi - visible_lo >= Math.max(height, held)
+        judged_cut += 1 if t.cell_top < band_lo || t.cell_bottom > band_hi
         next if t.top >= visible_lo - 0.6 && t.bottom <= visible_hi + 0.6
         cut << "#{t.key} '#{t.text}' box #{t.top.round(1)}..#{t.bottom.round(1)} cut by " \
                "#{visible_lo.round(1)}..#{visible_hi.round(1)} at scroll #{i * 2}"
       end
     end
 
+    (judged_cut > 0).should be_true # instrument: a cut cell with room was judged
     cut.should be_empty, "text boxes cut although they had room:\n  #{cut.first(6).join("\n  ")}"
   end
 
@@ -200,18 +208,18 @@ end
 private class LoggedFrame
   include CrymbleUI::PrimitiveBuilder
 
-  # band 20..129 (109 tall), a 137-tall row, an 8-line block of ~100px, ref_h 14
+  # band 20..129 (109 tall), a 137-tall row, an 8-line block of ~100px, ref_h 14; one line's box is 20 (zoom 1)
   def compound_label
-    CrymbleUI::Widget::InkRegion.new(-19.855670103092784, 206.0, 0.0, 109.0, true, true)
+    CrymbleUI::Widget::InkRegion.new(-19.855670103092784, 206.0, 0.0, 109.0, 20.0, true, true)
   end
 
   def block_cell
-    CrymbleUI::Widget::InkRegion.new(0.0, 137.0, 19.0, 128.0, false, false)
+    CrymbleUI::Widget::InkRegion.new(0.0, 137.0, 19.0, 128.0, 20.0, false, false)
   end
 
   def place(r, content, line)
     held_in_region(natural_in(r, content), r.pos, r.size, content, r.band_lo, r.band_hi,
-      line, r.pinned)
+      r.hold, line, r.pinned)
   end
 end
 

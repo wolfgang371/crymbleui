@@ -42,12 +42,14 @@ module CrymbleUI
     getter row : Int32
     getter col : Int32
     getter display : String
-    # Identity of the matrix this cell was dragged from (copied from the
-    # source VM's drag_owner_key). Lets a drop on a *different* matrix
-    # recognise the payload as cross-owner. nil = untagged (legacy callers).
+    # The grid this cell was dragged from, as reconcile identifies it: per ancestor its id, else its index
+    # and class among its siblings - so the grid a rebuild puts in its place has the same path.
+    getter source_path : String
+    # The source grid's OWNER, if the host tagged it (drag_owner_key): grids with one key are one owner's,
+    # and a drop on another owner's grid goes to that grid's cross_drop_handler. nil: untagged.
     getter owner_key : String?
 
-    def initialize(@row : Int32, @col : Int32, @display : String, @owner_key : String? = nil)
+    def initialize(@row : Int32, @col : Int32, @display : String, *, @source_path : String, @owner_key : String? = nil)
     end
 
     def data_type : String
@@ -72,29 +74,39 @@ module CrymbleUI
     # it paints its decal immediately. Only the internal mouse-down candidate
     # (set on the ivar directly, then flagged provisional) is withheld until a
     # drag actually starts — see drag_source_provisional? and on_mouse_down.
+    # It is also the host's word over a press in progress on THIS instance: whatever the press found no
+    # longer comes back when it ends (a host re-arming from on_cell_drop_handler, or on_cell_activate,
+    # keeps its value); a drag that press becomes carries this cell - unless a rebuild already took the
+    # pressed one as the gesture's payload - and this grid takes the gesture over (on_drag_start). Set by
+    # a BUILD, on a grid replacing the pressed one, it is what that gesture's end puts back.
     def drag_source_cell=(value : Tuple(Int32, Int32)?)
       @drag_source_cell = value
       @drag_source_provisional = false
+      @press_in_progress = false
     end
 
     # True while drag_source_cell is only the mouse-down candidate DragManager
     # reads to build the ghost — no drag has crossed the threshold yet, so the
     # source decal must stay hidden (prevents the salmon flash on a plain click).
     getter? drag_source_provisional : Bool = false
-    property drag_source_was_preexisting : Bool = false
+
+    # The committed source a press found (a host's cut, or none), put back by whatever of that press
+    # does not end in a drop - see end_press. Plain ivars, never carried by a rebuild: a grid built after
+    # the press learns of a drag it becomes the source of through on_drag_start, and takes it over there.
+    @source_before_press : Tuple(Int32, Int32)? = nil
+    @press_in_progress : Bool = false
 
     # Callback after cell drop completes (for app-level updates like a data refresh + rebuild)
     property on_cell_drop_handler : Proc(Nil)? = nil
 
-    # Identity of the owner this matrix belongs to. Stamped into the
-    # drag data (get_drag_data) so a drop on a *different* matrix can tell
-    # the payload is cross-owner and route it differently.
+    # The owner this matrix belongs to, if the host says: stamped into the drag data (get_drag_data).
+    # Grids with one key are one owner's - a cell moves between them natively; untagged, a grid owns only
+    # its own cells (see own_payload?).
     property drag_owner_key : String? = nil
 
-    # Handler for a cross-owner cell drop (payload whose owner_key differs
-    # from this matrix's drag_owner_key). When set, such a drop is delegated
-    # here with (data, target_row, target_col) INSTEAD of the native
-    # intra-owner cell_move. Same-owner / untagged drops are unaffected.
+    # Handler for another OWNER's cell (a tagged payload whose key is not this matrix's): such a drop is
+    # delegated here with (data, target_row, target_col) instead of a native cell_move. Without it that
+    # cell is refused, as is an untagged cell from another grid - it has no owner to route to.
     property cross_drop_handler : Proc(CellDragData, Int32, Int32, Nil)? = nil
 
     # App-level cell activation callback. Invoked before default handling on:
@@ -170,10 +182,12 @@ module CrymbleUI
     # when scrolling back and forth near the viewport edge).
     DESTRUCTION_BUFFER = 200.0
 
-    # Z-index offsets for VirtualMatrix layers (relative to widget's base_z)
-    CONTENT_LAYER_Z  = 1  # Main cell content layer
-    CURSOR_OVERLAY_Z = 8  # Cursor highlight layer (above all ScrollView layers: SV uses +1..+5)
-    DRAG_OVERLAY_Z   = 9  # Cell drag source/target decals (above the cursor band; Normal blend)
+    # Local z of the matrix's own layers - the order they composite in (Layer.composite_order). What is
+    # painted into the content layer (the cells' own layers, then the chrome ScrollView's sticky bands and
+    # scrollbars - composite_rank) composites right after it, under the cursor band and the drag decal.
+    CONTENT_LAYER_Z  = 1 # Main cell content layer
+    CURSOR_OVERLAY_Z = 2 # Cursor highlight layer
+    DRAG_OVERLAY_Z   = 3 # Cell drag source/target decals (above the cursor band; Normal blend)
     # See-through for the drag decal. Applied as LAYER opacity over an opaque salmon
     # fill (not fill alpha) so the RT stays opaque — a semi-transparent fill would be
     # premultiplied over the transparent-black RT and composite to an invisible tint.
@@ -181,6 +195,21 @@ module CrymbleUI
 
     # Zoom tracking for change detection in perform_layout
     @last_zoom_factor : Float64 = 1.0
+
+    # One default line's extent - a default row's box height, a default column's box width, placed as cells are
+    # (the pitch truncated, less the gutter): the part of a region its content never leaves for the band
+    # (PrimitiveBuilder#centred_in's `hold`).
+    def line_extent : Float64
+      placed_box(DEFAULT_ROW_HEIGHT)
+    end
+
+    def column_extent : Float64
+      placed_box(DEFAULT_COLUMN_WIDTH)
+    end
+
+    private def placed_box(units : Float64) : Float64
+      (pitch_pixels(units).to_i32 - grid_spacing).to_f64 # placed as placed_row_sizes places a line
+    end
 
     private def frame_height : Float64
       FRAME_HEIGHT_BASE * FontSizing.zoom_factor
@@ -270,8 +299,11 @@ module CrymbleUI
     @cursor_flash_timer_id : Int32? = nil
     @cursor_flash_on : Bool = true
 
-    # Double-click detection
-    DOUBLE_CLICK_THRESHOLD_MS = 300
+    # Double-click detection. `double_click_interval` is carried across rebuilds, so a value set on
+    # the live grid survives the next build. Set it on the live grid, not in a build: the carried
+    # value overrides whatever a build sets (the trap @auto_size_explicit guards against for
+    # auto_size).
+    reconcile_property double_click_interval : Time::Span = 300.milliseconds
     @last_click_time : Time::Instant = Time.instant - 1.hour
     @last_click_cell : Tuple(Int32, Int32) = {-1, -1}
 
@@ -1080,16 +1112,13 @@ module CrymbleUI
       return unless col_sizes && row_sizes && col_cum && row_cum
       sticky_rows_val = sticky_row_count
       sticky_cols_val = sticky_col_count
-      ruler_x = ruler_col_width_pixels.to_i
-      ruler_y = ruler_row_height_pixels.to_i
       @active_cells.each do |key, widget|
         row, col = key
         # Sticky cells are re-sized and repositioned by the sticky path, which reads the same
         # size arrays — laying them out here in content space would put them in the wrong place.
         next if row < sticky_rows_val || col < sticky_cols_val
         next unless col < col_cum.size && row < row_cum.size
-        layout_cell_at(widget, get_bounding_box(key), col_sizes, row_sizes,
-          (ruler_x + col_cum[col]).to_f64, (ruler_y + row_cum[row]).to_f64)
+        layout_cell_at(widget, get_bounding_box(key), col_sizes, row_sizes, placed_col_start(col), placed_row_start(row))
       end
       # The blit shift is single-boundary by construction, so this path forgoes it and repaints:
       # a deliberate cost, and the reason it must not reach for `can_shift`.
@@ -1323,26 +1352,148 @@ module CrymbleUI
     end
 
     # Calculate total pixel height of sticky rows
+    # The whole-pixel sizes cells are PLACED with (a line's pitch, truncated) - the one quantization of a size:
+    # the sticky extents, the cumulative arrays and every cell position are sums of these, so a band edge and the
+    # cells beside it agree however fractional a width is (content-fitted widths are).
+    def placed_col_sizes : Array(Int32)
+      @cached_col_sizes ||= (0...@cols).map { |c| col_width_pixels(c).to_i32 }
+    end
+
+    def placed_row_sizes : Array(Int32)
+      @cached_row_sizes ||= begin
+        # perf-audit: this O(total rows) rebuild fires on ANY dimension-cache invalidation, including
+        # a COLUMN resize (invalidate_dimension_caches clears row sizes too) — visible cells constant.
+        VirtualMatrix.increment_row_cache_rebuild_rows(@rows)
+        (0...@rows).map { |r| row_height_pixels(r).to_i32 }
+      end
+    end
+
+    # Each line's start, as placed: prefix sums of the placed sizes, in physical order.
+    def placed_col_cum : Array(Int32)
+      @cached_col_physical_cum ||= placed_col_sizes.accumulate(0) { |a, b| a + b }
+    end
+
+    def placed_row_cum : Array(Int32)
+      @cached_row_physical_cum ||= placed_row_sizes.accumulate(0) { |a, b| a + b }
+    end
+
+    # The whole scroll the grid PAINTS with, per axis: the content layer composites at the floor of the scroll
+    # (buffer_origin is whole), and the sticky pass moves the headers by the same value - one quantization, which
+    # every position derived from the scroll reads.
+    def painted_scroll : Vec2
+      s = scroll_offset
+      Vec2.new(PixelSnap.origin(s.x).to_f64, PixelSnap.origin(s.y).to_f64)
+    end
+
+    # Where line `i` is laid out (unscrolled), in the matrix's own space: past the ruler, at its placed start.
+    def placed_col_start(col : Int32) : Float64
+      ruler_col_width_pixels + placed_col_cum[col]
+    end
+
+    def placed_row_start(row : Int32) : Float64
+      ruler_row_height_pixels + placed_row_cum[row]
+    end
+
+    # Where column `col` is painted, in the matrix's own space: {its left edge, its pitch}. A sticky column holds
+    # still; any other moves by painted_scroll. The one LINE rule - the sticky pass, the blit plan, their checks
+    # and the cursor band all place a line through it (a merged span is placed by StickyMath.compound_axis, and
+    # cells are asked through painted_rect).
+    def painted_col(col : Int32) : {Float64, Float64}
+      start = placed_col_start(col)
+      {col < sticky_col_count ? start : start - painted_scroll.x, placed_col_sizes[col].to_f64}
+    end
+
+    def painted_row(row : Int32) : {Float64, Float64}
+      start = placed_row_start(row)
+      {row < sticky_row_count ? start : start - painted_scroll.y, placed_row_sizes[row].to_f64}
+    end
+
+    # A region of the grid - a cell box, a merged box, a drag box: its {top-left, bottom-right} cells.
+    alias Region = Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
+
+    # WHAT OF A REGION IS PAINTED, in the matrix's own space - the one answer for anything placed on cells (the
+    # drag ghost and decal, the change glow, the cursor-cell flash, the Driver's aim, cell_screen_position). Asked
+    # of the placed cells themselves, never re-derived from sizes: every active cell whose box meets the region
+    # contributes its painted rect - its bounds (a sticky cell's already hold the scroll, a pinned span's its
+    # slice; a content cell's less painted_scroll), grown by the grid gap on the far edges when `pitch` (the line
+    # pitch the gap belongs to - what the ghost, decal and glow cover), CLIPPED to the region its layer shows
+    # (a content cell: the viewport minus the sticky bands over it). The union of what is left; nil when nothing
+    # is. So "painted" is the VISIBLE part - a half-scrolled cell's half, a record box's cells on screen (the
+    # active set covers the viewport and more, so that part is complete).
+    def painted_rect(region : Region, pitch : Bool = true) : Rect?
+      clips = painting_regions
+      found = nil.as(Rect?)
+      @active_cells.each do |key, cell|
+        next unless regions_meet?(get_bounding_box(key), region)
+        next unless rect = cell_painted_rect(cell, clips, pitch)
+        found = found ? found.union(rect) : rect
+      end
+      found
+    end
+
+    # painted_rect of every painted cell box, in ONE pass (for the painters that mark many boxes a frame).
+    def painted_rects(pitch : Bool = true) : Hash(Region, Rect)
+      clips = painting_regions
+      rects = {} of Region => Rect
+      @active_cells.each do |key, cell|
+        next unless rect = cell_painted_rect(cell, clips, pitch)
+        box = get_bounding_box(key)
+        rects[box] = (had = rects[box]?) ? had.union(rect) : rect
+      end
+      rects
+    end
+
+    private def regions_meet?(a : Region, b : Region) : Bool
+      a[0][0] <= b[1][0] && b[0][0] <= a[1][0] && a[0][1] <= b[1][1] && b[0][1] <= a[1][1]
+    end
+
+    # Each layer's showing region in the matrix's space (the chrome ScrollView's sticky_regions, which the
+    # layers' own rects come from), keyed by the layer.
+    private def painting_regions : Hash(Layer, Rect)
+      regions = {} of Layer => Rect
+      return regions unless sv = @content_scroll_view
+      at = sv.bounds.position
+      shown = sv.sticky_regions
+      place = ->(r : Rect) { Rect.new(r.x + at.x, r.y + at.y, r.width, r.height) }
+      @content_layer.try { |l| regions[l] = place.call(shown[:content]) }
+      sv.sticky_row_layer.try { |l| regions[l] = place.call(shown[:row]) }
+      sv.sticky_col_layer.try { |l| regions[l] = place.call(shown[:col]) }
+      sv.sticky_corner_layer.try { |l| regions[l] = place.call(shown[:corner]) }
+      regions
+    end
+
+    private def cell_painted_rect(cell : Widget, clips : Hash(Layer, Rect), pitch : Bool) : Rect?
+      b = cell.bounds
+      return nil if b.width <= 0 || b.height <= 0 # parked, or wholly behind a band
+      return nil unless (layer = cell.render_layer) && (clip = clips[layer]?)
+      shift = layer.same?(@content_layer) ? painted_scroll : Vec2.zero
+      gap = pitch ? grid_spacing.to_f64 : 0.0
+      Rect.new(b.x - shift.x, b.y - shift.y, b.width + gap, b.height + gap).intersection(clip)
+    end
+
+    # Height of the sticky rows, as placed
     def sticky_row_height_pixels : Float64
       count = sticky_row_count
       return 0.0 if count <= 0
-      (0...count).sum { |r| row_height_pixels(r) }
+      placed_row_sizes.first(count).sum.to_f64
     end
 
-    # Calculate total pixel width of sticky columns
+    # Width of the sticky columns, as placed
     def sticky_col_width_pixels : Float64
       count = sticky_col_count
       return 0.0 if count <= 0
-      (0...count).sum { |c| col_width_pixels(c) }
+      placed_col_sizes.first(count).sum.to_f64
     end
 
     # Ruler dimensions in pixels (0 if rulers hidden)
+    # A ruler is a whole number of pixels - every cell sits past it, so a fractional ruler (frame_height carries
+    # float noise at some zooms: 22.000000000000004) would place content and sticky cells a fraction apart.
     def ruler_row_height_pixels : Float64
-      show_rulers ? (RULER_ROW_HEIGHT * frame_height) : 0.0
+      show_rulers ? PixelSnap.snap(RULER_ROW_HEIGHT * frame_height) : 0.0
     end
 
     def ruler_col_width_pixels : Float64
-      show_rulers ? (RULER_COL_WIDTH * frame_height) : 0.0
+      show_rulers ? PixelSnap.snap(RULER_COL_WIDTH * frame_height) : 0.0
     end
 
     # === COMPOUND/MERGED CELLS ===
@@ -1382,15 +1533,13 @@ module CrymbleUI
       # on the real pivot at scroll 52: label y=427.4 against a box of 388.4..425.4. Matching the
       # box's own convention keeps the label inside it without clamping to the box, which would
       # reimport the very threshold placing from the span exists to escape.
-      {ruler_row_height_pixels + cum[lo_r].to_f64 - scroll_offset.y,
-       (cum[hi_r + 1] - cum[lo_r]).to_f64 - grid_spacing}
+      {painted_row(lo_r)[0], (cum[hi_r + 1] - cum[lo_r]).to_f64 - grid_spacing}
     end
 
     # nil only when the rule can do NOTHING to this cell, which is a real condition rather than a
-    # perf heuristic: a region wholly inside the band is already visible, so the hold's bounds are
-    # inert and the widget's own answer is the rule's answer. Three earlier gates tried to be
-    # cleverer than this and each broke placement; this one is safe because it withdraws exactly
-    # where withdrawal changes nothing.
+    # perf heuristic: a region wholly inside the band is already visible, and one no taller than a
+    # line gives the band nothing (`hold`). Three earlier gates tried to be cleverer than this and
+    # each broke placement; this one withdraws exactly where the rule leaves content where it sits.
     #
     # A COMPOUND always carries one wherever it sits: its label is placed from the SPAN it names,
     # so losing the region would switch it to being placed against its box and jump (I1 caught that
@@ -1400,9 +1549,12 @@ module CrymbleUI
     # show nothing. Keeping the two separate is what let the gate go back to being honest.
     private def ink_region_for(compound : Bool, span_top : Float64, span_size : Float64,
                                box_top : Float64, lo : Float64, hi : Float64,
-                               pinned : Bool) : Widget::InkRegion?
+                               pinned : Bool, hold : Float64) : Widget::InkRegion?
       return nil unless span_size > 0.0
-      inert = span_top >= lo && span_top + span_size <= hi
+      # A cell no taller than one line is inert at ANY band: centred_in gives it nothing to move by, so it carries no
+      # region at all - the plain path places it, as at rest, and the band's edge cuts it where it sits (UC-5) -
+      # with no per-frame repaint.
+      inert = (span_top >= lo && span_top + span_size <= hi) || span_size <= hold + 0.0001
       # A COMPOUND keeps its region even when it looks inert. Withdrawing it for one whose box
       # already IS its span was tried on 2026-09-11 — placement is provably identical there, and
       # the specs confirmed it — and it bought 0.10ms of a 15.8ms frame, which is noise, while
@@ -1410,8 +1562,7 @@ module CrymbleUI
       # ink where it already was: primitives were 503 either way. They are cells whose ink genuinely
       # moves as the band edge crosses them, which is what the rule is for.
       return nil if inert && !compound
-      Widget::InkRegion.new(span_top - box_top, span_size, lo - box_top, hi - box_top,
-        compound, pinned)
+      Widget::InkRegion.new(span_top - box_top, span_size, lo - box_top, hi - box_top, hold, compound, pinned)
     end
 
     # Tell each visible cell which region it places ink in, once per frame.
@@ -1425,11 +1576,12 @@ module CrymbleUI
       ruler_h = ruler_row_height_pixels
       lo = ruler_h + sticky_row_height_pixels # the strip's bottom edge IS the content band's top
       hi = bounds.height
+      hold = line_extent
 
       @active_cells.each do |key, w|
         row, col = key
         content_cell = row >= sticky_row_count && col >= sticky_col_count
-        box_top = w.bounds.y - (content_cell ? scroll_offset.y : 0.0)
+        box_top = w.bounds.y - (content_cell ? painted_scroll.y : 0.0) # where it is painted (line_span's basis)
         span = line_span(key, w, box_top)
         span_top, span_size = span || {box_top, w.bounds.height}
         # THE BAND IS THE ONE THIS CELL LIVES IN. A pinned row is held in the strip ABOVE the
@@ -1448,7 +1600,7 @@ module CrymbleUI
         # because the two passes interleave — `run_sticky_pass` runs both before and after this one
         # in different frames, so a set filled by it would be a frame stale half the time.
         pinned = !span.nil? && col < sticky_col_count && row >= sticky_row_count
-        region = ink_region_for(!span.nil?, span_top, span_size, box_top, band_lo, band_hi, pinned)
+        region = ink_region_for(!span.nil?, span_top, span_size, box_top, band_lo, band_hi, pinned, hold)
         next if w.ink_region == region
         w.ink_region = region
         # Repainted when the cell's INK ACTUALLY MOVES A PIXEL -- not when its region changes.
@@ -1500,7 +1652,7 @@ module CrymbleUI
         t = texts.first
         next unless key[0] < 3 || texts.size > 1 || t.text.includes?('\n')
         content = key[0] >= sticky_row_count && key[1] >= sticky_col_count
-        top = w.absolute_bounds.y - (content ? scroll_offset.y : 0.0)
+        top = w.absolute_bounds.y - (content ? painted_scroll.y : 0.0)
         STDERR.puts "  cell #{key[0]},#{key[1]} screen_ink=#{(top + t.position.y).round(1)} " \
                     "box=(#{top.round(1)},h#{w.bounds.height.round(1)}) ink=+#{t.position.y.round(1)} " \
                     "lines=#{texts.size} region=#{w.ink_region.inspect} " \
@@ -1590,38 +1742,41 @@ module CrymbleUI
     end
 
     # Expose active_cells for testing (read-only)
-    # A matrix scrolls its own cells: they keep their laid-out bounds and the matrix paints them
-    # shifted, exactly as a ScrollView does with its content — which is why a cell editor's popup
-    # opened at the unscrolled place until this existed (Wolfgang, double-click on a
-    # horizontally scrolled grid). Sticky rows and columns are pinned, so they hold that axis.
-    # O(1), off the matrix's own bookkeeping: `sync_cells_to_layers` already routes every cell and
-    # ruler to the layer that says how it moves, so the layer IS the answer. (The first version
-    # scanned `active_cells` for the child — and `viewport_bounds` runs per drop-target candidate
-    # on every mouse-move during a drag, which made it O(cells) inside an O(tree) walk.)
-    # A child with no render_layer is not painted by this matrix at all (its inner ScrollView, its
-    # overlays) and must not be shifted.
+    # A matrix scrolls its CONTENT cells as a ScrollView does its content: they keep their laid-out bounds and
+    # their layer composites shifted - which is why a cell editor's popup opened at the unscrolled place until
+    # this existed (Wolfgang, double-click on a horizontally scrolled grid). Its STICKY cells it moves itself:
+    # sticky_reposition (and the blit plan's mirror) rewrites their bounds screen-relative on every scroll, and
+    # their layers composite unshifted, so they are painted AT their bounds and shift by nothing - the rulers too
+    # (fixed bands that draw their numbers shifted inside). Subtracting the scroll there as well placed every
+    # header's dropdown and ghost a scroll away. Their bounds lag a scroll until that pass - and
+    # so do their pixels, so the two agree in every frame.
+    # O(1), off `sync_cells_to_layers`' routing: the layer a child is painted into IS the answer. A child with no
+    # render_layer is not painted by this matrix at all (its inner ScrollView, its overlays).
     def paint_shift_for(child : Widget) : Vec2
-      layer = child.render_layer
-      return Vec2.zero unless layer
-      sv = @content_scroll_view
-      case layer
-      when @content_layer                 then scroll_offset                  # rides both axes
-      when sv.try(&.sticky_row_layer)     then Vec2.new(scroll_offset.x, 0.0) # column header: X only
-      when sv.try(&.sticky_col_layer)     then Vec2.new(0.0, scroll_offset.y) # row header: Y only
-      else                                     Vec2.zero                      # corner, and anything else
-      end
+      return Vec2.zero unless layer = child.render_layer
+      layer.same?(@content_layer) ? scroll_offset : Vec2.zero
+    end
+
+    # A cell shows within the layer that paints it (the content viewport, or the sticky band / corner it sits
+    # in - a cell not yet placed in one, the content layer); the chrome ScrollView (sticky bands, scrollbars) is
+    # not clipped by the matrix
+    def clip_for(child : Widget) : Rect?
+      return nil if child.same?(@content_scroll_view)
+      child.painting_layer.try(&.bounds)
     end
 
     def active_cells : Hash(Tuple(Int32, Int32), Widget)
       @active_cells
     end
 
-    # Clear all widget_backend and background_backend for active cells.
+    # Clear (release) widget_backend and background_backend for the cells standing on the CONTENT layer.
     # Called by layer_renderer's handle_viewport_cache_scroll on full recenter (no overlap).
     # Without this, the fast-path (cached blit) would blit OLD content
-    # rendered at OLD buffer_origin positions after the buffer recenters.
+    # rendered at OLD buffer_origin positions after the buffer recenters. A sticky cell stands on a band the
+    # recenter did not touch: its texture is still good, and a pending blit plan still names it.
     def clear_all_widget_backends
       @active_cells.each do |_key, widget|
+        next unless widget.render_layer.same?(content_layer)
         widget.widget_backend = nil
         widget.background_backend = nil
       end
@@ -1640,23 +1795,12 @@ module CrymbleUI
       {rows: @visible_rows, cols: @visible_cols}
     end
 
-    # Calculate screen position (absolute) for a cell - useful for testing
-    # Returns the absolute position where a cell would appear on screen
+    # Where a cell's box is painted, in the matrix's absolute space - a test helper, asked of the placed cells
+    # (painted_rect, the cell rect without the gap). Raises for a cell nothing of which is painted.
     def cell_screen_position(row : Int32, col : Int32) : Vec2
-      # Content area is the full bounds
-      content_x = absolute_bounds.x
-      content_y = absolute_bounds.y
-
-      # Calculate cell position within content (before scroll)
-      # Ruler offsets shift all cells right/down
-      cell_x = ruler_col_width_pixels + (0...col).sum { |c| col_width_pixels(c) }
-      cell_y = ruler_row_height_pixels + (0...row).sum { |r| row_height_pixels(r) }
-
-      # Apply scroll offset
-      screen_x = content_x + cell_x - scroll_offset.x
-      screen_y = content_y + cell_y - scroll_offset.y
-
-      Vec2.new(screen_x, screen_y)
+      rect = painted_rect(get_bounding_box({row, col}), pitch: false) ||
+             raise "cell (#{row}, #{col}) is not painted - nothing of it is on screen"
+      absolute_bounds.position + rect.position
     end
 
     # === ADAPTER METHODS ===
@@ -1667,6 +1811,7 @@ module CrymbleUI
         on_cell: ->(row : Int32, col : Int32) {
           @pending_cell_invalidations << {row, col}
           mark_needs_render
+          Widget.app?.try &.register_input_flush(self) # applied before the next input, painted or not
           nil
         },
         on_all: ->{
@@ -1677,8 +1822,9 @@ module CrymbleUI
           clear_proxy_focus
           mark_needs_layout
           # Rows, columns and the edit proxy are stale until the flush: input queued behind this
-          # announce must wait for that frame (EventBatch).
-          Widget.app?.try &.request_frame_before_input
+          # announce must wait for that frame (EventBatch), and that frame must apply it even if this
+          # grid does not paint (App#finish_frame).
+          Widget.app?.try &.request_frame_before_input(self)
           nil
         }
       )
@@ -1702,9 +1848,19 @@ module CrymbleUI
       @content_layer
     end
 
+    # The chrome ScrollView's sticky bands and scrollbars composite over every cell - over the layers a cell
+    # owns too (both are painted into the content layer).
+    def ranks_children? : Bool
+      true
+    end
+
+    def composite_rank(owner : Widget) : Int32
+      owner.same?(@content_scroll_view) ? 1 : 0
+    end
+
     # Auxiliary layers this matrix owns beyond its primary content layer
     # (@content_layer, returned by #layer): the cursor band + drag decal overlays.
-    # Published for LayerRenderer#collect_layers (the each_owned_layer protocol) so
+    # Published for Layer.composite_order (the each_owned_layer protocol) so
     # a new matrix overlay can't be silently missed by the render pass. (The
     # scrollbar/sticky layers belong to the inner @content_scroll_view child, not
     # this matrix, and are collected through the child recursion.)
@@ -1745,13 +1901,6 @@ module CrymbleUI
     # intrinsic content height exceeds this cap, VM sizes to the cap and
     # the vertical scrollbar becomes active.
     property max_height : Float64? = nil
-
-    # When false, VM does NOT intercept cell-level mouse events: clicks
-    # flow directly to child cell widgets (Checkbox, Button, etc.), and
-    # no cursor-highlight overlay is drawn. Use for embedded summary /
-    # listing tables where navigation and cell-cursor semantics aren't
-    # wanted. Default true preserves the normal spreadsheet-style UX.
-    property interactive_cells : Bool = true
 
     def measure(constraints : BoxConstraints) : Size
       if @shrink_to_content
@@ -1827,13 +1976,9 @@ module CrymbleUI
       full_width = @bounds.width
       full_height = @bounds.height
       content_width, content_height = effective_content_size(full_width, full_height)
-      base_z = parent_layer_z_index
-
-      setup_content_layer(content_x, content_y, content_width, content_height, base_z)
-      if @interactive_cells
-        setup_cursor_overlay_layer(content_x, content_y, content_width, content_height, base_z)
-        setup_drag_overlay_layer(content_x, content_y, content_width, content_height, base_z)
-      end
+      setup_content_layer(content_x, content_y, content_width, content_height)
+      setup_cursor_overlay_layer(content_x, content_y, content_width, content_height)
+      setup_drag_overlay_layer(content_x, content_y, content_width, content_height)
       setup_scroll_view(full_width, full_height)
       sync_scroll_offsets
       @content_layer.not_nil!.scroll_offset = scroll_offset
@@ -1885,19 +2030,8 @@ module CrymbleUI
       @cached_total_height = nil
       @force_cell_update = true
 
-      # Destroy all active cells (sizes changed, need recreation at new dimensions)
-      @active_cells.each do |_key, widget|
-        if @proxy_focused_widget == widget
-          commit_proxy_edit
-          widget.deactivate_proxy_focus
-          @proxy_focused_widget = nil
-          @proxy_focused_rc = nil
-        end
-        widget.render_layer = nil
-        widget.parent = nil
-        @children.delete(widget)
-      end
-      @active_cells.clear
+      # Detach all active cells (sizes changed, need recreation at new dimensions)
+      destroy_active_cells
       @layer_widgets_need_sync = true
 
       # Clear layer backends to erase old pixels rendered at previous zoom's cell sizes
@@ -1912,7 +2046,7 @@ module CrymbleUI
     end
 
     # Create or update the content layer (viewport-cached, scrollable cell content).
-    private def setup_content_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+    private def setup_content_layer(x : Float64, y : Float64, w : Float64, h : Float64)
       content_bounds = Rect.new(x, y, w, h)
       {% if flag?(:DEBUG_BLIT) %}
         is_new = @content_layer.nil?
@@ -1920,7 +2054,7 @@ module CrymbleUI
       @content_layer ||= Layer.new(
         "matrix_content_#{id}",
         content_bounds,
-        z_index: base_z + CONTENT_LAYER_Z,
+        z_index: CONTENT_LAYER_Z,
         background_color: content_background_color, # getter (live); pull-based layer keeps it fresh
         owner_widget: self
       )
@@ -1931,7 +2065,6 @@ module CrymbleUI
           end
         end
       {% end %}
-      @content_layer.not_nil!.z_index = base_z + CONTENT_LAYER_Z
       @content_layer.not_nil!.background_color = content_background_color # cached fallback; pull keeps it live
       @content_layer.not_nil!.viewport_cache = true
       # This layer repairs its own geometry, so it opts out of the clear note_position_change does
@@ -1946,12 +2079,12 @@ module CrymbleUI
     end
 
     # Create or update the cursor overlay layer (non-scrolling highlight bands).
-    private def setup_cursor_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+    private def setup_cursor_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64)
       overlay_bounds = Rect.new(x, y, w, h)
       @cursor_overlay_layer ||= Layer.new(
         "cursor_overlay_#{id}",
         overlay_bounds,
-        z_index: base_z + CURSOR_OVERLAY_Z,
+        z_index: CURSOR_OVERLAY_Z,
         background_color: Color.new(0, 0, 0, 0),
         owner_widget: self
       )
@@ -1961,7 +2094,6 @@ module CrymbleUI
       # clear_on_grow; the renderer's size-change handler clears the layer on a grow — a generic
       # mechanism, not a per-widget guard.
       @cursor_overlay_layer.not_nil!.clear_on_grow = true
-      @cursor_overlay_layer.not_nil!.z_index = base_z + CURSOR_OVERLAY_Z
       @cursor_overlay_layer.not_nil!.blend_mode = @cursor_highlight_delta >= 0 ? BlendMode::Additive : BlendMode::Subtractive
       @cursor_overlay_layer.not_nil!.skip_rebuild_clear = true
 
@@ -1986,17 +2118,16 @@ module CrymbleUI
     # blend: the band layer flips to Subtractive in a light theme, which would
     # invert the fixed salmon decal into teal-green. Mirrors the cursor overlay
     # otherwise (non-scrolling, CachePolicy::Never widget, clear_on_grow).
-    private def setup_drag_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64, base_z : Int32)
+    private def setup_drag_overlay_layer(x : Float64, y : Float64, w : Float64, h : Float64)
       overlay_bounds = Rect.new(x, y, w, h)
       @drag_overlay_layer ||= Layer.new(
         "drag_overlay_#{id}",
         overlay_bounds,
-        z_index: base_z + DRAG_OVERLAY_Z,
+        z_index: DRAG_OVERLAY_Z,
         background_color: Color.new(0, 0, 0, 0),
         owner_widget: self
       )
       @drag_overlay_layer.not_nil!.clear_on_grow = true
-      @drag_overlay_layer.not_nil!.z_index = base_z + DRAG_OVERLAY_Z
       @drag_overlay_layer.not_nil!.blend_mode = BlendMode::Normal
       @drag_overlay_layer.not_nil!.opacity = DRAG_OVERLAY_OPACITY
       @drag_overlay_layer.not_nil!.skip_rebuild_clear = true
@@ -2018,7 +2149,7 @@ module CrymbleUI
 
     # Create/configure ScrollView for scrollbar chrome and sticky layer support.
     private def setup_scroll_view(full_width : Float64, full_height : Float64)
-      scroll_view = @content_scroll_view ||= ScrollView.new(ScrollDirection::Both, id: "#{id}_scrollview")
+      scroll_view = @content_scroll_view ||= ScrollView.new(ScrollDirection::Both, id: "#{id}_scrollview").tap(&.hands_wheel_on = true)
       scroll_view.parent = self
       @children << scroll_view unless @children.includes?(scroll_view)
 
@@ -2230,8 +2361,9 @@ module CrymbleUI
       mark_needs_render
       # Rulers (Dynamic) auto-capture scroll_offset → their nodes enqueue selectively via on_dirty, so
       # no mark_ruler_widgets_dirty on scroll. The cursor overlay is Never (flash animation, no node) →
-      # still marked explicitly here.
+      # still marked explicitly here; so is a drag decal on show, which moves with its cells.
       mark_cursor_overlay_dirty
+      mark_drag_overlay_dirty if drag_decal_shown?
     end
 
     # Sync scroll offset from ScrollView when the user scrolls via the scrollbar (thumb drag /
@@ -2264,30 +2396,80 @@ module CrymbleUI
         layer.scroll_offset = new_offset # compositor shifts the cached content immediately
       end
       @pending_scroll_update = true      # cell create/destroy deferred to pre_render_flush
+      Widget.app?.try &.register_input_flush(self) # ...or to finish_frame, if this grid does not paint
       mark_needs_render
       mark_cursor_overlay_dirty
+      mark_drag_overlay_dirty if drag_decal_shown?
+    end
+
+    # A source or target decal is painted (a scroll must move it; with none, the overlay has nothing to redo).
+    private def drag_decal_shown? : Bool
+      !@drag_target_cell.nil? || (!@drag_source_cell.nil? && !@drag_source_provisional)
     end
 
     # === DEFERRED SCROLL FLUSH ===
+
+    # The structural state the next input depends on - which cells exist, and the proxy editor on the
+    # cursor cell - for App#finish_frame, which runs it for a grid that did not paint this frame
+    # (occlusion culling, a closed or hidden panel, an empty viewport). A grid that painted ran both
+    # halves inside pre_render_flush already, so here they are no-ops. The resize flush, content
+    # fitting and the auto-size handover stay with painting: they concern geometry nobody sees while
+    # the grid is covered, and a covered grid cannot be resize-dragged.
+    def flush_before_input : Bool
+      scrolled = flush_scroll
+      flush_invalidations || scrolled
+    end
+
+    # Work still waiting to be applied - what finish_frame is for.
+    def input_flush_pending? : Bool
+      @pending_invalidate_all || !@pending_cell_invalidations.empty? || @pending_scroll_update
+    end
+
+    # Deferred scroll flush (5e2f3ee): sync_from_scroll_view only flagged the change and shifted the
+    # compositor; the expensive cell create/destroy runs here, once per frame - not once per queued
+    # mouse event. An empty viewport keeps the flag for when it has a size. True when it ran a pass.
+    private def flush_scroll : Bool
+      return false unless @pending_scroll_update
+      vp_w = @content_layer.try(&.bounds.width) || bounds.width
+      vp_h = @content_layer.try(&.bounds.height) || bounds.height
+      return false unless vp_w > 0 && vp_h > 0
+      @pending_scroll_update = false
+      update_visible_cells(vp_w, vp_h)
+      true
+    end
+
+    # Push-based adapter invalidations. The flag is cleared BEFORE the flush: update_proxy_focus
+    # returns early while it is set, and an announce re-entering from the flush (a proxy commit's
+    # cell_assign) must set it again, not be swallowed. True when it ran a pass.
+    private def flush_invalidations : Bool
+      if @pending_invalidate_all
+        @pending_invalidate_all = false
+        @pending_cell_invalidations.clear
+        flush_invalidate_all
+        # Recreate cells immediately (layout may not run if only mark_needs_render)
+        trigger_update_visible_cells
+        # Refresh proxy focus: old cell widgets were destroyed, new ones created.
+        # Without this, @proxy_focused_widget points to a dead widget.
+        update_proxy_focus if focused?
+        true
+      elsif !@pending_cell_invalidations.empty?
+        flush_cell_invalidations
+        # Recreate destroyed cells
+        trigger_update_visible_cells
+        update_proxy_focus if focused?
+        true
+      else
+        false
+      end
+    end
 
     # Called by layer_renderer before collecting widgets for rendering.
     # Flushes deferred scroll/invalidation updates so cells are created/destroyed once per frame,
     # not on every mouse event during scrollbar thumb drag.
     def pre_render_flush
-      repositioned = false
-      # Deferred scroll flush (5e2f3ee): sync_from_scroll_view only flagged the change and
-      # shifted the compositor; run the expensive cell create/destroy here, once per frame —
-      # not once per queued mouse event. Must run BEFORE the change-animation scan below so it
-      # reads the up-to-date @visible_rows/@visible_cols.
-      if @pending_scroll_update
-        @pending_scroll_update = false
-        vp_w = @content_layer.try(&.bounds.width) || bounds.width
-        vp_h = @content_layer.try(&.bounds.height) || bounds.height
-        if vp_w > 0 && vp_h > 0
-          update_visible_cells(vp_w, vp_h)
-          repositioned = true
-        end
-      end
+      # The scroll flush must run BEFORE the change-animation scan below, so that it reads the
+      # up-to-date @visible_rows/@visible_cols; the invalidation flush after it (today's order).
+      repositioned = flush_scroll
 
       # Deferred resize flush: a resize drag only flagged @pending_resize_update per
       # move; do the expensive geometry + reflow + ruler invalidation here, once per
@@ -2308,24 +2490,7 @@ module CrymbleUI
         end
       end
 
-      # Process push-based adapter invalidations first
-      if @pending_invalidate_all
-        @pending_invalidate_all = false
-        @pending_cell_invalidations.clear
-        flush_invalidate_all
-        # Recreate cells immediately (layout may not run if only mark_needs_render)
-        trigger_update_visible_cells
-        repositioned = true
-        # Refresh proxy focus: old cell widgets were destroyed, new ones created.
-        # Without this, @proxy_focused_widget points to a dead widget.
-        update_proxy_focus if focused?
-      elsif !@pending_cell_invalidations.empty?
-        flush_cell_invalidations
-        # Recreate destroyed cells
-        trigger_update_visible_cells
-        repositioned = true
-        update_proxy_focus if focused?
-      end
+      repositioned = flush_invalidations || repositioned
 
       # Content sizing runs AFTER the invalidation processing, never before: flush_invalidate_all
       # reinstalls `adapter.get_sizes` over @col_widths/@row_heights, so a re-measure done first
@@ -2423,22 +2588,66 @@ module CrymbleUI
       end
     end
 
-    # ONE owner of the cell teardown: an in-progress edit is committed before its widget goes,
-    # and proxy focus is dropped so nothing points at a dead cell. Both the full invalidation
-    # and the auto-size re-measure need exactly this.
+    # Every active cell leaves: the full invalidation, the auto-size re-measure and a zoom change. Each is
+    # detached (detach_cell), and taken off the layers it stood on in ONE pass per layer - a layer's list also
+    # holds what is not a cell (rulers, overlays), so it is filtered, never cleared.
     private def destroy_active_cells : Nil
-      @active_cells.each do |_key, widget|
-        if @proxy_focused_widget == widget
-          commit_proxy_edit
-          widget.deactivate_proxy_focus
-          @proxy_focused_widget = nil
-          @proxy_focused_rc = nil
-        end
-        widget.render_layer = nil
-        widget.parent = nil
-        @children.delete(widget)
-      end
+      cells = @active_cells.values
       @active_cells.clear
+      layers = Set(Layer).new
+      cells.each do |widget|
+        widget.render_layer.try { |layer| layers << layer }
+        detach_cell(widget, off_layer: false)
+      end
+      # (every caller also re-lists the layers - sync_cells_to_layers - but a detached cell must not wait for that
+      # on a layer a zero-size viewport keeps from syncing)
+      gone = cells.to_set
+      layers.each { |layer| layer.widgets.reject! { |widget| gone.includes?(widget) } }
+      Layer.reorder! if release_detached(gone)
+    end
+
+    # ONE owner of a cell LEAVING the grid. It is DETACHED, never destroyed: an adapter may hand the same
+    # widget back (one that keeps its cell widgets does), and it must then come back whole. So an in-progress edit is
+    # committed and proxy focus dropped, and the cell leaves the layer it stood on (off_layer: a detach of
+    # every cell does that once per layer), its parent and @children. Its GPU is freed by release_detached,
+    # once the caller knows the cell did not come straight back.
+    private def detach_cell(widget : Widget, off_layer : Bool = true) : Nil
+      if @proxy_focused_widget == widget
+        commit_proxy_edit
+        widget.deactivate_proxy_focus
+        @proxy_focused_widget = nil
+        @proxy_focused_rc = nil
+      end
+      if layer = widget.render_layer
+        layer.widgets.delete(widget) if off_layer
+        # A sticky layer's blit plan names the textures of the cells standing on it, and this one's is about to
+        # be freed: the plan is void, and the layer renders in full instead.
+        if layer.blit_plan
+          layer.blit_plan = nil
+          layer.blit_plan_render_widgets = nil
+          layer.mark_needs_full_render
+        end
+      end
+      widget.render_layer = nil
+      widget.parent = nil
+      @children.delete(widget)
+    end
+
+    # The cells of `cells` still detached have LEFT: every layer of their subtrees is retired (surface disposed,
+    # out of the registry, kept whole for a return) and every widget lets go of what it held (Widget#release_own:
+    # its pull node - its subscription to the global zoom/theme Sources - its surfaces, its slot stamp). True
+    # when one of them held a layer: the composite set changed.
+    private def release_detached(cells : Enumerable(Widget)) : Bool
+      owned = false
+      cells.each do |widget|
+        next unless widget.parent.nil? # handed straight back: it never left
+        widget.each_layer_in_subtree do |layer|
+          layer.retire
+          owned = true
+        end
+        widget.release_subtree
+      end
+      owned
     end
 
     # Full invalidation: re-read dimensions, destroy all active cells
@@ -2488,30 +2697,24 @@ module CrymbleUI
       cells = @pending_cell_invalidations.dup
       @pending_cell_invalidations.clear
 
-      any_destroyed = false
+      detached = [] of Widget
       cells.each do |key|
         if widget = @active_cells.delete(key)
-          if @proxy_focused_widget == widget
-            commit_proxy_edit
-            widget.deactivate_proxy_focus
-            @proxy_focused_widget = nil
-            @proxy_focused_rc = nil
-          end
-          widget.render_layer = nil
-          widget.parent = nil
-          @children.delete(widget)
-          any_destroyed = true
+          detach_cell(widget)
+          detached << widget
         end
       end
+      Layer.reorder! if release_detached(detached)
 
-      @force_cell_update = true if any_destroyed
+      @force_cell_update = true unless detached.empty?
     end
 
     # Trigger update_visible_cells using current content layer dimensions
     private def trigger_update_visible_cells
       if layer = @content_layer
-        if layer.bounds.width > 0 && layer.bounds.height > 0
-          update_visible_cells(layer.bounds.width, layer.bounds.height)
+        size = layer.size
+        if size.width > 0 && size.height > 0
+          update_visible_cells(size.width, size.height)
         end
       end
     end
@@ -2527,13 +2730,8 @@ module CrymbleUI
       # full sticky() recompute only when num_shifted or index_beyond changes (boundary crossing).
 
       # Build/use cached sizes arrays (avoid O(n) rebuild per scroll)
-      col_sizes = @cached_col_sizes ||= (0...@cols).map { |c| col_width_pixels(c).to_i32 }
-      row_sizes = @cached_row_sizes ||= begin
-        # perf-audit: this O(total rows) rebuild fires on ANY dimension-cache invalidation, including
-        # a COLUMN resize (invalidate_dimension_caches clears row sizes too) — visible cells constant.
-        VirtualMatrix.increment_row_cache_rebuild_rows(@rows)
-        (0...@rows).map { |r| row_height_pixels(r).to_i32 }
-      end
+      col_sizes = placed_col_sizes
+      row_sizes = placed_row_sizes
 
       # Get scroll order from adapter (or default sequential), cache it
       unless @cached_col_scroll_order && @cached_row_scroll_order
@@ -2565,8 +2763,8 @@ module CrymbleUI
       col_cumulative = @cached_col_cumulative ||= col_scroll_order.map { |el| col_sizes[el] }.accumulate { |x, y| x + y }
       row_cumulative = @cached_row_cumulative ||= row_scroll_order.map { |el| row_sizes[el] }.accumulate { |x, y| x + y }
       # Physical cumulative in natural order for filtering creation/destruction regions
-      col_physical_cum = @cached_col_physical_cum ||= col_sizes.accumulate(0) { |a, b| a + b }
-      row_physical_cum = @cached_row_physical_cum ||= row_sizes.accumulate(0) { |a, b| a + b }
+      col_physical_cum = placed_col_cum
+      row_physical_cum = placed_row_cum
 
       # Use floor/ceil for correct visibility at sub-pixel offsets.
       # Subtract ruler offsets: StickyMath and col_physical_cum work in column-space
@@ -2795,20 +2993,16 @@ module CrymbleUI
             end
           end
         {% end %}
+        # Detached now, RELEASED after the cells are made: a merged cell's handle migrates as the grid scrolls, so
+        # its widget can be detached and handed straight back in this update - it never left, and keeps its GPU.
+        detached = Set(Widget).new
         cells_to_remove.each do |key|
           if widget = @active_cells.delete(key)
-            # Clear proxy focus if the destroyed cell had it
-            if @proxy_focused_widget == widget
-              commit_proxy_edit
-              widget.deactivate_proxy_focus
-              @proxy_focused_widget = nil
-              @proxy_focused_rc = nil
-            end
-            widget.render_layer = nil
-            widget.parent = nil
-            @children.delete(widget)
+            detach_cell(widget)
+            detached << widget
           end
         end
+        owners_changed = false
 
         if ENV["CRYMBLE_STICKY_LOG"]?
           STDERR.puts "[sticky] LAYOUT path: handles=#{handle_cells.size} row_shifting=#{row_shifting_index} col_shifting=#{col_shifting_index} scroll=#{scroll_offset}"
@@ -2858,8 +3052,8 @@ module CrymbleUI
           # while the cell's content-space rect is anchored to its top-left.
           # Using key.row/col here would slide the cell off its cluster, leaving
           # cached pixels at the wrong content y after the next scroll cycle.
-          x = ruler_col_width_pixels.to_i + col_physical_cum[canonical[1]]
-          y = ruler_row_height_pixels.to_i + row_physical_cum[canonical[0]]
+          x = placed_col_start(canonical[1])
+          y = placed_row_start(canonical[0])
           bounding = get_bounding_box(key)
 
           # Use visible compound size if available (partial scroll shrinking)
@@ -2880,6 +3074,14 @@ module CrymbleUI
           end
           cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
           cell.layout(cell_constraints, Vec2.new(x.to_f64, y.to_f64))
+          # Asked after layout: a ScrollView makes its layer there. A cell an adapter handed back rejoins the
+          # registry it left when it was released; one handed straight back never left it.
+          unless existing || detached.includes?(cell)
+            cell.each_layer_in_subtree do |owned|
+              owned.register
+              owners_changed = true
+            end
+          end
           {% if flag?(:DEBUG_BLIT) %}
             if key == {1, 1}
               File.open("/tmp/blit_trace.log", "a") do |f|
@@ -2888,6 +3090,9 @@ module CrymbleUI
             end
           {% end %}
         end
+
+        owners_changed = true if release_detached(detached)
+        Layer.reorder! if owners_changed # the composite set changed: the renderer re-collects
 
         # Re-layout existing content cells during resize drag.
         # set_col_width_for_drag / set_row_height_for_drag skip mark_needs_layout,
@@ -2949,8 +3154,8 @@ module CrymbleUI
             else
               # The resized line (re-renders at its new size) or the clear-path fallback: re-lay-out to
               # the exact new geometry so a full clear+render is correct.
-              x = ruler_col_width_pixels.to_i + col_physical_cum[col]
-              y = ruler_row_height_pixels.to_i + row_physical_cum[row]
+              x = placed_col_start(col)
+              y = placed_row_start(row)
               cell_width = calculate_merged_width(bounding, col_sizes)
               cell_height = calculate_merged_height(bounding, row_sizes)
               cell_constraints = BoxConstraints.tight(Size.new(cell_width - grid_spacing, cell_height - grid_spacing))
@@ -2970,16 +3175,14 @@ module CrymbleUI
             # buffer blit-shift in handle_content_resize_shift. Nulling background_backend forces a
             # fresh background capture (else a moved/re-rendered cell re-imprints a stale clipped edge).
             size_changed_cells.each do |cell|
-              cell.widget_backend.try(&.dispose)
               cell.widget_backend = nil
-              cell.background_backend.try(&.dispose)
               cell.background_backend = nil
             end
             if resize_axis.col?
-              boundary_local = ruler_col_width_pixels.to_i + col_physical_cum[resize_index + 1]
+              boundary_local = placed_col_start(resize_index + 1).to_i32
               content.mark_needs_resize_shift(ResizeShift.new(ShiftAxis::Horizontal, boundary_local, shift_delta, grid_spacing))
             else
-              boundary_local = ruler_row_height_pixels.to_i + row_physical_cum[resize_index + 1]
+              boundary_local = placed_row_start(resize_index + 1).to_i32
               content.mark_needs_resize_shift(ResizeShift.new(ShiftAxis::Vertical, boundary_local, shift_delta, grid_spacing))
             end
           else
@@ -3151,9 +3354,20 @@ module CrymbleUI
       end
     end
 
+    # Whether a press on `cell` now would be the second click of a double-click: the one test
+    # on_mouse_down's branch makes (the test Driver asks it before it presses).
+    def double_click?(cell : Tuple(Int32, Int32)) : Bool
+      cell == @last_click_cell && Time.instant - @last_click_time < double_click_interval
+    end
+
     # Variable size helpers (include grid spacing)
     private def col_width_pixels(col : Int32) : Float64
-      grid_spacing + get_col_width(col) * frame_height
+      pitch_pixels(get_col_width(col))
+    end
+
+    # A line's pitch for a size in frame units: the box plus its gutter.
+    private def pitch_pixels(units : Float64) : Float64
+      grid_spacing + units * frame_height
     end
 
     # Embedded shrink_to_content tables clip horizontally rather than scrolling
@@ -3166,7 +3380,7 @@ module CrymbleUI
     end
 
     private def row_height_pixels(row : Int32) : Float64
-      grid_spacing + get_row_height(row) * frame_height
+      pitch_pixels(get_row_height(row))
     end
 
     # Calculate total width for a merged cell region
@@ -3377,31 +3591,10 @@ module CrymbleUI
 
     # === LAYER OWNER NOTIFICATION HANDLERS ===
 
-    # Get z_index from parent layer (for proper z-ordering)
-    private def parent_layer_z_index : Int32
-      widget = self.parent
-      while widget
-        if widget.responds_to?(:layer)
-          if layer = widget.layer
-            return layer.z_index
-          end
-        end
-        widget = widget.parent
-      end
-      0
-    end
-
     # on_ancestor_position_changed no longer needed (pull-based bounds)
 
-    def on_ancestor_z_index_changed(base_z : Int32)
-      @content_layer.try { |l| l.z_index = base_z + CONTENT_LAYER_Z }
-      @cursor_overlay_layer.try { |l| l.z_index = base_z + CURSOR_OVERLAY_Z }
-      @drag_overlay_layer.try { |l| l.z_index = base_z + DRAG_OVERLAY_Z }
-
-      # Propagate to ScrollView child (for scrollbar layer z-index)
-      @content_scroll_view.try(&.on_ancestor_z_index_changed(base_z + 2))
-
-      # Mark layer for re-render
+    # A panel above was raised: repaint the content layer (the chrome ScrollView hears it itself)
+    def on_ancestor_raised
       @content_layer.try(&.mark_needs_layout)
     end
 
@@ -3447,6 +3640,9 @@ module CrymbleUI
         # runs → layers keep stale pixels.
         @pending_invalidate_all = true if old.@pending_invalidate_all
         @pending_cell_invalidations.concat(old.@pending_cell_invalidations)
+        # The work is this instance's now, and the old one leaves the tree: register it here, or a grid
+        # that does not paint would keep it past the barrier (App#finish_frame skips the old one).
+        Widget.app?.try &.register_input_flush(self) if input_flush_pending?
 
         # SIZE-CARRY (UX state, not the clear invariant): user drag-resize survives a
         # rebuild only while the grid dimensions still match — identity-INDEPENDENT, so
@@ -3467,8 +3663,11 @@ module CrymbleUI
           @auto_size = old.auto_size unless @auto_size_explicit
           # The mode did not change across this rebuild and the sizes came with it, so there is
           # nothing to recompute; without this every rebuild would pay a full re-measure whose
-          # result the carry above had already provided.
-          @auto_size_pending = false if old.auto_size == @auto_size
+          # result the carry above had already provided. Unless the old instance never measured:
+          # a tree rebuilt before its first frame carries DEFAULT sizes, so its pending re-measure
+          # travels with them - else a matrix born with the mode on ("Duplicate Shape"), or one
+          # switched on and rebuilt in the same event, stays at the default height for good.
+          @auto_size_pending = old.@auto_size_pending && @auto_size if old.auto_size == @auto_size
           # ... and with the sizes, the pass-1 measurement they were computed from: the cancel
           # above means nothing will re-derive it, and without it the shrink path has no runner-up
           # to fall back to. See carry_line_extents_from.
@@ -3514,6 +3713,7 @@ module CrymbleUI
             # unconditional, but a spec that provokes the violation on purpose should not print it.
             STDERR.puts "[MATRIX_ADAPTER_CONTRACT] #{msg}" if Widget.enable_warnings
             @pending_invalidate_all = true
+            Widget.app?.try &.register_input_flush(self)
             mark_needs_layout
           {% end %}
         end

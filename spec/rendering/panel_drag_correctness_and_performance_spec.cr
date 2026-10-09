@@ -161,9 +161,7 @@ describe "Panel Drag: Correctness and Performance" do
     # Idle frames should render/composite nothing
     renderer.primitive_count.should eq 0
     renderer.layer_backend_clear_count.should eq 0  # No layer re-renders (window background clear is OK)
-    renderer.compositor_call_count.should eq 10  # Currently always runs
-    # TODO: When compositor skip implemented, this should be 0
-    # renderer.compositor_skip_count.should eq 10
+    renderer.compositor_call_count.should eq 10  # the compositor runs every rendered frame
 
   end
 end

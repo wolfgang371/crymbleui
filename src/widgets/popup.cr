@@ -93,13 +93,21 @@ module CrymbleUI
         theme_property border_color, popup_border
         reactive_property padding : Float64 = 0.0, layout: true
 
-        # Z-ordering (higher = on top)
-        property z_index : Int32
+        # Z-ordering among the overlays (higher = on top)
+        getter z_index : Int32
 
-        # A popup is an overlay: it (and its descendants) composite ABOVE all panels.
-        # The renderer asks this polymorphically (find_panel_z_index), not via is_a?(Popup).
+        def z_index=(@z_index : Int32)
+            Layer.reorder!
+        end
+
+        # A popup is an overlay: it (and its descendants) composite above the whole tree, by z
+        # (Layer.composite_order asks this polymorphically, not via is_a?(Popup)).
+        def composites_as_overlay? : Bool
+            true
+        end
+
         def compositing_z_index : Int32
-            Int32::MAX
+            z_index
         end
 
         # @internal_layer provided by LayerOwner mixin
@@ -142,12 +150,12 @@ module CrymbleUI
         # reconciles via @[Reconcile]. Both Popup#perform_layout and the ComboBoxPopup override
         # (which does its own layout but shares the layer) call this, so the creation lives once.
         protected def ensure_layer : Layer
-            @internal_layer ||= Layer.new("popup_#{id}", Rect.zero, z_index: @z_index, background_color: self.background_color, owner_widget: self)
+            @internal_layer ||= Layer.new("popup_#{id}", Rect.zero, background_color: self.background_color, owner_widget: self)
         end
 
-        # Pull-based layer bounds: expand absolute_bounds by border margin
+        # Pull-based layer bounds (content space): expand absolute_bounds by border margin
         def compute_bounds_for_layer(layer : Layer) : Rect
-            abs = viewport_bounds
+            abs = absolute_bounds
             Rect.new(
                 abs.x - BORDER_MARGIN,
                 abs.y - BORDER_MARGIN,
@@ -205,30 +213,29 @@ module CrymbleUI
         def perform_layout(constraints : BoxConstraints, position : Vec2)
             size = measure(constraints)
 
-            # Use target_x/target_y for absolute positioning if set
-            # Convert from absolute window coords to relative-to-parent coords.
-            # Clamp so the popup never spills past the parent's right/bottom
-            # edges (context menus opened near the right edge of a window
-            # were having their right column clipped).
+            # A popup places itself in WINDOW space: nothing above it shifts it (enclosing_scroll stops at it), so
+            # its absolute position is where it is drawn. A target (target_x/target_y, window space) is clamped
+            # into where the parent is DRAWN (viewport_bounds - a context menu opened near the right edge was
+            # having its right column clipped), then made parent-relative against the parent's CONTENT origin. An
+            # untargeted popup goes where it is laid out, as painted: its position minus the parent's own shift.
+            parent = @parent
             actual_position = if @target_x != 0.0 || @target_y != 0.0
-                parent_abs_rect = @parent.try(&.absolute_bounds)
-                parent_abs = parent_abs_rect.try(&.position) || Vec2.zero
                 tx = @target_x
                 ty = @target_y
-                if parent_abs_rect
-                    parent_right = parent_abs.x + parent_abs_rect.width
-                    parent_bottom = parent_abs.y + parent_abs_rect.height
-                    overflow_x = (tx + size.width) - parent_right
-                    overflow_y = (ty + size.height) - parent_bottom
+                if drawn = parent.try(&.viewport_bounds)
+                    overflow_x = (tx + size.width) - drawn.right
+                    overflow_y = (ty + size.height) - drawn.bottom
                     tx -= overflow_x if overflow_x > 0
                     ty -= overflow_y if overflow_y > 0
                     # Don't push past the parent's top/left either.
-                    tx = parent_abs.x if tx < parent_abs.x
-                    ty = parent_abs.y if ty < parent_abs.y
+                    tx = drawn.x if tx < drawn.x
+                    ty = drawn.y if ty < drawn.y
                 end
-                Vec2.new(tx - parent_abs.x, ty - parent_abs.y)
+                origin = parent.try(&.absolute_bounds.position) || Vec2.zero
+                Vec2.new(tx - origin.x, ty - origin.y)
             else
-                position
+                shift = parent.try(&.enclosing_scroll) || Vec2.zero
+                Vec2.new(position.x - shift.x, position.y - shift.y)
             end
 
             @bounds = Rect.new(actual_position, size)

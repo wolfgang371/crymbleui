@@ -162,6 +162,19 @@ module CrymbleUI
     @default_mode : TextInputMode = TextInputMode::FullEdit  # Initial mode (for focus reset)
     reactive_property pending_replace : Bool = false, reconcile: true # Set to true on focus; first keystroke replaces content
 
+    # PARKED: a QuickEntry cell armed on focus, nothing typed yet - the one predicate for "not editing
+    # text": the clipboard keys and bare Delete decline to the owner here, Enter opens full edit, and the
+    # first character replaces the value.
+    private def parked? : Bool
+      edit_mode == TextInputMode::QuickEntry && pending_replace
+    end
+
+    # Escape aborts an edit once one has begun; a parked cell has nothing to abort (its value is the one
+    # it had on focus).
+    def consumes_escape? : Bool
+      !parked?
+    end
+
     # Value saved on focus for undo on Escape
     reactive_property value_on_focus : String? = nil, reconcile: true
 
@@ -238,6 +251,13 @@ module CrymbleUI
     # (e.g. a ComboBox popup commits the highlight and re-dispatches Tab to its owning
     # focus-scope). Same true-on-consume contract as the arrow intercepts above.
     property on_tab : Proc(Bool, Bool)?
+
+    # Paste transform: the consumer's reading of a clipboard payload, called with the RAW text before the
+    # paste policy below flattens it - so what it returns is flattened by the same rules. For a consumer that
+    # knows its payload's format (a spreadsheet cell's quoting, say); the library knows none. It returns the
+    # text the payload stands for, or nil when the payload is not in its format (then it pastes as it is).
+    # A plain property, not reconciled: a reconciled Proc would carry the old closure across a rebuild.
+    property paste_transform : Proc(String, String?)?
 
     # Setter for on_event (allows parent widgets like ComboBox to set it)
     def on_event=(callback : Proc(String, TextInputEvent, Nil)?)
@@ -928,7 +948,7 @@ module CrymbleUI
       end
 
       # In QuickEntry mode, first keystroke replaces entire content
-      if edit_mode == TextInputMode::QuickEntry && pending_replace
+      if parked?
         @value.set(char.to_s)
         @cursor_pos.set(1)
         @pending_replace.set(false)
@@ -1016,7 +1036,7 @@ module CrymbleUI
       # the earlier "decline only the keys that have a competing cell-op" rule
       # silently swallowed Ctrl+C and Shift+Insert from any application that later
       # grew a grid-level copy/paste — the key never reached the owner at all.
-      parked = edit_mode == TextInputMode::QuickEntry && pending_replace
+      parked = parked?
 
       # Ctrl+C or Ctrl+Insert = Copy
       if (control && key == SF::Keyboard::Key::C) || (control && key == SF::Keyboard::Key::Insert)
@@ -1064,7 +1084,7 @@ module CrymbleUI
           # resets it only when the value CHANGED, so a parked cell can hold a stale
           # mid-string caret and break "Alice" into "Al\nice". Pinning unconditionally would
           # instead jump to the end whenever the user is already editing mid-value.
-          if edit_mode == TextInputMode::QuickEntry && pending_replace
+          if parked?
             @cursor_pos.set(value.size)
             enter_edit_mode
           end
@@ -1079,7 +1099,7 @@ module CrymbleUI
           notify_change
           return true
         end
-        if edit_mode == TextInputMode::QuickEntry && pending_replace
+        if parked?
           # PARKED QuickEntry (nothing typed yet): Enter opens full character-edit of the
           # EXISTING value (F2-style). Committing/moving is the arrow keys' job — Enter never moves.
           enter_edit_mode
@@ -1112,7 +1132,7 @@ module CrymbleUI
         # (immediate editing) Delete forward-deletes a character instead, and never
         # bubbles to the destructive record delete. Without the parked decline the host
         # shortcut would be dead.
-        return false if edit_mode == TextInputMode::QuickEntry && pending_replace
+        return false if parked?
         if has_selection?
           delete_selection
           reset_cursor_blink
@@ -1243,7 +1263,7 @@ module CrymbleUI
         # follow. A parked cell draws no caret, so moving one has no visible effect — while
         # consuming the key leaves the grid's own Home (column 0) and Ctrl+Home (cell {0,0})
         # dead on every text cell, which is what they were.
-        return false if edit_mode == TextInputMode::QuickEntry && pending_replace
+        return false if parked?
 
         # Home/End work on the LINE; Ctrl+Home/Ctrl+End on the whole value. Identical for a
         # single-line value, where the line IS the value, so nothing existing moves.
@@ -1361,8 +1381,10 @@ module CrymbleUI
       # Whatever is on the clipboard is pasted as text — the library does not care who
       # put it there. A consumer that copies structured data and then pastes it into a
       # text field gets that text, flattened by the rules below; that is the user's
-      # own doing and not something this widget second-guesses.
+      # own doing and not something this widget second-guesses. A consumer that knows
+      # the format reads it first, through paste_transform.
       return unless raw = Widget.clipboard.text
+      raw = @paste_transform.try(&.call(raw)) || raw
 
       # Guard on the SANITISED result, not the raw payload: a control-only payload is
       # non-empty raw but empty here, and a raw guard would let it through to

@@ -31,6 +31,10 @@ module CrymbleUI
     def initialize(@focus_manager : FocusManager, @shortcut_manager : ShortcutManager)
     end
 
+    def keyboard_event?(event : LibCSFML::Event) : Bool
+      event.type.key_pressed? || event.type.key_released? || event.type.text_entered?
+    end
+
     # Returns true if the event requires a redraw.
     def handle(event : LibCSFML::Event, app : App) : Bool
       case event.type
@@ -133,8 +137,8 @@ module CrymbleUI
         when SF::Keyboard::D # Ctrl+Shift+D = dump render state (dev diagnostic)
           if key.shift
             if root = app.root
-              RenderDebug.dump(root)
-              puts "[render dump] /tmp/render_dump/ — #{Layer.active_layers(root).size} layers (PNG per layer + report.txt)"
+              report = RenderDebug.dump(root)
+              puts "[render dump] /tmp/render_dump/ — #{report.lines.first?} (PNG per layer + report.txt)"
             end
             return true
           end

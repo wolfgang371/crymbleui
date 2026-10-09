@@ -81,7 +81,6 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
   WINDOW_H = 900
 
   @adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
-  @scheduled_first = false
 
   enum Phase
     Settle          # Phase 0: Initial settle
@@ -104,12 +103,12 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
 
   @test_results = [] of String
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      schedule(500) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    after(500.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     window("Blit-Shift VThumb Autotest", WINDOW_W, WINDOW_H) do
       expanded do
         widget(CrymbleUI::VirtualMatrix.new(
@@ -120,19 +119,6 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
         ))
       end
     end
-  end
-
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000), &block)
   end
 
   private def get_matrix : CrymbleUI::VirtualMatrix?
@@ -163,7 +149,7 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
       root.try(&.mark_needs_layout)
       rebuild if root.try(&.needs_layout?)
       @phase = Phase::CaptureBaseline
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::CaptureBaseline
       log("=== PHASE 1: CAPTURE BASELINE ===")
@@ -191,7 +177,7 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
 
       @phase = Phase::ScrollDown
       @sub_step = 0
-      schedule(300) { run_phase }
+      after(300.milliseconds) { run_phase }
 
     when Phase::ScrollDown
       log("=== PHASE 2: SCROLL DOWN ===")
@@ -211,7 +197,7 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
       end
 
       @phase = Phase::CaptureAfter
-      schedule(200) { run_phase }
+      after(200.milliseconds) { run_phase }
 
     when Phase::CaptureAfter
       log("=== PHASE 3: CAPTURE AFTER SCROLL ===")
@@ -296,12 +282,12 @@ class BlitShiftVthumbAutoTest < CrymbleUI::App
       @test_results << "BUFFER_ORIGIN: (#{bo.x.round(1)}, #{bo.y.round(1)})"
 
       @phase = Phase::Results
-      schedule(200) { run_phase }
+      after(200.milliseconds) { run_phase }
 
     when Phase::Results
       output_results
       @phase = Phase::Done
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::Done
       quit

@@ -5,7 +5,6 @@ require "../../src/widgets/tree_node"
 require "../../src/widgets/combo_box"
 require "../../src/widgets/text_input"
 require "../../src/widgets/virtual_matrix"
-require "../../src/widgets/simple_matrix"
 require "../../src/dsl/builder"
 require "../../src/testing/test_renderer"
 require "../../src/input/focus_cycler"
@@ -24,7 +23,37 @@ require "../../src/input/focus_cycler"
 #   I3  an embedded matrix's height is invariant under a width-only resize (phantom hscroll)
 #   I4  after a round-trip back to the start width, the matrix re-expands  (no-heal / slivers)
 
-# ---- History-Selection-shaped app: resizable panel > tree_node > matrix --------
+# The changes table: a sticky header row over 8 rows of checkbox, four texts and a button, at the sizes the retired
+# DSL `matrix` measured for them (frame units).
+class FuzzChangesAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter
+
+  HEADER = ["", "Table", "Records", "Fields", "Cells", ""]
+  NAMES  = ["Allocations", "Cities", "Persons", "Projects", "Times", "Regions", "Items", "Notes"]
+
+  def get_scrollorder : {Array(Int32), Array(Int32)}
+    {(1..8).to_a + [0], (0..5).to_a}
+  end
+
+  def get_sizes : {Array(Float64), Array(Float64)}
+    {[0.8] + Array.new(8, 1.105), [2.005, 5.42, 3.74, 3.32, 2.9, 4.04]}
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    return CrymbleUI::Text.new(HEADER[col]) if row == 0
+    i = row - 1
+    case col
+    when 0 then CrymbleUI::Checkbox.new(text: "", checked: true, id: "chk_#{i}")
+    when 1 then CrymbleUI::Text.new(NAMES[i])
+    when 2, 3 then CrymbleUI::Text.new("+#{i}")
+    when 4 then CrymbleUI::Text.new("#{i}")
+    else CrymbleUI::Button.new("> Shape", padding: 3.0, id: "btn_#{i}")
+    end
+  end
+end
+
+# ---- History-Selection-shaped app: resizable panel > tree_node > a shrink_to_content grid (as the retired DSL
+# `matrix` built it: max_height 200, no rulers) --------
 class FuzzHistoryApp < CrymbleUI::App
   def build : CrymbleUI::Widget
     window("Fuzz", 1300, 800) do
@@ -32,16 +61,11 @@ class FuzzHistoryApp < CrymbleUI::App
                    resizable: true, id: "panel") do
         vstack(spacing: 5.0, padding: 5.0) do
           tree_node("History selection", expanded: true, id: "history") do
-            matrix(id: "changes", max_height: 200.0) do |m|
-              m.header "", "Table", "Records", "Fields", "Cells", ""
-              ["Allocations", "Cities", "Persons", "Projects", "Times", "Regions", "Items", "Notes"].each_with_index do |name, i|
-                m.row do |r|
-                  r << CrymbleUI::Checkbox.new(text: "", checked: true, id: "chk_#{i}").as(CrymbleUI::Widget)
-                  r.text(name); r.text("+#{i}"); r.text("+#{i}"); r.text("#{i}")
-                  r << CrymbleUI::Button.new("> Shape", padding: 3.0, id: "btn_#{i}").as(CrymbleUI::Widget)
-                end
-              end
-            end
+            widget(CrymbleUI::VirtualMatrix.new(adapter: FuzzChangesAdapter.new, id: "changes").tap do |vm|
+              vm.shrink_to_content = true
+              vm.show_rulers = false
+              vm.max_height = 200.0
+            end)
           end
         end
       end

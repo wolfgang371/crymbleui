@@ -8,8 +8,9 @@ require "../../../src/testing/test_renderer"
 # editor's dropdown, a drag ghost, a drop highlight — therefore needs the PAINTED position, which
 # is what `paint_shift_for` teaches the walk.
 #
-# And the half that is easy to forget: a sticky row or column is PINNED. It must hold that axis
-# still, or the fix for scrolled cells would misplace every header instead.
+# And the half that is easy to forget: a sticky cell is MOVED by the matrix - its bounds already hold
+# the scroll (sticky_reposition) - so it is painted at its bounds and must not be shifted again, or the
+# fix for scrolled cells would misplace every header instead.
 class SweepMatrixAdapter
   include CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter
 
@@ -55,9 +56,9 @@ describe "scroll-space sweep: VirtualMatrix" do
     widget.viewport_bounds.y.should be_close(widget.absolute_bounds.y - applied.y, 0.5)
   end
 
-  it "holds a sticky column still on X and a sticky row still on Y" do
+  it "places a sticky cell where it is painted: at its bounds, which already hold the scroll" do
     matrix, _r, _a = sweep_matrix(CrymbleUI::Vec2.new(40.0, 30.0))
-    applied = matrix.scroll_offset
+    (matrix.scroll_offset.x > 0.0 && matrix.scroll_offset.y > 0.0).should be_true # instrument: scrolled on both axes
     matrix.sticky_col_count.should be > 0 # instrument: stickiness really configured
     matrix.sticky_row_count.should be > 0
 
@@ -66,14 +67,12 @@ describe "scroll-space sweep: VirtualMatrix" do
     sticky_col = matrix.active_cells.find { |(rc, _w)| rc[1] == 0 && rc[0] > 0 }
     sticky_col.should_not be_nil
     w = sticky_col.not_nil![1]
-    w.viewport_bounds.x.should be_close(w.absolute_bounds.x, 0.5)             # pinned on X
-    w.viewport_bounds.y.should be_close(w.absolute_bounds.y - applied.y, 0.5) # still scrolls on Y
+    w.viewport_bounds.position.should eq(w.absolute_bounds.position) # painted at its bounds (they scrolled on Y)
 
     sticky_row = matrix.active_cells.find { |(rc, _w)| rc[0] == 0 && rc[1] > 0 }
     sticky_row.should_not be_nil
     w2 = sticky_row.not_nil![1]
-    w2.viewport_bounds.y.should be_close(w2.absolute_bounds.y, 0.5)             # pinned on Y
-    w2.viewport_bounds.x.should be_close(w2.absolute_bounds.x - applied.x, 0.5) # still scrolls on X
+    w2.viewport_bounds.position.should eq(w2.absolute_bounds.position) # painted at its bounds (they scrolled on X)
   end
 
   it "is exact when the matrix is not scrolled" do

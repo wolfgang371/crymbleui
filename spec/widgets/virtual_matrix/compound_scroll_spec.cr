@@ -1185,27 +1185,23 @@ describe CrymbleUI::VirtualMatrix do
     # content-space expression on the QUANTIZED scroll (whole content px), in
     # BOTH computation paths (reposition_sticky_cells and the blit-plan mirror).
     # Pin: the park disposition may only change when floor(scroll.x) changes.
-    # If any of the four predicate sites drifts to a different basis (e.g. raw
-    # scroll), the disposition flips WITHIN an integer scroll cell at the
-    # fractional boundary this fixture constructs, and the scan below goes red.
-    it "park disposition is constant within each whole-scroll cell at a fractional boundary" do
+    it "park disposition is constant within each whole-scroll cell, with a fractional sticky width" do
       merges = [{ {0, 1}, {0, 4} }]
       adapter = CompoundScrollAdapter.new(5, 20,
         col_scroll_order: ((1..19).to_a + [0]),
         row_scroll_order: [1, 2, 3, 4, 0],
         merges: merges)
-      # Give the STICKY column (col 0) a fractional pixel width: 4.975 units =
-      # 102.5px pitch — the park boundary inherits this fraction.
+      # Give the STICKY column (col 0) a fractional width: 4.975 units = 102.5px pitch. The band edge is summed
+      # from the PLACED (whole) sizes, like the cells beside it, so it stays whole - a fractional edge once put
+      # the band a fraction off its cells and a merged header's blit a pixel off. On whole geometry every scroll
+      # basis agrees, so the ONE quantization is pinned structurally (painted_scroll - see
+      # sticky_cell_window_space_spec); this scan keeps the disposition property itself.
       adapter.custom_col_widths =
         Array.new(20, CrymbleUI::VirtualMatrix::DEFAULT_COLUMN_WIDTH).tap { |a| a[0] = 4.975 }
       matrix, _, constraints = setup_compound_matrix(adapter, 800.0, 300.0, show_rulers: false)
 
-      # Discriminating precondition: the sticky boundary must be FRACTIONAL.
-      # Constituent cumulative widths are whole (Int32 size cache), so the park
-      # boundary inherits exactly the sticky width's fraction — with a whole
-      # boundary every basis agrees and this pin would be vacuous.
       sticky_w = matrix.sticky_col_width_pixels
-      sticky_w.should_not eq(sticky_w.floor)
+      sticky_w.should eq(sticky_w.floor) # whole: summed from the placed sizes
 
       parked = ->(s : Float64) do
         matrix.scroll_offset = CrymbleUI::Vec2.new(s, 0.0)

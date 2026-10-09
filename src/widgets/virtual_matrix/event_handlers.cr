@@ -2,8 +2,11 @@ module CrymbleUI
   class VirtualMatrix < Widget
     # === SCROLL HANDLING ===
 
-    def on_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false) : Bool
-      return false unless absolute_bounds.contains_point(point)
+    # The wheel, in the input frame; returns what the grid did NOT take, in that frame (ScrollView#on_mouse_wheel
+    # states the rule): an axis it moved on is taken, an axis it cannot move on goes on to the next scroller.
+    # Under shift it reads delta.y as x and ignores delta.x, which therefore goes on untouched.
+    def on_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false) : Vec2
+      return delta unless absolute_bounds.contains_point(point)
 
       old_offset = scroll_offset
       new_offset = old_offset
@@ -29,10 +32,13 @@ module CrymbleUI
           end
         {% end %}
         self.scroll_offset = new_offset  # custom setter: Source.set + apply_scroll
-        return true
       end
 
-      false
+      if shift
+        Vec2.new(delta.x, new_offset.x == old_offset.x ? delta.y : 0.0)
+      else
+        Vec2.new(new_offset.x == old_offset.x ? delta.x : 0.0, new_offset.y == old_offset.y ? delta.y : 0.0)
+      end
     end
 
     # === MOUSE HANDLING ===
@@ -63,47 +69,24 @@ module CrymbleUI
       in_sticky_col = data_x < sticky_col_width_pixels && sticky_col_count > 0
       in_sticky_row = data_y < sticky_row_height_pixels && sticky_row_count > 0
 
-      local_x = in_sticky_col ? data_x : data_x + scroll_offset.x
-      local_y = in_sticky_row ? data_y : data_y + scroll_offset.y
+      # a content point is where the grid PAINTS content: at the whole scroll (painted_scroll)
+      whole = painted_scroll
+      local_x = in_sticky_col ? data_x : data_x + whole.x
+      local_y = in_sticky_row ? data_y : data_y + whole.y
       return nil if local_x < 0 || local_y < 0
 
-      # Find column — O(log N) binary search on cached physical cumulative array
-      col_cum = @cached_col_physical_cum
-      if col_cum
-        col = col_cum.bsearch_index { |p| p > local_x.to_i32 }
-        return nil unless col  # Beyond all columns
-        col = {col - 1, 0}.max
-      else
-        col = 0
-        acc_x = 0.0
-        while col < @cols && acc_x + col_width_pixels(col) <= local_x
-          acc_x += col_width_pixels(col)
-          col += 1
-        end
-        return nil if col >= @cols
-      end
-
-      # Find row — O(log N) binary search on cached physical cumulative array
-      row_cum = @cached_row_physical_cum
-      if row_cum
-        row = row_cum.bsearch_index { |p| p > local_y.to_i32 }
-        return nil unless row  # Beyond all rows
-        row = {row - 1, 0}.max
-      else
-        row = 0
-        acc_y = 0.0
-        while row < @rows && acc_y + row_height_pixels(row) <= local_y
-          acc_y += row_height_pixels(row)
-          row += 1
-        end
-        return nil if row >= @rows
-      end
-      {row, col}
+      # O(log N) binary search on the placed cumulative sizes - where cells are placed
+      col = placed_col_cum.bsearch_index { |p| p > local_x.to_i32 } # snap-exempt: content-space bsearch key
+      return nil unless col # beyond all columns
+      row = placed_row_cum.bsearch_index { |p| p > local_y.to_i32 } # snap-exempt: content-space bsearch key
+      return nil unless row # beyond all rows
+      {row - 1, col - 1}
     end
 
-    # Override hit_test to delegate scrollbar area hits to ScrollView.
-    # Without this, cell widgets (which are direct children)
-    # would intercept clicks meant for the scrollbar.
+    # The scrollbar area goes to the ScrollView; every other point inside is the grid's own. Cell widgets are
+    # direct children, yet never hit: the grid takes every press, click, wheel and drag over a cell and forwards
+    # what a cell acts on through proxy focus (trigger_click, on_mouse_up, on_key_down) - a cell hit directly
+    # would steal the focus from the grid.
     def hit_test(point : Vec2) : Widget?
       abs = absolute_bounds
       return nil unless abs.contains_point(point)
@@ -115,40 +98,6 @@ module CrymbleUI
         end
       end
 
-      # Non-interactive mode: let cell widgets receive direct clicks (no
-      # cursor navigation, no proxy forwarding). Used by the `matrix` DSL
-      # sugar for summary / listing tables AND by DirBrowser-style
-      # dialogs where the cells ARE the action targets.
-      #
-      # Cell widgets keep their LOGICAL bounds — scrolling shifts only the
-      # rendering layer, not widget positions (per ScrollView's
-      # "Widget positions don't change, only the viewport offset changes"
-      # contract). So we route through `point_to_cell` (which handles
-      # ruler offset, sticky bands, AND scroll offset) to find which
-      # logical cell the mouse is over, then look up that cell's widget
-      # in @active_cells. Without this, descending into children with a
-      # raw screen-space point returns whatever cell happens to share
-      # the un-scrolled logical position — visibly offset from where the
-      # mouse actually is whenever scroll_offset != 0.
-      unless @interactive_cells
-        content_point = point
-        if sv = @content_scroll_view
-          @scroll_offset.set(sv.scroll_offset)
-        end
-        if cell_rc = point_to_cell(content_point)
-          if widget = @active_cells[cell_rc]?
-            # Deep hit_test inside the cell widget in case it contains
-            # nested children. Pass content_point because the cell's
-            # bounds (and its descendants') are in LOGICAL coordinates.
-            return widget.hit_test(content_point) || widget
-          end
-        end
-        return nil
-      end
-
-      # VirtualMatrix handles all mouse input for the content area.
-      # Cell widgets are managed internally via proxy focus — they should never
-      # receive direct clicks (which would steal focus from VirtualMatrix).
       self
     end
 
@@ -200,35 +149,33 @@ module CrymbleUI
       ruler_h = ruler_row_height_pixels
       ruler_w = ruler_col_width_pixels
 
-      # Column borders: only in column ruler strip (top ruler_h pixels)
+      # A border is a line's far edge where it is painted (painted_col / painted_row): a sticky line's in its
+      # band, a scrolling line's only where it shows past the band.
       if show_rulers && sy < ruler_h
-        # local_x is in grid space (subtract ruler_w offset, then handle scroll)
-        grid_x = sx - ruler_w
-        local_x = (grid_x < sticky_col_width_pixels && sticky_col_count > 0) ? grid_x : grid_x + scroll_offset.x
-        acc = 0.0
+        band_right = ruler_w + sticky_col_width_pixels
         (0...@cols).each do |c|
-          acc += col_width_pixels(c)
-          if (local_x - acc).abs < resize_tolerance
+          x, pitch = painted_col(c)
+          edge = x + pitch
+          next if c >= sticky_col_count && edge < band_right
+          if (sx - edge).abs < resize_tolerance
             return nil if line_is_content_sized?(ResizeAxis::Col, c)
             return {ResizeAxis::Col, c}
           end
-          break if acc > local_x + resize_tolerance
+          break if c >= sticky_col_count && edge > sx + resize_tolerance
         end
       end
 
-      # Row borders: only in row ruler strip (left ruler_w pixels)
       if show_rulers && sx < ruler_w
-        # local_y is in grid space (subtract ruler_h offset, then handle scroll)
-        grid_y = sy - ruler_h
-        local_y = (grid_y < sticky_row_height_pixels && sticky_row_count > 0) ? grid_y : grid_y + scroll_offset.y
-        acc = 0.0
+        band_bottom = ruler_h + sticky_row_height_pixels
         (0...@rows).each do |r|
-          acc += row_height_pixels(r)
-          if (local_y - acc).abs < resize_tolerance
+          y, pitch = painted_row(r)
+          edge = y + pitch
+          next if r >= sticky_row_count && edge < band_bottom
+          if (sy - edge).abs < resize_tolerance
             return nil if line_is_content_sized?(ResizeAxis::Row, r)
             return {ResizeAxis::Row, r}
           end
-          break if acc > local_y + resize_tolerance
+          break if r >= sticky_row_count && edge > sy + resize_tolerance
         end
       end
 
@@ -248,7 +195,9 @@ module CrymbleUI
     def on_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left) : Bool
       bring_containing_panel_to_front
       request_focus
-      @drag_source_was_preexisting = !@drag_source_cell.nil?
+      # Every press, whatever the button or the place: its release must put back what it found.
+      @source_before_press = @drag_source_provisional ? nil : @drag_source_cell
+      @press_in_progress = true
       # Right-click: move cursor to clicked cell, then bubble for context menu
       if button == MouseButton::Right
         content_point = point
@@ -291,14 +240,12 @@ module CrymbleUI
 
       if cell = point_to_cell(content_point)
         row, col = cell
-        now = Time.instant
 
         # Double-click on same cell: first give on_cell_activate callback a
         # chance (e.g. drill-down into aggregate cells); if it returns true the
         # activation is handled and proxy forwarding is skipped. Otherwise fall
         # back to proxy forwarding (opens ComboBox, edit mode, etc.).
-        if {row, col} == @last_click_cell &&
-           (now - @last_click_time).total_milliseconds < DOUBLE_CLICK_THRESHOLD_MS
+        if double_click?(cell)
           @last_click_time = Time.instant - 1.hour  # prevent triple-click
           handled = @on_cell_activate.try(&.call({row, col})) || false
           unless handled
@@ -309,7 +256,7 @@ module CrymbleUI
         else
           set_cursor_from_cell({row, col})
           mark_needs_render
-          @last_click_time = now
+          @last_click_time = Time.instant
           @last_click_cell = {row, col}
           # Set drag source for potential cell drag (DragManager detects threshold).
           # Flag it provisional: DragManager reads it to build the ghost, but the
@@ -396,12 +343,19 @@ module CrymbleUI
         mark_needs_render
       end
       self.resize_axis = ResizeAxis::None
-      # Clear drag source if click didn't become a drag — but preserve cut highlights
-      if @drag_source_cell && !@drag_source_was_preexisting
-        @drag_source_cell = nil
-        @drag_source_provisional = false
-        mark_drag_overlay_dirty
-      end
+      # A press that did not become a drag: its candidate goes, the committed source it found comes back.
+      end_press(@source_before_press) if @press_in_progress
+    end
+
+    # End this instance's press with `source` as the committed drag source. Only the instance holding the
+    # press may - the one that saw it, or the one a drag's on_drag_start handed it to: one merely built
+    # after it (a click across a rebuild) may just have been handed the host's source by its build.
+    private def end_press(source : Tuple(Int32, Int32)?) : Nil
+      @press_in_progress = false
+      return if source == @drag_source_cell && !@drag_source_provisional
+      @drag_source_cell = source
+      @drag_source_provisional = false
+      mark_drag_overlay_dirty
     end
 
     # === FOCUS ===
@@ -622,33 +576,46 @@ module CrymbleUI
 
     # Draggable: ghost bounds = drag bounding box (spans the full multi-cell region)
     def drag_ghost_bounds : Rect?
+      src = @drag_source_cell || return nil
+      adapter = @adapter || return nil
+      # Window space (the ghost is drawn by the window): the drag box where it is painted in the matrix
+      # (painted_rect - its visible part, a header's as placed), moved to where the matrix itself is painted
+      # (it may sit in a scrolled panel). A grid that has placed no cells yet - a rebuild replaced the pressed
+      # one and its first layout is still to come - answers with the box's lines, where that layout puts a
+      # plain box. Nothing of it painted (a committed source scrolled wholly out) is an EMPTY rect, never nil:
+      # nil would make DragManager fall back to the whole matrix's rect.
+      origin = viewport_bounds.position
+      box = adapter.cell_get_drag_bounding_box(src[0], src[1])
+      painted = @active_cells.empty? ? box_lines_rect(box) : painted_rect(box)
+      return Rect.new(origin.x, origin.y, 0.0, 0.0) unless painted
+      Rect.new(origin.x + painted.x, origin.y + painted.y, painted.width, painted.height)
+    end
+
+    # A box's extent by its lines (painted_col / painted_row), in the matrix's own space.
+    private def box_lines_rect(box : Region) : Rect
+      x, _ = painted_col(box[0][1])
+      y, _ = painted_row(box[0][0])
+      right = painted_col(box[1][1]).sum
+      bottom = painted_row(box[1][0]).sum
+      Rect.new(x, y, right - x, bottom - y)
+    end
+
+    # Draggable: return data for the cell clicked in on_mouse_down - nothing for a cell the adapter no longer
+    # has: DragManager may ask after a data change shrank the grid (a rebuild during the press), and a
+    # stale coordinate is no drag.
+    def get_drag_data : DragData?
       if src = @drag_source_cell
-        if adapter = @adapter
-          bb = adapter.cell_get_drag_bounding_box(src[0], src[1])
-          min_r, min_c = bb[0]
-          max_r, max_c = bb[1]
-          # The ghost is drawn by the WINDOW, so this rect is window space: start from where the
-          # matrix is PAINTED (it may itself sit in a scrolled panel) and subtract the matrix's own
-          # scroll for the cell inside it. The two conversions are different scrollers, not a
-          # duplicate — `viewport_bounds` cannot know which cell this bounding box covers.
-          abs = viewport_bounds
-          x = abs.x + ruler_col_width_pixels + (0...min_c).sum { |c| col_width_pixels(c) } - scroll_offset.x
-          y = abs.y + ruler_row_height_pixels + (0...min_r).sum { |r| row_height_pixels(r) } - scroll_offset.y
-          w = (min_c..max_c).sum { |c| col_width_pixels(c) }
-          h = (min_r..max_r).sum { |r| row_height_pixels(r) }
-          Rect.new(x, y, w, h)
+        if (adapter = @adapter) && adapter_has_cell?(adapter, src)
+          name = adapter.cell_get_name(src[0], src[1])
+          CellDragData.new(src[0], src[1], name, source_path: drag_path, owner_key: @drag_owner_key)
         end
       end
     end
 
-    # Draggable: return data for the cell clicked in on_mouse_down
-    def get_drag_data : DragData?
-      if src = @drag_source_cell
-        if adapter = @adapter
-          name = adapter.cell_get_name(src[0], src[1])
-          CellDragData.new(src[0], src[1], name, @drag_owner_key)
-        end
-      end
+    # The adapter's CURRENT extent (its scroll order), not this instance's @rows/@cols from its last build.
+    private def adapter_has_cell?(adapter, cell : {Int32, Int32}) : Bool
+      rows, cols = adapter.get_scrollorder
+      cell[0] < rows.size && cell[1] < cols.size
     end
 
     # Simple ghost: just a themed semi-transparent fill (no border, no text)
@@ -657,22 +624,67 @@ module CrymbleUI
     end
 
     def on_drag_start(data : DragData)
+      # A grid that did not see the press - a rebuild replaced the one that did, or the host set a source
+      # while the button was held - takes the gesture over: its drag end puts back the committed source it
+      # has now (the host's word, as built).
+      unless @press_in_progress
+        @source_before_press = @drag_source_provisional ? nil : @drag_source_cell
+        @press_in_progress = true
+      end
       # The drag crossed the threshold — the source is now committed, so its
       # decal may paint (it was provisional through the mouse-down candidate).
+      if data.is_a?(CellDragData)
+        @drag_source_cell = {data.row, data.col}
+      end
       @drag_source_provisional = false
       mark_drag_overlay_dirty
     end
 
+    # A drag ends without a mouse-up, so its press ends here. Dropped nowhere, the committed source the
+    # press found comes back; after a drop, rows may have moved and its old place can hold another
+    # record - the host re-arms its source through on_cell_drop_handler.
     def on_drag_end(data : DragData, dropped : Bool)
-      @drag_source_cell = nil
+      end_press(dropped ? nil : @source_before_press) if @press_in_progress
       @drag_target_cell = nil
-      @drag_source_provisional = false
       mark_drag_overlay_dirty
     end
 
-    # DropTarget: accept cell data from same matrix
+    # DropTarget: a cell of this grid's own, or another owner's where a cross handler takes it. A cell from
+    # another grid names a place in THAT grid's data - applied here as a native move it would move this
+    # grid's cell at those coordinates.
     def accepts_drop?(data : DragData) : Bool
-      data.is_a?(CellDragData)
+      data.is_a?(CellDragData) && (own_payload?(data) || (!@cross_drop_handler.nil? && !data.owner_key.nil?))
+    end
+
+    # Whether a cell payload is this grid's own: both tagged - the same owner key (the host's claim);
+    # neither - the same grid (its path); one tagged, one not - another's.
+    private def own_payload?(data : CellDragData) : Bool
+      mine = @drag_owner_key
+      theirs = data.owner_key
+      return mine == theirs if mine && theirs
+      mine.nil? && theirs.nil? && data.source_path == drag_path
+    end
+
+    # This grid as reconcile identifies it: per ancestor its id, else its index and class among its
+    # siblings (reconcile pairs an id-less child by position and type) - the same for the grid a rebuild
+    # puts in its place, different for two id-less siblings. A node its parent keeps outside its children
+    # (a window overlay, a menu item) has no such index: its instance names it, which a rebuild that
+    # migrates it keeps. Walks to the root (O(depth) string building): only an untagged grid asks, per
+    # accepts_drop? - a drag move, and once a frame while a drag is over it (DragManager#follow_pointer).
+    private def drag_path : String
+      segments = [] of String
+      node : Widget? = self
+      while node
+        segments << (node.id || id_less_segment(node))
+        node = node.parent
+      end
+      segments.reverse.join("/")
+    end
+
+    private def id_less_segment(node : Widget) : String
+      parent = node.parent || return "0:#{node.class.name}"
+      index = parent.children.index { |c| c.same?(node) } || return "@#{node.object_id}:#{node.class.name}"
+      "#{index}:#{node.class.name}"
     end
 
     # Disable DragManager's widget-level highlight (we highlight individual cells instead)
@@ -681,14 +693,13 @@ module CrymbleUI
     end
 
     def on_drop(data : DragData, position : Vec2)
-      return unless data.is_a?(CellDragData)
+      return unless data.is_a?(CellDragData) && accepts_drop?(data) # one gate, for a direct call too
       return unless target = point_to_cell(position)
-      # Cross-owner drop: the payload came from a different matrix, so its
-      # (row, col) are meaningless here — a native cell_move would corrupt
-      # data. Delegate to the app, which reconstructs the source cell from
-      # the payload's owner_key and routes through its own dispatcher.
-      if (owner = data.owner_key) && owner != @drag_owner_key
-        @cross_drop_handler.try &.call(data, target[0], target[1])
+      # Another owner's cell: its (row, col) are meaningless here - the app reconstructs the source cell
+      # from the payload's owner_key and routes it through its own dispatcher.
+      unless own_payload?(data)
+        # accepts_drop? let another's cell in only with a handler to take it
+        @cross_drop_handler.not_nil!.call(data, target[0], target[1])
         return
       end
       if adapter = @adapter
@@ -699,8 +710,12 @@ module CrymbleUI
       end
     end
 
+    # Also called once a frame while the pointer is still (DragManager#follow_pointer): the overlay
+    # re-renders only when the cell under the pointer changed.
     def on_drag_over(data : DragData, position : Vec2)
-      @drag_target_cell = point_to_cell(position)
+      cell = point_to_cell(position)
+      return if cell == @drag_target_cell
+      @drag_target_cell = cell
       mark_drag_overlay_dirty
     end
 

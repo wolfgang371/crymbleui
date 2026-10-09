@@ -57,16 +57,14 @@ def render_frame(app : App)
   begin
     # ... layout and render ...
   rescue exception
-    handle_frame_exception(exception, app, window)
+    raise exception if exception.is_a?(RenderDefect)
+    handle_frame_exception(exception, app, window) # counts the failure run, recovers, displays, drains
+  else
+    note_frame_completed                           # a frame that completes ends the run
   end
-end
-
-private def handle_frame_exception(exception : Exception, app : App, window : SF::RenderWindow)
-  STDERR.puts "[GRACEFUL_DEGRADATION] Frame exception: #{exception.message}"
-  STDERR.puts "  #{exception.backtrace?.try(&.first(3).join("\n  "))}"
-  app.reset_all_caches
-  app.root.try(&.mark_needs_layout)
-  window.display  # a stale frame is better than a black hole
+  end_frame(app)                                   # stamps the render trigger
+  report_frame_failure(app)                        # AFTER the stamp: the handler's marks paint next
+  apply_title(app, window)
 end
 ```
 
@@ -74,8 +72,20 @@ end
 1. Log exception to STDERR (visible but doesn't pollute stdout)
 2. Reset all caches (can't know what's corrupted)
 3. Force re-layout (safest recovery path)
-4. Always call `window.display` — a stale frame is better than a blank/black display
+4. Always call `window.display` — a stale frame is better than a blank/black display; after a display that
+   succeeded, drain the texture reaper (what the reset released is freed now, in the success path's GL state)
 5. Next frame renders from clean state
+
+**What the user sees** (LayerRenderer, the same rule in both renderers): consecutive failing frames form a RUN.
+Its first frame and its 10th are reported to the app - `App#report_display_error`: "Display error: <message>",
+then "Display error keeps recurring: <message> - please save your work" (embrace: the status bar) - never every
+frame; while the run lasts the window title ends in " - display error" (the title is drawn outside the frame, so
+it shows even when the failing frame is the one that would paint the status bar). A frame that completes ends the
+run and clears the title. A failing frame does not trigger the next one by itself (a frame that reports triggers
+one more, through the app's handler) - it recurs only at input or timer rate - so nothing throttles it.
+(TestRenderer applies a pending rebuild inside its frame, so a rebuild that raises counts there; under SFML the
+loop rebuilds outside the frame. And a TestRenderer frame with no root completes, ending a run; under SFML it
+neither counts nor ends one.)
 
 ### Layer 3: Input-Path Exception Handling
 
@@ -91,23 +101,30 @@ end
 Clears all render caches on widget tree:
 - `@cached_primitives`
 - `@primitives_node.try(&.touch)` (touches the reactive signal to force primitive recomputation next frame)
-- `@widget_backend`
-- `@background_backend`
-- `@rendered_to_layer_at_current_bounds`
+- `widget_backend` / `background_backend` - RELEASED (through the setters), with the
+  rendered-at-bounds flag
 
 ### Layer.reset_for_recovery
 Resets layer to clean state:
-- `@backend = nil`
+- its surface released (`self.backend = nil`)
+- the one-shot requests a raising frame may have left: `blit_plan`, `blit_plan_render_widgets`, `resize_shift`
 - `@dirty_widgets.clear`
 - `@last_rendered_bounds = nil`
 - `@state = WidgetState::NeedsLayout`
 
 ### App.reset_all_caches
-Full app reset for recovery:
-- Calls `reset_render_caches_recursive` on root
-- Calls `reset_for_recovery` on all layers
+Full app reset for recovery, over the root AND the window's overlays:
+- `reset_render_caches_recursive` on each
+- `reset_for_recovery` on every layer of each (`each_layer_in_subtree`: owned layers too - a ScrollView's
+  bands, a grid's cursor and drag overlays), and `reset_render_caches_recursive` on the widgets each layer
+  hosts (grid cells)
 - Clears interaction state (`@hovered_widget`, `@mouse_down_widget`, `@topmost_panel`)
 - Cancels any in-progress drag operation
+
+**Under SFML, released means queued.** `CrSFMLBackend#dispose` only enqueues; the reaper drains after a
+frame's `window.display` - a successful frame's, and a recovered frame's too (unless its display raised). One
+exception is never recovered from: `DisposedBackendError` (use after release) is re-raised by both renderers. See
+LAYER_RENDERING_ARCHITECTURE.md, "Backend Lifecycle".
 
 ## What Still Asserts vs. What Validates
 
@@ -138,6 +155,15 @@ See `spec/rendering/graceful_degradation_spec.cr` for tests covering:
 - Exception recovery (widget throws during render)
 - Cache reset verification
 - Zero-size/NaN/Infinity widget validation
+- The process-wide count of swallowed frame exceptions
+
+**A swallowed exception passes a spec unless something asks.** The TestRenderer recovers
+from a frame exception exactly as the app does, so an invariant that raises inside a frame
+(an assertion, a `-Dverify_bounds` check) fails nothing by itself. Besides each renderer's
+own `exceptions_caught` / `last_exception_message`, `TestRenderer.frame_exceptions_swallowed`
+and `TestRenderer.last_frame_exception_message` count across every renderer in the process, so a
+suite built from many renderers can fail an example whose frames swallowed one (embrace's
+`spec/spec_helper.cr` does).
 
 ## Design Decisions
 
@@ -146,4 +172,6 @@ See `spec/rendering/graceful_degradation_spec.cr` for tests covering:
 3. **Reset ALL caches on exception** - can't know what's corrupted
 4. **Force re-layout** - safest recovery path
 5. **Log to STDERR** - visible but doesn't pollute stdout
-6. **No retry limit** - infinite loop protection via layout/render guards
+6. **No retry limit, no back-off** - a frame that keeps raising is recovered from every time it recurs, which is
+   only at input or timer rate (a failing frame does not trigger the next one by itself: measured); the user is told at
+   the run's first and 10th frame and by the window title (see Layer 2)

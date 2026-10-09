@@ -59,7 +59,7 @@ describe "Layer Rendering" do
   end
 
   describe "Multi-Layer Compositing" do
-    it "Window.collect_all_layers returns layers sorted by z_index" do
+    it "Window.collect_all_layers returns the layers in composite order" do
       app = TestApp.new
       window = CrymbleUI::Window.new("Test", 800, 600)
       panel1 = CrymbleUI::WindowPanel.new("P1", 100.0, 100.0, 200.0, 150.0, z_index: 5)
@@ -77,12 +77,8 @@ describe "Layer Rendering" do
 
       layers = window.collect_all_layers
 
-      # Should be sorted: root(0) < panel2(2) < panel1(5) < menubar(1000)
-      layers.size.should eq(4)
-      layers[0].z_index.should eq(0)     # root
-      layers[1].z_index.should eq(2)     # panel2
-      layers[2].z_index.should eq(5)     # panel1
-      layers[3].z_index.should eq(1000)  # menubar
+      # Composite order: root, the panels by z (panel2, panel1), then the window's menubar (added first)
+      layers.map(&.owner_widget).should eq([window, panel2, panel1, menubar])
     end
 
     it "layers have correct bounds for compositing" do
@@ -99,12 +95,12 @@ describe "Layer Rendering" do
       layers = window.collect_all_layers
 
       # Root layer should cover full window
-      root_layer = layers.find { |l| l.z_index == 0 }.not_nil!
+      root_layer = layers.find(&.owner_widget.same?(window)).not_nil!
       root_layer.bounds.width.should eq(800.0)
       root_layer.bounds.height.should eq(600.0)
 
       # Panel layer should be at panel position (no border expansion)
-      panel_layer = layers.find { |l| l.z_index == 1 }.not_nil!
+      panel_layer = layers.find(&.owner_widget.same?(panel1)).not_nil!
       panel_layer.bounds.x.should eq(100.0)
       panel_layer.bounds.y.should eq(100.0)
     end

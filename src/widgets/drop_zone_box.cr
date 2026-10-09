@@ -61,8 +61,10 @@ module CrymbleUI
       hover_color
     end
 
+    # The handler gets the WINDOW point: it exists to place something on the window (embrace opens a menu
+    # there), as a right-click's app handler does - the zone itself, like any target, gets its own space.
     def on_drop(data : DragData, position : Vec2)
-      @on_drop_handler.try(&.call(data, position))
+      @on_drop_handler.try(&.call(data, to_window(position)))
     end
 
     # Measure: delegate to single child

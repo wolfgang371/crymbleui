@@ -12,10 +12,10 @@ require "../src/widgets/window_panel"
 require "../src/widgets/popup"
 require "../src/layout/vstack"
 require "../src/layout/hstack"
-require "../src/testing/widget_tester"
 require "../src/testing/test_font"
 require "../src/testing/test_clipboard"
 require "../src/testing/gui_test_helpers"
+require "../src/testing/test_renderer"
 require "../src/input/focus_manager"
 require "../src/widgets/virtual_matrix/adapter"
 {% if flag?(:cache_validation) %}
@@ -34,14 +34,23 @@ CrymbleUI::Widget.clipboard = CrymbleUI::Testing::TestClipboard.new
 # Setup scheduler for timer-based tests (cursor blink, animations)
 CrymbleUI::Widget.scheduler = CrymbleUI::Scheduler.new
 
+# A layer painted into a layer nobody owns is a defect in every spec, not a counted fallback
+CrymbleUI::Layer.strict_nesting = true
+
 # Setup focus manager for keyboard focus tests
 CrymbleUI::Widget.focus_manager = CrymbleUI::FocusManager.new
 
 # Reset state before each test to ensure isolation
+# Every app a TestRenderer renders is recorded (TestRenderer.rendered_apps) and released before the next example:
+# a discarded app is otherwise never released, and the suite's memory grew with every app it built. Consequence for
+# spec authors: an app (or its renderer) is done with when its example ends - never share one across examples.
+CrymbleUI::Testing::TestRenderer.rendered_apps = [] of CrymbleUI::App
+
 Spec.before_each do
+  CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests (before the release: blur runs)
+  CrymbleUI::Testing::TestRenderer.release_rendered_apps # before Layer.clear_registry: it reads the registry
   CrymbleUI::FontSizing.reset_zoom
   CrymbleUI::Theme.set(:light)  # Ensure tests run with light theme
-  CrymbleUI::Widget.focus_manager.clear_focus  # Clear any leftover focus from previous tests
   # REPLACE (not clear) the clipboard: a fresh instance is the only way an example can
   # observe "nothing has been copied" (text == nil) instead of inheriting whatever a
   # previous example wrote — and `text=` takes a String, so nil is not assignable.
@@ -166,6 +175,25 @@ class MergeableTestAdapter
     @merges << {top_left, bottom_right}
   end
 
+  # Cell moves (drag-and-drop), recorded. A move returns `move_result` when set, else the target -
+  # an adapter may place the moved cell elsewhere; `move_error` makes the move raise.
+  getter moves = [] of {Tuple(Int32, Int32), Tuple(Int32, Int32)}
+  property move_result : Tuple(Int32, Int32)? = nil
+  property move_error : String? = nil
+  getter empty_cells = Set(Tuple(Int32, Int32)).new
+
+  def cell_has_content?(row : Int32, col : Int32) : Bool
+    !@empty_cells.includes?({row, col})
+  end
+
+  def cell_move(from_row : Int32, from_col : Int32, to_row : Int32, to_col : Int32) : Tuple(Int32, Int32)
+    if error = @move_error
+      raise error
+    end
+    @moves << { {from_row, from_col}, {to_row, to_col} }
+    @move_result || {to_row, to_col}
+  end
+
   def cell_get_bounding_box(row : Int32, col : Int32) : Tuple(Tuple(Int32, Int32), Tuple(Int32, Int32))
     @merges.each do |tl, br|
       if row >= tl[0] && row <= br[0] && col >= tl[1] && col <= br[1]
@@ -209,6 +237,13 @@ end
 # because a constant cannot be declared inside an `if`.
 SPEC_TIMINGS = [] of Tuple(String, Float64)
 
+# The suite's frame exceptions that the TestRenderer recovered from instead of letting out - printed so a change can
+# be judged by the TOTAL before vs after: a raise a release path causes inside a frame is otherwise invisible here
+# (graceful_degradation_spec's deliberate ones are the known baseline).
+Spec.after_suite do
+  STDERR.puts "\n[frames] swallowed frame exceptions: #{CrymbleUI::Testing::TestRenderer.frame_exceptions_swallowed}"
+end
+
 if ENV["SPEC_TIMING"]?
   Spec.around_each do |example|
     started = Time.instant
@@ -229,5 +264,15 @@ if ENV["SPEC_TIMING"]?
       STDERR.puts "  #{s.round(2).to_s.rjust(7)}s #{(100 * s / total).round(1).to_s.rjust(5)}% " \
                   "cum #{(100 * cum / total).round(0).to_s.rjust(3)}%  #{name[0, 88]}"
     end
+  end
+end
+
+# Every third data row two and a half lines tall, for a ConfigurableMatrixAdapter: a region the placement
+# rule still slides a label in, where a one-line row's label is cut where it sits.
+module EveryThirdRowTall
+  def get_sizes : {Array(Float64), Array(Float64)}
+    rows, cols = super
+    rows.each_index { |r| rows[r] = 2.5 if r >= nchl && r % 3 == 2 }
+    {rows, cols}
   end
 end

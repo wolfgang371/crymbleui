@@ -5,9 +5,7 @@ require "../../src/testing/test_render_backend"
 # against the SAME device box CrSFMLBackend hands the GPU: the per-pixel path via
 # `point_in_clip?`, and the BULK writers — `clear`, `fill_rect` and `blit_to`'s fast path
 # — by clamping their destination once against `writable_box`.
-#
-# ONE example still asserts a DIVERGENCE as it behaves today rather than a contract: the
-# swallowed clip-stack underflow. It says so, in place.
+# An unbalanced pop raises in both, too.
 #
 # `point_in_clip?` is private, so every case drives it through `set_pixel`/`get_pixel`.
 # Two traps that would make an example vacuous: `set_pixel` bounds-checks BEFORE it clips,
@@ -159,16 +157,12 @@ describe "TestRenderBackend clip parity with CrSFMLBackend" do
     end
   end
 
-  describe "RECORDED DIVERGENCES — asserted as they behave today, NOT as contracts" do
-    it "swallows a clip-stack underflow that CrSFMLBackend raises on" do
-      # Production's bare `@clip_stack.pop` raises IndexError; the instrument's
-      # `pop if any?` absorbs it. Pinned so the difference is visible, not endorsed.
-      # It has its own backlog entry.
-      be = backend.call
-      be.pop_clip
-      wrote.call(be, 5, 5).should be_true
+  describe "an unbalanced stack" do
+    it "raises on a clip-stack underflow, as CrSFMLBackend does" do
+      # A clip lives on the render target for the backend's life, so an unbalanced stream is a
+      # real defect; the instrument used to absorb it, and could not witness that class of bug.
+      expect_raises(IndexError) { backend.call.pop_clip }
     end
-
   end
 
   describe "the BULK writers honour the clip too, not just set_pixel" do

@@ -4,6 +4,296 @@ Breaking changes for code built on CrymbleUI, newest first. See `docs/REACTIVITY
 
 ---
 
+## One input model for a grid: the non-interactive mode, `SimpleMatrix` and the DSL `matrix` are gone
+
+A grid had two input models: the default, where the grid takes every press and forwards it to the cell under its
+cursor (proxy focus), and `interactive_cells = false`, where a click went straight to the widget under the point.
+The second doubled every input rule a grid has (hit testing, the wheel, a press on a cell that leaves, focus inside
+a cell) for one use - small static tables. It is removed, with the sugar built on it.
+
+- `VirtualMatrix#interactive_cells` is gone. Every grid takes the press: a cell's widget hears a click through the
+  grid's release (`trigger_click` forwarded to the cursor cell), a ComboBox cell opens on a double-click, keys go
+  to the cursor cell. A cell widget is never hit, hovered, a drop target or focused on its own.
+- The DSL `matrix(...) { |m| m.header ...; m.row { |r| r << ... } }`, `SimpleMatrixAdapter` and
+  `SimpleMatrixBuilder` are gone. The sugar gave: any widget per cell, header rows that stay sticky, a size to
+  content capped by `max_height`, no rulers, direct clicks. Replace it with one of:
+  - `recursive_grid { [[a, b], [c, d]] }` - any widget per cell, direct clicks, sizes to content; no sticky
+    header, no virtualization, no height cap (wrap it in `scroll_view(max_height: ...)` to scroll);
+  - a `VirtualMatrix` with your own adapter, `shrink_to_content = true`, `show_rulers = false` and
+    `max_height = ...` - sticky headers, virtualization and a height cap; the grid's input model (a cursor, a
+    click through the grid, a ComboBox opened by a double-click). A sketch, for `rows : Array(Array(String))`
+    with one header row:
+
+    ```crystal
+    class TableAdapter
+      include CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter
+
+      def initialize(@rows : Array(Array(String)))
+      end
+
+      # Row 0 last: the sticky tail of a scroll order reads DESCENDING (see MatrixAdapter#get_scrollorder)
+      def get_scrollorder : {Array(Int32), Array(Int32)}
+        {(1...@rows.size).to_a + [0], (0...@rows[0].size).to_a}
+      end
+
+      def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+        CrymbleUI::Text.new(@rows[row][col])
+      end
+    end
+
+    grid = CrymbleUI::VirtualMatrix.new(adapter: TableAdapter.new(rows), id: "summary")
+    grid.shrink_to_content = true
+    grid.show_rulers = false
+    grid.max_height = 200.0
+    ```
+- `Testing::Driver#click` and the keyboard acts (`type`, `press(on:)`) refuse a widget inside a grid, naming the
+  cell act to use (`click_cell`, `focus_cell`); the grid itself is clicked and focused as before. `select_file` /
+  `open_file` press the DirBrowser row through the grid, as the mouse does.
+
+---
+
+## A grid cell that owns a layer lives like any widget; a stuck scroller passes the wheel on
+
+A grid cell holding a layer owner (a ScrollView, a LayerBox, a nested grid) was not composited until some later
+layout re-collected the frame's layers, and kept its layers registered (and their GPU surfaces) after it left. A
+scroll view that could not move the way the wheel went swallowed the event.
+
+- **`on_mouse_wheel(delta, point, shift) : Vec2`** returns the part of `delta` the widget did NOT take, in the input
+  frame (unswapped, whatever `shift` did); `App#handle_mouse_wheel` hands it to the next ancestor that handles the
+  wheel, until nothing is left. A custom widget implementing it must return `delta` when it did nothing and
+  `Vec2.zero` when it took everything. ScrollView and VirtualMatrix take an axis they moved on (a partial move
+  takes it whole) and hand on an axis they cannot move on; there is no latching.
+- `ScrollView#hands_wheel_on?` (set by a VirtualMatrix on its chrome view): the wheel over a grid's scrollbar does
+  what it does over the grid.
+- A cell leaving a grid is DETACHED, never destroyed - an adapter may hand the same widget back (one that keeps
+  its cell widgets does). Its layers are retired (`Layer#retire`: surface disposed, out of the registry,
+  widgets kept) and re-registered when it returns (`Layer#register`); its widgets let go of what they hold -
+  their pull node (the subscription to the global zoom/theme Sources), their own surfaces, their slot stamp
+  (`Widget#release_own`, `#release_subtree`; `dispose_subtree` uses the former, `#free_own_surfaces` is the
+  surface part).
+- `Widget#each_layer_in_subtree` - every layer a subtree owns (was LayerRenderer's private `add_subtree_layers`).
+- `Layer.reorder!` / `Layer.order_version` also announce a change of the composite SET: a container attaching or
+  detaching a layer owner without a layout (a grid's cells). The renderer re-collects at a frame's start and after
+  any owner's flush that moved it (`LayerRenderer.frame_in_loop_recollect_count`).
+- A layer owner is painted only in the layers it owns - never into a layer it merely stands on (a grid cell that is
+  a ScrollView no longer has its scrollbars painted into the grid's buffer as well).
+
+---
+
+## A sticky cell is where it is painted; one placement rule for a grid
+
+`VirtualMatrix#paint_shift_for` shifted sticky cells by the scroll on their scrolling axis - but the matrix moves
+them itself (their bounds hold the scroll), so a header's `viewport_bounds`, dropdown, delivered click and drag
+ghost sat a scroll away; the drag decal, the change glow and the cursor marks each re-derived cell positions from
+float sizes and a float scroll.
+
+- `paint_shift_for` shifts content cells only; sticky cells, rulers and anything else by nothing. Anything that
+  compensated for the double shift (added the scroll back for a header) must stop.
+- New: `VirtualMatrix#painted_rect(region, pitch = true)` / `#painted_rects` - what of a region of the grid is
+  painted, in the matrix's space (the visible part; nil when none) - the way to place anything on cells;
+  `#painted_col` / `#painted_row` (a line), `#placed_col_start` / `#placed_row_start` (laid out),
+  `#painted_scroll` (the whole scroll the grid paints with), `#placed_col_sizes` / `#placed_row_sizes`,
+  `VirtualMatrix::Region`; `ScrollView#sticky_regions` (the band geometry, clamped); `Rect#union`.
+- `sticky_col_width_pixels` / `sticky_row_height_pixels` are sums of the placed (whole) sizes, and the ruler
+  widths are whole - a fractional width no longer puts the band edge a fraction off its cells.
+- `cell_screen_position` asks the placed cells (a test helper): it raises for a cell nothing of which is painted.
+- `drag_ghost_bounds` answers the drag box's painted part; nothing painted is an EMPTY rect (never nil - nil
+  meant "use the whole matrix"), and DragManager shows no ghost for an empty rect. A grid replaced mid-press, not
+  yet laid out, answers with the box's lines.
+- The Driver aims a cell act at the centre of what of the cell's own lines is painted (a merged cell: its top-left
+  part); a target with nothing painted is refused as not on screen.
+- The change glow draws once per cell BOX (a merged cell once, at the strongest alpha of its cells).
+
+---
+
+## A layer is painted in its owner's content space, composited where drawn, clipped by its scrollers
+
+`compute_bounds_for_layer` used to answer in WINDOW space (`viewport_bounds`), and the renderer painted a layer's
+widgets relative to that - so a layer owner inside scrolled content (a ScrollView in a ScrollView, a grid in a
+ScrollView) repainted its content shifted by the ancestor's scroll, and nothing clipped a nested layer to its
+scrollers (it composited over what lay above them).
+
+- **`compute_bounds_for_layer` answers in CONTENT space** - where the widget is laid out (`absolute_bounds`).
+  The Layer keeps it as `Layer#content_rect` (the render origin) and derives `Layer#bounds = content_rect -
+  owner.enclosing_scroll` (window space, where it composites). An override still returning `viewport_bounds` shows
+  itself as content drawn a scroll away after the first repaint inside a scrolled view - correct until something
+  scrolls. `spec/rendering/layer_content_space_lint_spec.cr` catches the direct spelling only (it reads source
+  text): a helper that returns `viewport_bounds` is not seen. A WindowPanel's rect is window space and must not
+  sit under a scroller (`LayerSpaceError` under `-Dverify_bounds`).
+- Render-side code reads `layer.content_rect`, composite-side `layer.bounds`, size-only `layer.size`.
+- **The composite clip is declared per child**: override `Widget#clip_for(child)` (window space, nil for no
+  limit) where a widget clips what it holds; the default clips to the owner's primary layer. `ancestor_clip`
+  intersects the chain. `WindowPanel#descendant_layer_clip_bounds` is gone (its interior is its `clip_for`), as
+  are `LayerRenderer#find_descendant_clip_bounds` and `SFMLRenderer#composite_viewport_cache_layer`;
+  `composite_layer_to_window(layer, clip)` takes the clip, and every composite goes through
+  `LayerRenderer#composite_region`.
+- `Widget#enclosing_scroll` is public; it, `viewport_bounds` and `ancestor_clip` stop shifting/clipping after an
+  overlay (a popup places itself in window space). A tree popup with a target is clamped into where its parent is
+  DRAWN and stays where it opened until a re-layout; one without a target is placed at its layout position as
+  painted.
+- A LayerBox is placed where it is laid out (`absolute_bounds`), not at its parent-relative bounds.
+- `Widget.absolute_bounds_count` now counts parent-chain STEPS in every geometry walk (`viewport_bounds`,
+  `enclosing_scroll` and `ancestor_clip` too), so walks compare by cost; budgets written against the old count
+  read higher numbers.
+
+---
+
+## One composite order: a layer composites within the layer it is painted into
+
+Layers used to composite by (the nearest panel's z, then a flat layer z), with every layer owner adding its offsets
+to its parent's z - so a scroll view nested in a grid cell sorted its scrollbar over the grid's sticky header, and
+bring_to_front re-based every nested z. Now `Layer.composite_order(root)` is the one order (the renderer, a frame
+capture, `Window#collect_all_layers`, `RenderDebug.dump`, and - backwards - hit testing): a layer composites
+directly above the layer it is painted into (`Widget#painting_layer`), below that layer's later siblings.
+
+- `z_index` of a nested layer is LOCAL: it orders its owner's own layers only. `parent_layer_z_index`,
+  `ScrollView#update_layer_z_indices` and the base-z parameters are gone; ScrollView and VirtualMatrix use local
+  constants (VirtualMatrix: CONTENT_LAYER_Z 1, CURSOR_OVERLAY_Z 2, DRAG_OVERLAY_Z 3).
+- `LayerOwner#on_ancestor_z_index_changed(base_z)` / `Widget#notify_layer_owners_z_index_changed(z)` became
+  `on_ancestor_raised` / `notify_layer_owners_raised`: a raised panel's layer owners repaint; order is not theirs.
+- New: `Widget#ranks_children?` / `#composite_rank(owner)` (a container ranks what is painted into its layers -
+  VirtualMatrix its chrome over its cells, Window its own menubar and statusbar over every panel),
+  `Widget#painting_layer`, `Widget#children_in_hit_order` (use it in any hit_test that walks children),
+  `#composites_as_overlay?` (Popup), `Layer.order_version` / `Layer.reorder!`, `Layer.strict_nesting` /
+  `Layer.orphaned_nestings`, `CompositeOrderError`. `RenderDefect` is the common base of the errors both frame
+  loops let out of recovery.
+- Behaviour: the window's menubar and statusbar composite (and take clicks) over every panel; a panel drag stops
+  at the panel area, between the bars; a LayerBox composites within the layer it sits in, by its z; plain window
+  content always under panels (even a z-0 one); `Window#collect_all_layers` returns composite order, not z order;
+  `Popup#compositing_z_index` returns its z (overlay status is `composites_as_overlay?`);
+  `Window#sorted_children` / `Widget#sorted_children` are removed.
+
+---
+
+## The drop highlight shows only what is visible of its target, in the target's place in the stack
+
+The highlight layer used to cover the target's whole `viewport_bounds` at z 1000 - over a scroll view's
+edge, a panel in front, a grid's sticky band. Now its bounds are the target's new `Widget#visible_bounds`
+(nil when nothing shows: then there is no highlight), and the renderer composites it directly after the last
+layer that paints the target (`Layer#composite_anchor`).
+
+- `DragManager::HIGHLIGHT_Z_INDEX` is removed.
+- `highlight_layer.bounds` is the VISIBLE part of the target; code reading it as the full `viewport_bounds`
+  changes. A hidden highlight has no `composite_anchor` (its bounds used to be moved to -1000).
+- The drag's ghost and highlight layers are released when the drag ends (`highlight_layer` / `ghost_layer`
+  are nil again); `Layer.cleanup_orphaned_layers` judges owned layers only - an ownerless layer is its
+  creator's to release, with the new `Layer#release(root)`.
+- `DropTarget#highlight_color`'s default is the theme's `drag_highlight` (was a fixed light blue).
+- `Widget#containing_layer` (was the protected `containing_layer_for_repair`) and `Rect#intersection` are new
+  public API.
+
+---
+
+## Panel shortcuts are keyed by the panel, not its path; a drag follows the tree under a still pointer
+
+`ShortcutManager#register(shortcut, ShortcutContext::Panel, panel)` and `#trigger(shortcut, panel)` take the
+panel widget itself (were its `path_id`): two panels with the same path - no id, the same title - no longer
+share one set of shortcuts (either one's key ran the last-registered handler). `trigger` needs the LIVE panel
+(found after the last rebuild). `ShortcutManager#clear_panel` is removed (it had no callers).
+
+```crystal
+# before
+Widget.shortcut_manager.trigger("Escape", panel.path_id)
+# after
+Widget.shortcut_manager.trigger("Escape", panel)
+```
+
+During a drag, the drop target, its highlight and a grid's target cell now follow what is under the pointer
+when the tree moves under it (a wheel scroll, a re-layout) - re-resolved once a frame and at the release, so
+the drop lands where the highlight shows. `DropTarget#on_drag_over` is therefore also called once a frame
+while the pointer is still: keep it cheap and idempotent.
+
+---
+
+## A grid refuses another grid's cell; `CellDragData` names its source grid
+
+A cell dragged onto a DIFFERENT grid used to be applied there as that grid's own move - the source's
+coordinates on the target's data. Now a grid takes only its own cells: an untagged grid its own (by its path,
+id else index and class per ancestor - stable across a rebuild), tagged grids those with the same
+`drag_owner_key`. Another owner's cell goes to `cross_drop_handler` if one is set, else it is refused (no
+highlight, no drop); an untagged cell from another grid is refused everywhere - it has no owner to route to.
+
+`CellDragData.new(row, col, display, source_path:, owner_key: nil)` - `source_path` is new and required
+(named); `owner_key` keeps its meaning and becomes a named argument. Update direct constructions:
+
+```crystal
+# before
+CrymbleUI::CellDragData.new(0, 0, "R0C0", owner_key: "shape-B")
+# after
+CrymbleUI::CellDragData.new(0, 0, "R0C0", source_path: "...", owner_key: "shape-B")
+```
+
+---
+
+## `VirtualMatrix#drag_source_was_preexisting` is removed
+
+A drag source set from outside (`drag_source_cell=`, e.g. a cut highlight) is now kept by the grid itself: a
+press remembers it, and whatever of that press does not end in a drop puts it back - a click on another cell, on
+an empty cell, a drag dropped nowhere. Stop setting the flag; setting `drag_source_cell` is enough. After a DROP
+the source is cleared (rows may have moved); re-arm it from `on_cell_drop_handler` if it should outlive the move.
+
+A cell drag also survives a rebuild between the press and the drag threshold: the payload is the gesture's,
+taken from the pressed instance, and the rebuilt grid takes the drag over. For a `Draggable` of your own this
+means `get_drag_data` may be asked while the press is pending (a rebuild), not only when the drag starts, and
+`on_drag_start` may reach the instance a rebuild put in place of the one pressed - which is then the one that
+hears `on_drag_end`. `DragManager#cancel_drag` now calls `on_drag_end` only for a drag that started. A host that sets
+`drag_source_cell` while the button is held (a cut during the press) now sees it cleared after that drag DROPS,
+as after any drop - before, it stayed marked on a row the move had shifted.
+`App#rebuild` hands the drag, and the pressed widget, to the widgets reconcile paired them with
+(`DragManager#rebind`, which takes that resolver as a block; was `DragState#update_widget_references` with a
+path search) - two id-less siblings no longer share a re-find. A drag whose source a rebuild removes ends
+(no `on_drag_end`); a target a rebuild replaces hears `on_drag_enter` and is hovered.
+
+---
+
+## `TestRenderer#render_layer_count` and `#compositor_skip_count` are removed
+
+Neither was ever incremented - both read 0 whatever happened - so an assert on them could not fail.
+Count rendered layers with `LayerRenderer.frame_layer_count`.
+
+`TestRenderer#settle_rendering` now stops where the live loop would idle (a pending rebuild, the input barrier,
+or a moved frame aggregate) instead of always rendering `max_frames` frames. A spec that relied on the extra
+frames was relying on idle composites.
+
+---
+
+## `SFMLPaintContext` and `LibGL` are removed; a window-direct draw refuses clips
+
+`CrymbleUI::SFMLPaintContext`, `SFMLRenderer#paint_context` and the top-level `lib LibGL` (with its
+`@[Link("GL")]`) are gone: the paint context was constructed but never drew, and it was the last raw
+GL scissor path. SFML links GL itself.
+
+`App#overlay_primitives` and `Renderer#render_primitives` draw straight to the window, which has no
+clip stack. A `PushClip`/`PopClip` there used to be IGNORED - its ink drew outside the clip. It now
+raises `WindowDirectClipError`, before anything of the list is drawn, and frame recovery does not
+swallow it. Draw clipped content in a widget instead (`PrimitiveBuilder#clipped`).
+
+---
+
+## `Testing::WidgetTester` is removed - use `Testing::Driver`
+
+```crystal
+# before
+tester = CrymbleUI::Testing::WidgetTester.new
+tester.pump(app)
+tester.tap("save")
+tester.text("status")
+
+# after
+require "crymble-ui/testing/driver"
+ui = CrymbleUI::Testing::Driver.new(app)
+ui.click "save"
+ui.text("status")
+```
+
+WidgetTester built and laid out the tree but never rendered a frame, so anything a frame does - a
+requested rebuild, a flush, an overlay's layout - happened only as far as it reimplemented it. The
+Driver renders headlessly (TestRenderer) and runs what real input runs around a handler; see
+`docs/TESTING.md`. `find_by_path`, `find_all`, `root` and `window_size` have no Driver counterpart:
+a use-case spec names widgets by id, and reaches the app through `ui.app` when it must.
+
+---
+
 ## `Clipboard#string` / `#string=` are now `#text` / `#text=`, and the getter is nilable
 
 ```crystal
@@ -43,7 +333,9 @@ Content is kept — nothing is truncated. Tab becomes a space rather than being 
 TSV field separator; dropping it would silently weld `"Mueller\t30"` into `"Mueller30"`. The trim is
 why copying one spreadsheet cell (`"value\r\n"`) pastes as `"value"`, and why copying an *empty* cell
 (`"\r\n"`) pastes nothing at all rather than replacing your selection with a space. Spaces you actually
-copied are never trimmed.
+copied are never trimmed. A consumer that knows its payload's format can read it first through
+`TextInput#paste_transform` (additive, off by default; nil from it means "not my format"); the
+flattening applies to what it returns.
 
 **`TextInput` gained a `multiline:` flag** (constructor and all three `text_input*` DSL helpers),
 default `false`, which changes two things and only two: Alt+Enter / Ctrl+Enter insert a hard line

@@ -124,7 +124,7 @@ widgets keep their cached content in the layer buffer from previous frames.
 
 ### Composite pass (O(layers))
 
-Layer textures are blitted to the window sorted by z-index. For viewport_cache
+Layer textures are blitted to the window in composite order (`Layer.composite_order`). For viewport_cache
 layers (scrollable content), the compositor samples the correct viewport region
 from the larger buffer using `texture_rect`. This makes panel drag O(1) — just
 move the layer position, no re-rendering.

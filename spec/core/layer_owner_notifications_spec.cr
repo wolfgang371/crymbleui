@@ -5,15 +5,15 @@ module CrymbleUI
   class NotificationRecorder < Widget
     include LayerOwner
 
-    getter z_index_changes : Array(Int32) = [] of Int32
+    getter raises = 0
 
     def initialize(id : String? = nil)
       super(id: id)
       @internal_layer = Layer.new("test_#{id}", Rect.zero, z_index: 100, owner_widget: self)
     end
 
-    def on_ancestor_z_index_changed(base_z : Int32)
-      @z_index_changes << base_z
+    def on_ancestor_raised
+      @raises += 1
     end
 
     def measure(constraints : BoxConstraints) : Size
@@ -35,8 +35,8 @@ module CrymbleUI
       super(id: id)
     end
 
-    def broadcast_z_index_changed(new_z : Int32)
-      notify_layer_owners_z_index_changed(new_z)
+    def broadcast_raised
+      notify_layer_owners_raised
     end
 
     def measure(constraints : BoxConstraints) : Size
@@ -59,16 +59,15 @@ module CrymbleUI
 end
 
 describe CrymbleUI::LayerOwner do
-  describe "ancestor z-index notification" do
-    it "calls on_ancestor_z_index_changed on LayerOwner descendants" do
+  describe "ancestor raised notification" do
+    it "calls on_ancestor_raised on LayerOwner descendants" do
       broadcaster = CrymbleUI::NotificationBroadcaster.new(id: "parent")
       recorder = CrymbleUI::NotificationRecorder.new(id: "child")
       broadcaster.add_child(recorder)
 
-      broadcaster.broadcast_z_index_changed(500)
+      broadcaster.broadcast_raised
 
-      recorder.z_index_changes.size.should eq 1
-      recorder.z_index_changes.first.should eq 500
+      recorder.raises.should eq 1
     end
   end
 
@@ -97,16 +96,16 @@ describe CrymbleUI::LayerOwner do
       middle.add_child(recorder1)   # nested under a non-LayerOwner intermediate
       broadcaster.add_child(recorder2)
 
-      broadcaster.broadcast_z_index_changed(700)
+      broadcaster.broadcast_raised
 
-      recorder1.z_index_changes.first.should eq 700
-      recorder2.z_index_changes.first.should eq 700
+      recorder1.raises.should eq 1
+      recorder2.raises.should eq 1
     end
 
     it "does not fail when the subtree has no LayerOwner widgets" do
       broadcaster = CrymbleUI::NotificationBroadcaster.new(id: "parent")
       broadcaster.add_child(CrymbleUI::NotificationBroadcaster.new(id: "middle"))
-      broadcaster.broadcast_z_index_changed(100) # should not raise
+      broadcaster.broadcast_raised # should not raise
     end
   end
 end

@@ -165,6 +165,13 @@ module CrymbleUI
       target.try(&.activate_proxy_focus)
     end
 
+    # The grid swallows every Escape and hands it to the cursor cell's editor, so it USES one exactly when
+    # that editor would (an edit to abort). An open list is not asked here: opening it moves the focus to
+    # the list's own filter field, which answers for itself.
+    def consumes_escape? : Bool
+      @proxy_focused_widget.try(&.consumes_escape?) || false
+    end
+
     # True when the cursor cell is in character-edit mode (draws its own caret) —
     # the whole-cell cursor flash is then suppressed (the caret is the indicator).
     # In cell-nav mode this is false, so the flash marks the cell (consistent across
@@ -296,10 +303,8 @@ module CrymbleUI
       # content cell and screen-space for a sticky one — the same double-count that once let the
       # view scroll only downwards, reintroduced through the axis this method just started serving.
       # Cumulative arrays keep it O(1), which is what makes this affordable per keystroke.
-      row_cum = @cached_row_physical_cum
-      col_cum = @cached_col_physical_cum
-      content_x = ruler_col_width_pixels + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_width_pixels(c) })
-      content_y = ruler_row_height_pixels + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_height_pixels(r) })
+      content_x = placed_col_start(col)
+      content_y = placed_row_start(row)
       caret_left = content_x + caret.x
       caret_top = content_y + caret.y
       caret_right = caret_left + caret.width
@@ -340,8 +345,8 @@ module CrymbleUI
       viewport_height = @content_layer.try(&.bounds.height) || @bounds.height
 
       # Build sizes and scroll_order (same as update_visible_cells)
-      col_sizes = @cached_col_sizes ||= (0...@cols).map { |c| col_width_pixels(c).to_i32 }
-      row_sizes = @cached_row_sizes ||= (0...@rows).map { |r| row_height_pixels(r).to_i32 }
+      col_sizes = placed_col_sizes
+      row_sizes = placed_row_sizes
 
       # For editing, use full bounding box so the entire merged region is visible.
       # For navigation, just ensure the single cursor cell is visible.

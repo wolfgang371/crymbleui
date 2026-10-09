@@ -9,9 +9,9 @@ require "../core/font_sizing"
 require "../input/shortcut_manager"
 require "../input/focus_manager"
 require "../input/keyboard_dispatch"
+require "../input/mouse_dispatch"
 require "../input/event_batch"
 require "../widgets/window_panel"
-require "./sfml_paint_context"
 require "./pixel_snap"
 require "./sfml_font"
 require "./sfml_clipboard"
@@ -26,7 +26,6 @@ module CrymbleUI
     include LayerRenderer # Shared layer rendering logic
 
     getter window : SF::RenderWindow?
-    getter paint_context : SFMLPaintContext?
     property background_color : Color
     getter scheduler : Scheduler
     getter shortcut_manager : ShortcutManager
@@ -151,10 +150,9 @@ module CrymbleUI
                         SF::Font.from_memory(EMBEDDED_FONT.to_slice)
                       end
 
-      # Create window and paint context (skip if headless mode for testing)
+      # Create the window (skipped in headless mode, for testing)
       if headless
         @window = nil
-        @paint_context = nil
       else
         @window = SF::RenderWindow.new(
           SF::VideoMode.new(width.to_u32, height.to_u32),
@@ -171,7 +169,6 @@ module CrymbleUI
         {% else %}
           @window.not_nil!.framerate_limit = TARGET_FPS
         {% end %}
-        @paint_context = SFMLPaintContext.new(@window.not_nil!, @default_font)
       end
 
       # Default background
@@ -191,6 +188,8 @@ module CrymbleUI
 
       # Routes the keyboard events; kept out of this class so a spec can drive it headlessly.
       @keyboard = KeyboardDispatch.new(@focus_manager, @shortcut_manager)
+      @mouse = MouseDispatch.new
+      @flushed_after_frame = false # the last frame's end applied work still to be painted (App#finish_frame)
 
       # Set global font for text measurement (wrap in SFMLFont)
       Widget.font = SFMLFont.new(@default_font)
@@ -231,11 +230,8 @@ module CrymbleUI
     # === LayerRenderer Abstract Method Implementations ===
 
     # Create SFML backend for layer
-    def ensure_layer_backend(layer : Layer, width : Int32, height : Int32)
-      backend = CrSFMLBackend.acquire(width, height, @default_font)
-      layer.backend = backend
-      # Force first_render on next render (blank backend)
-      layer.reset_first_render
+    def create_layer_backend(width : Int32, height : Int32) : RenderBackend
+      CrSFMLBackend.acquire(width, height, @default_font)
     end
 
     # Create SFML backend for widget (per-widget texture)
@@ -257,35 +253,29 @@ module CrymbleUI
         rt.display
         return rt.texture.copy_to_image
       end
-      layers = Layer.active_layers(root).sort_by(&.z_index)
-      layers.each do |layer|
+      clips = Hash(Widget, Rect?).new.compare_by_identity
+      Layer.composite_order(root).each do |layer|
         next unless valid_layer_dimensions?(layer)
         next unless backend = layer.backend
         next unless backend.is_a?(CrSFMLBackend)
         if owner = layer.owner_widget
           next if owner.skip_render?
         end
-        clip_w = PixelSnap.cover(layer.bounds.width)
-        clip_h = PixelSnap.cover(layer.bounds.height)
-        sfml_backend = backend.as(CrSFMLBackend)
-        sprite = SF::Sprite.new(sfml_backend.texture)
-        # Viewport-cache layers paint at +cache-margin inside their
-        # oversized buffer — sample like the live compositor does
-        # (Layer#viewport_sample_origin), or the capture shifts their
-        # content by the cache margin.
-        src_x, src_y = layer.viewport_cache ? layer.viewport_sample_origin(sfml_backend.width, sfml_backend.height, clip_w, clip_h) : {0, 0}
-        sprite.texture_rect = SF.int_rect(src_x, src_y, clip_w, clip_h)
-        # PixelSnap.snap == round(:ties_away) for v >= 0 and, unlike it, stays
-        # translation-invariant across zero (panels are draggable to negative x).
-        sprite.position = SF.vector2f(PixelSnap.snap(layer.bounds.x).to_f32, PixelSnap.snap(layer.bounds.y).to_f32)
+        # The live compositor's region (composite_region: clip, viewport-cache sample, snap) - one instrument
+        region = composite_region(layer, layer.owner_widget.try(&.ancestor_clip(clips)), backend.width, backend.height)
+        next unless region
+        sprite = SF::Sprite.new(backend.texture)
+        sprite.texture_rect = SF.int_rect(region.src_x, region.src_y, region.width, region.height)
+        sprite.position = SF.vector2f(region.dest_x.to_f32, region.dest_y.to_f32)
         rt.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
       end
       rt.display
       rt.texture.copy_to_image
     end
 
-    # Composite layer to window via sprite
-    def composite_layer_to_window(layer : Layer)
+    # Composite layer to window via sprite - the region composite_region computes (clip, sample, snap), the
+    # viewport-cache sample included
+    def composite_layer_to_window(layer : Layer, clip : Rect?)
       return unless window = @window
       return unless backend = layer.backend
       return unless backend.is_a?(CrSFMLBackend)
@@ -296,46 +286,23 @@ module CrymbleUI
       end
 
       LayerRenderer.frame_composite_count += 1 # Instrumentation
+      LayerRenderer.frame_viewport_cache_count += 1 if layer.viewport_cache # Instrumentation
 
-      # Clip sprite to visible layer bounds (texture may be larger due to buffer expansion)
-      # Conservative extents (PixelSnap.cover) avoid clipping the bottom/right edge at fractional bounds
-      clip_width = PixelSnap.cover(layer.bounds.width)
-      clip_height = PixelSnap.cover(layer.bounds.height)
-
-      # Clip to ancestor panel bounds — layers must not extend beyond their panel
-      if clip_bounds = find_descendant_clip_bounds(layer)
-        clip_right = clip_bounds.x + clip_bounds.width
-        clip_bottom = clip_bounds.y + clip_bounds.height
-        if layer.bounds.x + clip_width > clip_right
-          clip_width = Math.max(0, PixelSnap.cover(clip_right - layer.bounds.x))
+      if region = composite_region(layer, clip, backend.width, backend.height)
+        # TRACE: Log compositor state for debugging ScrollView-in-Panel issues
+        if ENV["CRYMBLE_TRACE"]? == "1"
+          File.open("/tmp/compositor_trace.log", "a") do |f|
+            f.puts "COMPOSITE layer=#{layer.id} bounds=#{layer.bounds} viewport_cache=#{layer.viewport_cache} " \
+                   "SAMPLE src=(#{region.src_x},#{region.src_y}) size=(#{region.width},#{region.height}) -> dest=(#{region.dest_x},#{region.dest_y})"
+          end
         end
-        if layer.bounds.y + clip_height > clip_bottom
-          clip_height = Math.max(0, PixelSnap.cover(clip_bottom - layer.bounds.y))
-        end
-      end
-
-      # TRACE: Log compositor state for debugging ScrollView-in-Panel issues
-      if ENV["CRYMBLE_TRACE"]? == "1"
-        File.open("/tmp/compositor_trace.log", "a") do |f|
-          f.puts "COMPOSITE layer=#{layer.id} bounds=(#{layer.bounds.x.round(1)},#{layer.bounds.y.round(1)},#{layer.bounds.width.round(1)},#{layer.bounds.height.round(1)}) clip=(#{clip_width},#{clip_height}) viewport_cache=#{layer.viewport_cache}"
-        end
-      end
-
-      if layer.viewport_cache
-        # Viewport cache compositing: sliding viewport for scrolling layers
-        composite_viewport_cache_layer(window, layer, backend, clip_width, clip_height)
-      else
-        # Standard compositing: simple sprite blit
         sprite = SF::Sprite.new(backend.texture)
-        sprite.texture_rect = SF.int_rect(0, 0, clip_width, clip_height)
-        sprite.position = SF.vector2f(PixelSnap.snap(layer.bounds.x).to_f32, PixelSnap.snap(layer.bounds.y).to_f32)
-
-        # Apply layer opacity (0.0-1.0) during compositing
+        sprite.texture_rect = SF.int_rect(region.src_x, region.src_y, region.width, region.height)
+        # Whole device pixels (composite_region snaps): a non-integer position + texture_rect offset interpolates
+        sprite.position = SF.vector2f(region.dest_x.to_f32, region.dest_y.to_f32)
         if layer.opacity < 1.0
-          alpha = (layer.opacity * 255).to_u8
-          sprite.color = SF::Color.new(255, 255, 255, alpha)
+          sprite.color = SF::Color.new(255, 255, 255, (layer.opacity * 255).to_u8)
         end
-
         window.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
       end
 
@@ -348,11 +315,6 @@ module CrymbleUI
         draw_chrome_border(window, owner.chrome_border)
       end
     end
-
-    # Descendant-layer clipping lives in the shared LayerRenderer
-    # (find_descendant_clip_bounds), which asks the ancestor chain polymorphically
-    # (responds_to? :descendant_layer_clip_bounds) — a WindowPanel returns its interior
-    # so content can't overpaint the border. No type-checking of concrete widgets here.
 
     # Draw a 1px chrome border directly on the window (not cached in any layer).
     # 4 separate rectangles instead of outline_thickness, for pixel-perfect alignment.
@@ -386,61 +348,6 @@ module CrymbleUI
       right.position = SF.vector2f(x + w - 1.0_f32, y)
       right.fill_color = color
       window.draw(right)
-    end
-
-    # Composite viewport_cache layer: content is at buffer-relative positions
-    # Use scroll_offset and buffer_origin to determine viewport window
-    private def composite_viewport_cache_layer(window : SF::RenderWindow, layer : Layer, backend : CrSFMLBackend, viewport_width : Int32, viewport_height : Int32)
-      LayerRenderer.frame_viewport_cache_count += 1 # Instrumentation
-
-      dest_x = PixelSnap.snap(layer.bounds.x).to_f32
-      dest_y = PixelSnap.snap(layer.bounds.y).to_f32
-
-      # Clip to ancestor panel bounds — layers must not extend beyond their panel
-      if clip_bounds = find_descendant_clip_bounds(layer)
-        clip_right = clip_bounds.x + clip_bounds.width
-        clip_bottom = clip_bounds.y + clip_bounds.height
-        if dest_x + viewport_width > clip_right
-          viewport_width = Math.max(0, PixelSnap.cover(clip_right - dest_x))
-        end
-        if dest_y + viewport_height > clip_bottom
-          viewport_height = Math.max(0, PixelSnap.cover(clip_bottom - dest_y))
-        end
-      end
-
-      # Calculate opacity color
-      sprite_color = if layer.opacity < 1.0
-                       alpha = (layer.opacity * 255).to_u8
-                       SF::Color.new(255, 255, 255, alpha)
-                     else
-                       SF::Color::White
-                     end
-
-      # Viewport position within buffer — shared math (Layer#viewport_sample_origin)
-      viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_width, viewport_height)
-
-      # invariant: a viewport_cache composite must never CLAMP (origin whole+fitting by construction).
-      layer.assert_composite_fits!(viewport_x, viewport_y)
-
-      # TRACE: Log viewport cache compositor details with calculated sample position
-      if ENV["CRYMBLE_TRACE"]? == "1"
-        File.open("/tmp/compositor_trace.log", "a") do |f|
-          f.puts "  VIEWPORT_CACHE layer=#{layer.id}"
-          f.puts "    dest=(#{dest_x.round(1)},#{dest_y.round(1)}) viewport_size=(#{viewport_width},#{viewport_height})"
-          f.puts "    scroll=(#{layer.scroll_offset.x.round(1)},#{layer.scroll_offset.y.round(1)}) buffer_origin=(#{layer.buffer_origin.x.round(1)},#{layer.buffer_origin.y.round(1)})"
-          f.puts "    backend_size=(#{backend.width},#{backend.height})"
-          f.puts "    SAMPLE src=(#{viewport_x},#{viewport_y}) size=(#{viewport_width},#{viewport_height}) -> dest=(#{dest_x.round(1)},#{dest_y.round(1)})"
-        end
-      end
-
-      # Blit the viewport region from buffer to window
-      sprite = SF::Sprite.new(backend.texture)
-      sprite.texture_rect = SF.int_rect(viewport_x, viewport_y, viewport_width, viewport_height)
-      # Round position to integers to avoid sub-pixel ghosting artifacts
-      # (non-integer positions + texture_rect offset causes interpolation issues)
-      sprite.position = SF.vector2f(dest_x, dest_y)
-      sprite.color = sprite_color
-      window.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
     end
 
     # Map CrymbleUI::BlendMode to SFML RenderStates for layer compositing
@@ -491,6 +398,7 @@ module CrymbleUI
       # First build happens in CrymbleUI.run before renderer exists (to get window dimensions)
       # This rebuild ensures shortcuts get registered now that ShortcutManager exists
       app.build_tree
+      app.start # the app's on_start: its timers find the scheduler from here on
 
       # Register zoom change callback for cache invalidation
       # This ensures font reload and texture invalidation happen regardless of
@@ -525,7 +433,7 @@ module CrymbleUI
             end
             # The input barrier also ends the wait: EventBatch stopped draining for it, and the events
             # still queued must not sit until the next timer.
-            break if needs_redraw || app.input_waits_for_frame?
+            break if needs_redraw || app.input_waits_for_frame? || @flushed_after_frame
 
             # During active drag, use short sleep to stay responsive without 100% CPU busy-wait
             # Mouse events arrive at ~125Hz (8ms intervals), so 2ms sleep is responsive enough
@@ -566,7 +474,7 @@ module CrymbleUI
           # This is unavoidable SFML/X11 windowing system overhead, not our application code.
           # Our actual event handling (cursor_update + event processing) is only ~1% CPU.
           # Not while the input barrier is up: the frame it waits for comes first (below), then the queue.
-          unless app.input_waits_for_frame?
+          unless app.input_waits_for_frame? || @flushed_after_frame
             if event = window.wait_event
               event_count += 1
               needs_redraw = true if dispatch(event, app)
@@ -599,14 +507,13 @@ module CrymbleUI
           needs_redraw = any_layer_needs_render?(app)
         end
 
-        # The barrier is lifted only by a frame: without one, EventBatch would never drain again.
-        needs_redraw = true if app.input_waits_for_frame?
+        # The barrier is lifted only by a frame: without one, EventBatch would never drain again. Nor
+        # may the loop idle after a frame whose end applied work that still has to be painted.
+        needs_redraw = true if app.input_waits_for_frame? || @flushed_after_frame
 
         # Render once per frame with latest state (after processing all events)
         if needs_redraw
-          render_frame(app)
-          # Stamp the aggregate the frame was rendered at, so the next pull idles until it moves.
-          @render_trigger.record(app)
+          render_frame(app) # stamps the aggregate it rendered at, so the next pull idles until it moves
           needs_redraw = false
         elsif event_count > 0
           # Events processed but no redraw triggered - this is where we save CPU!
@@ -631,11 +538,7 @@ module CrymbleUI
     private def handle_event(event : LibCSFML::Event, app : App) : Bool
       handle_event_impl(event, app)
     rescue ex
-      if handler = app.on_event_exception
-        handler.call(ex.message.to_s)
-      else
-        STDERR.puts "Unhandled exception in handle_event: #{ex.inspect_with_backtrace}"
-      end
+      app.report_event_exception(ex)
       false
     end
 
@@ -646,13 +549,10 @@ module CrymbleUI
       when SF::Event::MouseWheelScrolled
         # Everything below is read from the event and the keyboard's event-stream state, never from
         # the live devices: a queued wheel event belongs where and how it happened (KeyboardDispatch).
-        # Ctrl+MouseWheel = zoom in/out
+        # Ctrl+MouseWheel = zoom: a widget's own content (on_zoom_wheel), else the UI's font (App)
         if @keyboard.control?
-          if event.mouse_wheel_scroll.delta > 0
-            handle_zoom_in
-          elsif event.mouse_wheel_scroll.delta < 0
-            handle_zoom_out
-          end
+          wheel = event.mouse_wheel_scroll
+          app.handle_ctrl_wheel(wheel.delta.to_f64, Vec2.new(wheel.position.x.to_f64, wheel.position.y.to_f64))
           return true
         end
 
@@ -677,14 +577,13 @@ module CrymbleUI
         # App calls quit() when ready to actually close
         app.handle_close_request
         false
-      when SF::Event::MouseButtonPressed
-        handle_mouse_down(app, event.mouse_button.position.x.to_f64, event.mouse_button.position.y.to_f64, map_mouse_button(event.mouse_button.button))
-        false # Caller handles redraw for button events
-      when SF::Event::MouseButtonReleased
-        handle_mouse_up(app, event.mouse_button.position.x.to_f64, event.mouse_button.position.y.to_f64, map_mouse_button(event.mouse_button.button))
-        false # Caller handles redraw for button events
-      when SF::Event::MouseMoved
-        handle_mouse_move(app, event.mouse_move.position.x.to_f64, event.mouse_move.position.y.to_f64)
+      when SF::Event::MouseButtonPressed, SF::Event::MouseButtonReleased, SF::Event::MouseMoved
+        # MouseDispatch: the path TestRenderer#deliver takes too. The cursor shape needs the window.
+        redraw = @mouse.handle(event, app)
+        if at = @mouse.cursor_point(event, app)
+          redraw = update_cursor(app, at) || redraw
+        end
+        redraw
       when SF::Event::Resized
         if window = @window
           # Reset view to prevent content scaling
@@ -703,56 +602,6 @@ module CrymbleUI
       end
     end
 
-    # Handle mouse down events
-    private def handle_mouse_down(app : App, x : Float64, y : Float64, button : MouseButton = MouseButton::Left)
-      point = Vec2.new(x, y)
-
-      # Set focus on click - only focus focusable widgets
-      # Don't clear focus when clicking non-focusable elements (like scrollbars)
-      # This allows TextInput to keep focus while interacting with scrollbars
-      if root = app.root
-        if widget = root.hit_test(point)
-          if widget.focusable?
-            @focus_manager.focus(widget)
-          end
-          # Non-focusable widgets: keep current focus unchanged
-        else
-          # Click outside all widgets: clear focus
-          @focus_manager.clear_focus
-        end
-      end
-
-      app.handle_mouse_down(point, button)
-    end
-
-    # Handle mouse move events (for dragging, hover, and cursor updates)
-    private def handle_mouse_move(app : App, x : Float64, y : Float64)
-      point = Vec2.new(x, y)
-
-      # Handle dragging if mouse is down
-      if app.mouse_down?
-        # Let app handle drag logic
-        return app.handle_mouse_move(point)
-      else
-        # Update hover state (app manages which widget is hovered)
-        needs_redraw = app.update_hover(point)
-
-        # Update cursor based on what's under the mouse
-        # Only redraw if cursor visually changed
-        cursor_changed = update_cursor(app, point)
-
-        return needs_redraw || cursor_changed
-      end
-    end
-
-    # Handle mouse up events
-    private def handle_mouse_up(app : App, x : Float64, y : Float64, button : MouseButton = MouseButton::Left)
-      point = Vec2.new(x, y)
-      app.handle_mouse_up(point, button)
-      # Update cursor immediately after mouse up (fixes sticky resize cursor bug)
-      update_cursor(app, point)
-    end
-
     # Update cursor based on what's under the mouse
     # Returns true if cursor changed (needs redraw), false otherwise
     private def update_cursor(app : App, point : Vec2) : Bool
@@ -763,15 +612,6 @@ module CrymbleUI
 
       # Convert to SFML cursor type and set
       set_cursor(cursor_type)
-    end
-
-    # Map SFML mouse button to CrymbleUI MouseButton
-    private def map_mouse_button(button : LibCSFML::MouseButton) : MouseButton
-      case button
-      when LibCSFML::MouseButton::Right  then MouseButton::Right
-      when LibCSFML::MouseButton::Middle then MouseButton::Middle
-      else                                    MouseButton::Left
-      end
     end
 
     # Set the window cursor (only if changed)
@@ -821,19 +661,16 @@ module CrymbleUI
     # Render a single frame
     def render_frame(app : App)
       return unless window = @window # Headless mode - no window to render to
-      return unless root = app.root
+      unless root = app.root
+        end_frame(app) # nothing to paint, but the frame ends as every frame does
+        return
+      end
 
       # Sync background color from app (app may override; nil = theme default).
       @background_color = app.app_background_color || Theme.current.app_background
 
       # Sync window title from root widget (e.g. "MyApp — document.txt")
-      if root.is_a?(Window)
-        new_title = root.as(Window).title
-        if new_title != @current_title
-          window.title = new_title
-          @current_title = new_title
-        end
-      end
+      apply_title(app, window)
 
       # NOTE: Tried reset_gl_states here for texture pooling fix - didn't help.
       # See docs/TEXTURE_POOLING_INVESTIGATION.md
@@ -879,6 +716,7 @@ module CrymbleUI
 
         # Render overlay primitives (splash screen, etc.) directly to window
         if overlay = app.overlay_primitives(window_size.width, window_size.height)
+          reject_window_direct_clips(overlay)
           overlay.each { |p| execute_primitive(p, window) }
         end
 
@@ -925,9 +763,15 @@ module CrymbleUI
         # graceful degradation: that path recovers by nil-ing every widget and layer backend, i.e.
         # it would abandon the whole GPU working set once per frame while hiding the very bug this
         # error exists to report. Let it out.
-        raise exception if exception.is_a?(DisposedBackendError)
+        raise exception if exception.is_a?(RenderDefect)
         handle_frame_exception(exception, app, window)
+      else
+        note_frame_completed
       end
+
+      end_frame(app)
+      report_frame_failure(app)
+      apply_title(app, window) # a failure run marks it, the frame that ends one clears it
 
       {% if flag?(:PERF_LOG) %}
         frame_ms = frame_start ? (Time.instant - frame_start).total_milliseconds : 0.0
@@ -951,17 +795,46 @@ module CrymbleUI
       Widget.increment_render_count
     end
 
+    # The frame's end, the same in both renderers and reached by every frame: stamp the aggregate it
+    # rendered at, THEN apply the structural work of widgets that did not paint (App#finish_frame) - its
+    # marks must move the trigger after the stamp, and the loop must not idle before the frame that
+    # paints them.
+    #
+    # A flush that raised is reported like an event's exception - the loop runs it outside the frame's
+    # rescue - except the defects a frame never degrades over either.
+    private def end_frame(app : App) : Nil
+      @render_trigger.record(app)
+      @flushed_after_frame = app.finish_frame
+    rescue ex
+      raise ex if ex.is_a?(RenderDefect)
+      @flushed_after_frame = true # the others' work ran; paint it
+      app.report_event_exception(ex)
+    end
+
     # Handle exception during frame rendering (graceful degradation)
     private def handle_frame_exception(exception : Exception, app : App, window : SF::RenderWindow)
       STDERR.puts "[GRACEFUL_DEGRADATION] Frame exception: #{exception.message}"
       STDERR.puts "  #{exception.backtrace?.try(&.first(3).join("\n  "))}"
+      note_frame_failure(exception)
       app.reset_all_caches
       app.root.try(&.mark_needs_layout)
       # CRITICAL: Always display the frame — a stale frame is better than a black hole
       begin
         window.display
       rescue
+        return # the reaper waits for the next good frame: after a display that raised, the GL state is unknown
       end
+      # What the recovery released is freed here, in the state the success path drains in (after display) - a
+      # frame that keeps raising would otherwise park the working set in the reaper again and again.
+      CrSFMLBackend.drain_reaper
+    end
+
+    # The window shows title_to_apply - written only when it changed.
+    private def apply_title(app : App, window : SF::RenderWindow) : Nil
+      return unless title = title_to_apply(app)
+      return if title == @current_title
+      window.title = title
+      @current_title = title
     end
 
     # === PRIMITIVE-BASED RENDERING (New Architecture) ===
@@ -970,6 +843,7 @@ module CrymbleUI
     # This is the new rendering path - primitives are backend-agnostic data structures
     def render_primitives(primitives : Array(DrawPrimitive))
       return unless window = @window
+      reject_window_direct_clips(primitives)
       primitives.each { |primitive| execute_primitive(primitive, window) }
     end
 
@@ -1028,14 +902,8 @@ module CrymbleUI
         rect.outline_color = to_sf_color(primitive.color)
         rect.outline_thickness = primitive.width
         target.draw(rect)
-      when PushClip
-        # Push clipping rectangle (only works with SFMLPaintContext currently)
-        # For direct window rendering, clipping needs special handling
-        # TODO: Implement clipping for primitives rendered directly to window
-
-      when PopClip
-        # Pop clipping rectangle
-        # TODO: Implement clipping for primitives rendered directly to window
+      when PushClip, PopClip
+        raise WindowDirectClipError.new(primitive) # the entry points check the whole list first
 
       when FillTriangle
         # Fill triangle with 3 vertices
@@ -1111,26 +979,6 @@ module CrymbleUI
       # Downstream code may hold onto the wrapper and expect a new instance
       # after zoom change to invalidate its caches.
       Widget.font = SFMLFont.new(@default_font)
-
-      # Recreate paint context with the existing font so any per-frame
-      # state tied to it gets reset.
-      if window = @window
-        @paint_context = SFMLPaintContext.new(window, @default_font)
-      end
-    end
-
-    # Handle zoom in (Ctrl++ or Ctrl+MouseWheel up)
-    # Cache invalidation is handled by FontSizing.on_zoom_change callback
-    # The full zoom response — font reload, cache invalidation, AND widget-tree
-    # re-layout — is handled by apply_zoom_change, invoked via FontSizing.on_zoom_change
-    # on every zoom change. So these just move the zoom level; no per-handler root mark.
-    private def handle_zoom_in
-      FontSizing.zoom_in
-    end
-
-    # Handle zoom out (Ctrl+- or Ctrl+MouseWheel down)
-    private def handle_zoom_out
-      FontSizing.zoom_out
     end
   end
 end

@@ -193,6 +193,18 @@ private class RebuildingMatrixApp < CrymbleUI::App
   end
 end
 
+# The same, but the build never sets the mode: whatever the live widget was switched to, the
+# reconcile carry decides.
+private class PlainRebuildingMatrixApp < CrymbleUI::App
+  def initialize(@adapter : CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter, @matrix_id : String)
+    super()
+  end
+
+  def build : CrymbleUI::Widget
+    CrymbleUI::VirtualMatrix.new(@adapter, id: @matrix_id)
+  end
+end
+
 private def live_matrix(app, id) : CrymbleUI::VirtualMatrix
   app.find(id).not_nil!.as(CrymbleUI::VirtualMatrix)
 end
@@ -258,5 +270,53 @@ describe "auto-size shrink after a rebuild" do
     matrix.active_cells[{0, 0}].bounds.height.should be_close(plain, 1.0),
       "the row stayed #{matrix.active_cells[{0, 0}].bounds.height.round(1)}px tall after its only " \
       "multi-line cell became one line (a single-line row is #{plain.round(1)}px)"
+  end
+
+  # The mode is on from the FIRST build, and the tree is rebuilt before that first instance ever
+  # measured - "Duplicate Shape" is born this way. The carry takes the mode and the (default) sizes
+  # and must not cancel the measurement that never ran.
+  it "applies a mode that is on from the first build when a rebuild comes before the first frame" do
+    adapter = TallAdapter.new(5, 3)
+    adapter.set(0, 0, "one\ntwo\nthree\nfour\nfive")
+    renderer = CrymbleUI::Testing::TestRenderer.new(900, 600)
+    app = RebuildingMatrixApp.new(adapter, "born_on")
+    app.build_tree
+    first = live_matrix(app, "born_on")
+    app.request_rebuild
+    renderer.settle_rendering(app)
+    matrix = live_matrix(app, "born_on")
+    matrix.should_not be(first) # control: the rebuild really replaced the widget
+
+    tall = matrix.active_cells[{0, 0}].bounds.height
+    plain = matrix.active_cells[{1, 0}].bounds.height
+    matrix.auto_size.should be_true
+    tall.should be > plain + 20.0,
+      "row 0 holds five lines but is #{tall.round(1)}px, like a one-line row (#{plain.round(1)}px)"
+  end
+
+  # The other half: a consumer whose build does NOT restate the mode turns it on imperatively and
+  # rebuilds in the same event. The new widget takes the mode from the carry, so it has nothing
+  # pending of its own - the old one's pending re-measure has to travel, not just survive.
+  it "applies a mode switched on imperatively and rebuilt before the next frame" do
+    adapter = TallAdapter.new(5, 3)
+    adapter.set(0, 0, "one\ntwo\nthree\nfour\nfive")
+    renderer = CrymbleUI::Testing::TestRenderer.new(900, 600)
+    app = PlainRebuildingMatrixApp.new(adapter, "switched_on")
+    app.build_tree
+    renderer.settle_rendering(app)
+    first = live_matrix(app, "switched_on")
+    first.auto_size.should be_false # control: the build itself never sets the mode
+
+    first.auto_size = true
+    app.request_rebuild
+    renderer.settle_rendering(app)
+    matrix = live_matrix(app, "switched_on")
+    matrix.should_not be(first)
+
+    tall = matrix.active_cells[{0, 0}].bounds.height
+    plain = matrix.active_cells[{1, 0}].bounds.height
+    matrix.auto_size.should be_true
+    tall.should be > plain + 20.0,
+      "row 0 holds five lines but is #{tall.round(1)}px, like a one-line row (#{plain.round(1)}px)"
   end
 end

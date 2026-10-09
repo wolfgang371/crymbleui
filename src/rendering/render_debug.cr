@@ -1,4 +1,5 @@
 require "../core/layer"
+require "../core/composite_order"
 
 module CrymbleUI
   # Render-state dump — the first thing to reach for on a "looks wrong on screen" bug.
@@ -16,8 +17,9 @@ module CrymbleUI
     def self.dump(root : Widget, dir : String = "/tmp/render_dump") : String
       Dir.mkdir_p(dir)
       report = String.build do |s|
-        s << "=== render dump (#{Layer.active_layers(root).size} active layers) ===\n"
-        Layer.active_layers(root).sort_by(&.z_index).each do |layer|
+        layers = Layer.composite_order(root) # what the compositor draws, back to front
+        s << "=== render dump (#{layers.size} layers, composite order) ===\n"
+        layers.each do |layer|
           b = layer.backend
           buf = (b && b.responds_to?(:width)) ? "#{b.width}x#{b.height}" : "none"
           s << "\nLAYER #{layer.id}  z=#{layer.z_index}  bounds=#{layer.bounds}  scroll=#{layer.scroll_offset}" \

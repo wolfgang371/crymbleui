@@ -38,7 +38,6 @@ end
 
 class ResizeBugAutotest < CrymbleUI::App
   @test_phase = 0
-  @scheduled = false
 
   PANEL_X = 100.0
   PANEL_Y = 100.0
@@ -46,12 +45,12 @@ class ResizeBugAutotest < CrymbleUI::App
   PANEL_HEIGHT = 250.0
   TITLE_BAR_HEIGHT = 28.0
 
-  def build : CrymbleUI::Widget
-    if @test_phase == 0 && !@scheduled && scheduler_ready?
-      @scheduled = true
-      schedule_next_phase(500)
-    end
+  # The first phase, once the window is up.
+  def on_start
+    schedule_next_phase(500)
+  end
 
+  def build : CrymbleUI::Widget
     window("Resize Bug Test", 800, 600) do
       window_panel(title: "Preview (ScrollView)", x: PANEL_X, y: PANEL_Y,
                    width: PANEL_WIDTH, height: PANEL_HEIGHT,
@@ -72,17 +71,8 @@ class ResizeBugAutotest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
   private def schedule_next_phase(delay_ms : Int32)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms * 1_000_000)) do
+    after(delay_ms.milliseconds) do
       run_test_phase
     end
   end

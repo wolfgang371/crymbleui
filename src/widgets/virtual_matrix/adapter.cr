@@ -44,7 +44,7 @@ module CrymbleUI::Widgets::VirtualMatrix
     # natural order ends `[.., 0, 1]`: the first element read is {1}, not {0}, the scan stops
     # immediately, and NOTHING is sticky — with no error anywhere, the headers just become
     # ordinary scrolling content. Two adapters shipped that bug before it was found through a
-    # user-visible symptom (crymble-ui SimpleMatrixAdapter, embrace's pivot; see
+    # user-visible symptom (a small-table adapter since retired, and embrace's pivot; see
     # VIRTUAL_MATRIX_ARCHITECTURE.md "Sticky Derivation from scroll_order"), so an adapter that
     # knows its header count wants exactly:
     #
@@ -53,7 +53,8 @@ module CrymbleUI::Widgets::VirtualMatrix
     # Default: must be implemented by subclass
     abstract def get_scrollorder : {Array(Int32), Array(Int32)}
 
-    # Create a widget for the given cell position.
+    # The widget for the given cell position - a new one, or one the adapter kept from an earlier call (it
+    # comes back whole: a cell that leaves is detached, never destroyed; MATRIX_LAWS § Cells).
     # Called by VirtualMatrix when a cell enters the visible region.
     abstract def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
 

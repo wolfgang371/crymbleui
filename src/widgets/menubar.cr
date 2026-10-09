@@ -47,8 +47,6 @@ module CrymbleUI
         reactive_property menu_system_active : Bool = false, reconcile: true
 
         # @internal_layer provided by LayerOwner mixin
-        # MenuBar always renders on top with fixed high z_index
-        MENUBAR_Z_INDEX = 1000  # Fixed high z_index to render above all panels (same as Popups)
 
         # Activate menu system (called when any menu opens)
         def activate_menu_system
@@ -111,7 +109,7 @@ module CrymbleUI
             # Create layer only for Window menubar (needs high z-index above panels)
             # Panel menubar uses parent panel's layer (part of panel chrome)
             if @parent.is_a?(Window) && @internal_layer.nil?
-                @internal_layer = Layer.new("menubar_#{id}", Rect.zero, z_index: MENUBAR_Z_INDEX, owner_widget: self)
+                @internal_layer = Layer.new("menubar_#{id}", Rect.zero, owner_widget: self)
             end
 
             # Populate layer.widgets (Window menubar only)

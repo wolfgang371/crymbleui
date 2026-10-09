@@ -58,12 +58,14 @@ module CrymbleUI
       # What it must still supply itself is the EXTENT: pitch MINUS the gutter, which is how every
       # box in this grid is sized (virtual_matrix.cr:486). Centring in the full pitch instead put
       # every ruler number exactly half a gutter (1.5px at GRID_SPACING 3) below the cells of its
-      # own line, at every scroll position -- 12402 of 12402 comparisons, measured by I9.
+      # own line, at every scroll position -- 12402 of 12402 comparisons, measured by I9. And the
+      # `hold`: one default line on this ruler's axis (VirtualMatrix#line_extent, #column_extent),
+      # the hold the cells get, so a one-line row's number is cut with it rather than slid (UC-5).
       private def label_pos(region_pos : Float64, region_size : Float64, label_size : Float64,
-                            band_lo : Float64, band_hi : Float64) : Float64
+                            band_lo : Float64, band_hi : Float64, hold : Float64) : Float64
         extent = region_size - @matrix.grid_spacing
-        natural = centred_in(region_pos, extent, label_size, band_lo, band_hi)
-        held_in_region(natural, region_pos, extent, label_size, band_lo, band_hi, label_size)
+        natural = centred_in(region_pos, extent, label_size, band_lo, band_hi, hold)
+        held_in_region(natural, region_pos, extent, label_size, band_lo, band_hi, hold, label_size)
       end
 
       # Render a sequence of labels along an axis with border lines.
@@ -92,6 +94,7 @@ module CrymbleUI
         # the panel shrunk, the "1" sat on the panel's bottom edge while its value stayed up in
         # view (Wolfgang, 2026-09-21). Its own origin is what makes the number common to both.
         band_hi = axis == :col ? @matrix.bounds.width - bounds.x : @matrix.bounds.height - bounds.y
+        hold = axis == :col ? @matrix.column_extent : @matrix.line_extent # one default line on this axis
 
         range.each do |i|
           cell_size = sizes[i].to_f64
@@ -103,7 +106,7 @@ module CrymbleUI
             unless screen_pos + cell_size <= band_lo || screen_pos >= band_hi
               label = "c#{i + 1}"
               text_dims = measure_text(label, font_size)
-              text_x = label_pos(screen_pos, cell_size, text_dims.width, band_lo, band_hi)
+              text_x = label_pos(screen_pos, cell_size, text_dims.width, band_lo, band_hi, hold)
               text_y = (bounds.height - font_size) / 2.0 # cross-axis: the strip is one line high
               draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: VirtualMatrix::RULER_LABEL_FONT_SCALE)
               border_x = screen_pos + cell_size
@@ -114,7 +117,7 @@ module CrymbleUI
               label = "#{i + 1}"
               text_dims = measure_text(label, font_size)
               text_x = (bounds.width - text_dims.width) / 2.0 # cross-axis: the strip is one label wide
-              text_y = label_pos(screen_pos, cell_size, font_size, band_lo, band_hi)
+              text_y = label_pos(screen_pos, cell_size, font_size, band_lo, band_hi, hold)
               draw_text(label, Vec2.new(text_x, text_y), VirtualMatrix.ruler_label_color, font_scale: VirtualMatrix::RULER_LABEL_FONT_SCALE)
               border_y = screen_pos + cell_size
               draw_line(Vec2.new(0.0, border_y), Vec2.new(bounds.width, border_y), VirtualMatrix.ruler_line_color)
@@ -138,7 +141,7 @@ module CrymbleUI
         col_sizes = @matrix.@cached_col_sizes
         return [] of DrawPrimitive unless col_sizes
 
-        scroll_x = @matrix.scroll_offset.x
+        scroll_x = @matrix.painted_scroll.x # the whole scroll the cells are painted with
         sticky_cols = @matrix.sticky_col_count
         acc_x = @matrix.ruler_col_width_pixels + @matrix.sticky_col_width_pixels
 
@@ -166,7 +169,7 @@ module CrymbleUI
         row_sizes = @matrix.@cached_row_sizes
         return [] of DrawPrimitive unless row_sizes
 
-        scroll_y = @matrix.scroll_offset.y
+        scroll_y = @matrix.painted_scroll.y # the whole scroll the cells are painted with
         sticky_rows = @matrix.sticky_row_count
         acc_y = @matrix.ruler_row_height_pixels + @matrix.sticky_row_height_pixels
 

@@ -64,12 +64,12 @@ module CrymbleUI
     # Pull-based bounds: compute the correct bounds for a given layer.
     # Override in each LayerOwner to return the appropriate bounds.
     #
-    # PAINTED bounds, not laid-out: a layer is composited onto the WINDOW, so a layer-owning
-    # widget that sits inside a scroller (a ScrollView nested in another, a matrix in a scrolled
-    # panel) must place its layer where it is painted or the layer lands a scroll-offset away
-    # from its own widget. Identical to `absolute_bounds` when nothing above scrolls.
+    # In CONTENT space - where the widget is laid out (absolute_bounds). The layer derives where it is
+    # composited (Layer#bounds: minus the enclosing scroll) and paints its widgets relative to this, so an
+    # ancestor's scroll moves the layer without repainting it. Never viewport_bounds here: it would be shifted
+    # twice (content drawn a scroll away after the next repaint).
     def compute_bounds_for_layer(layer : Layer) : Rect
-      viewport_bounds
+      absolute_bounds
     end
 
     # Layer-owning widgets must not skip layout.
@@ -95,9 +95,9 @@ module CrymbleUI
     end
 
     # === ANCESTOR NOTIFICATION CALLBACKS ===
-    # Called when ancestor's z-index changed (e.g., bring-to-front)
-    # base_z: the ancestor's new z-index (layer owner computes own offset)
-    def on_ancestor_z_index_changed(base_z : Int32)
+    # Called when an ancestor panel was raised (bring-to-front): repaint what it needs to. Order is not this
+    # callback's business - Layer.composite_order follows the panel's z.
+    def on_ancestor_raised
       # Default: no-op
     end
   end

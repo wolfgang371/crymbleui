@@ -65,9 +65,69 @@ module CrymbleUI
     # loop renders the frame that applies the work; prepare_layout, which every frame runs, lifts it.
     # Layout, scrolling and content refreshes do not raise it: their coalescing is what keeps a drag
     # to one frame per batch.
-    def request_frame_before_input : Nil
+    #
+    # The frame that lifts it applies that work for EVERY widget that announced it - painted or not.
+    # A widget applies it while it paints, but occlusion culling, a closed or hidden panel or an empty
+    # viewport skip the painting, and the barrier comes down all the same; so an announcing widget
+    # (`owner`) also registers, and finish_frame applies what it still holds before the next input.
+    def request_frame_before_input(owner : Widget? = nil) : Nil
       @frame_before_input = true
+      owner.try { |w| register_input_flush(w) }
     end
+
+    # Registers structural work the next input depends on without raising the barrier - a per-cell
+    # invalidation, a deferred scroll: they keep coalescing within a batch, and finish_frame applies
+    # them after the frame whether or not the widget painted.
+    def register_input_flush(owner : Widget) : Nil
+      @input_flushers << owner
+    end
+
+    # Once per frame, after the frame is rendered and its render trigger stamped, before the next input
+    # is dispatched: every registered widget still in the tree applies the structural work it holds
+    # (Widget#flush_before_input - a no-op for one that painted). A widget a rebuild replaced is skipped:
+    # its successor inherited the work and registered itself. A registration made during these flushes
+    # lands in the next frame; nothing is carried forward. True when some work ran - its marks moved
+    # the render trigger after the stamp, so the renderer must not idle before the next frame.
+    #
+    # Every registered widget is flushed even if one raises - one failure must not strand the others'
+    # work behind a lowered barrier - and the first failure is raised after the last. What it means is
+    # the renderer's to say, as for any frame: SFMLRenderer reports it, TestRenderer lets it out.
+    def finish_frame : Bool
+      return false if @input_flushers.empty?
+      flushers = @input_flushers
+      @input_flushers = Set(Widget).new
+      return false unless root = @root
+      failure : Exception? = nil
+      ran = flushers.reduce(false) do |acc, widget|
+        next acc unless widget.widget_in_tree?(root)
+        begin
+          widget.flush_before_input || acc
+        rescue ex
+          failure ||= ex
+          acc
+        end
+      end
+      failure.try { |ex| raise ex }
+      ran
+    end
+
+    # An exception from handling input (or from a frame's end) that the app did not handle: to its
+    # on_event_exception (embrace: the status bar), else STDERR.
+    def report_event_exception(ex : Exception) : Nil
+      if handler = @on_event_exception
+        handler.call(ex.message.to_s)
+      else
+        STDERR.puts "Unhandled exception: #{ex.inspect_with_backtrace}"
+      end
+    end
+
+    # A frame that raised was recovered from: `message` (the renderer already wrote the backtrace to STDERR) goes to
+    # on_event_exception (embrace: the status bar). Without one, nothing more to say.
+    def report_display_error(message : String) : Nil
+      @on_event_exception.try(&.call(message))
+    end
+
+    @input_flushers = Set(Widget).new
 
     def input_waits_for_frame? : Bool
       @frame_before_input
@@ -143,6 +203,11 @@ module CrymbleUI
     # Drag-and-drop manager
     @drag_manager : DragManager = DragManager.new
 
+    # During a rebuild: the widgets the gesture in progress holds (the pressed one, the drag's) and their
+    # ancestors, each mapped to the new widget reconcile copied its state into, and whether that pairing was
+    # by id.
+    @counterparts = {} of UInt64 => {Widget, Bool}
+
     # Get the drag manager (for layer rendering)
     def drag_manager : DragManager
       @drag_manager
@@ -190,7 +255,8 @@ module CrymbleUI
 
     # Overlay primitives drawn directly to the window after all layers
     # Override in subclasses for splash screens, overlays, etc.
-    # Receives window dimensions; primitives use absolute screen coordinates
+    # Receives window dimensions; primitives use absolute screen coordinates. Drawn straight to the
+    # window, with no clip stack: a PushClip/PopClip raises WindowDirectClipError.
     def overlay_primitives(window_width : Float64, window_height : Float64) : Array(DrawPrimitive)?
       nil
     end
@@ -261,6 +327,38 @@ module CrymbleUI
     # Should return the root widget
     abstract def build : Widget
 
+    # Called once, when the app starts running: the renderer (and its scheduler, focus and shortcut
+    # managers) is up and the tree is built, before the first frame. Start the app's timers here -
+    # `build` describes the UI and runs again on every rebuild, and its first run (which reads the
+    # window's size and title) comes before the renderer exists.
+    #
+    #   def on_start
+    #     every(1.second) { self.now = Time.local.to_s("%H:%M:%S") }
+    #   end
+    def on_start
+    end
+
+    @started = false
+
+    # Run on_start, once. Called by the renderer (SFMLRenderer#run, TestRenderer#render_frame).
+    def start : Nil
+      return if @started
+      @started = true
+      on_start
+    end
+
+    # Run the block every `interval`, until the returned Timer is cancelled.
+    def every(interval : Time::Span, &block : -> Nil) : Timer
+      scheduler = Widget.scheduler
+      Timer.new(scheduler, scheduler.schedule(interval, repeating: true, &block))
+    end
+
+    # Run the block once, after `delay`.
+    def after(delay : Time::Span, &block : -> Nil) : Timer
+      scheduler = Widget.scheduler
+      Timer.new(scheduler, scheduler.schedule(delay, &block))
+    end
+
     # Build and set the widget tree
     def build_tree
       # Clear shortcuts before rebuilding to avoid duplicates. Skipped before the renderer installs the
@@ -324,9 +422,19 @@ module CrymbleUI
         end
       end
 
-      # Save mouse_down_widget's path ID before rebuild (for re-finding after reconciliation)
-      # this is crucial for e.g. scrollbar scrolling!
-      mouse_down_widget_path_id = @mouse_down_widget.try(&.path_id)
+      # The widgets a gesture in progress holds (the pressed one - crucial for e.g. scrollbar scrolling - and
+      # the drag's), with their ancestors: reconcile records what it pairs each with, and they are handed on
+      # after it.
+      @counterparts.clear
+      held = @drag_manager.held_widgets
+      @mouse_down_widget.try { |w| held << w }
+      held.each do |widget|
+        node = widget
+        while node
+          @counterparts[node.object_id] ||= {node, false}
+          node = node.parent
+        end
+      end
 
       # Build new tree
       new_root = build()
@@ -361,15 +469,12 @@ module CrymbleUI
       # shortcut never fires). Mirrors the @hovered_widget reset.
       Widget.focus_manager?.try &.reconcile_focus(new_root)
 
-      # Update mouse_down_widget to point to corresponding widget in new tree
-      # Critical for dragging to continue working after rebuild (e.g., ScrollView scrollbar dragging)
-      if mouse_down_widget_path_id
-        @mouse_down_widget = new_root.find_by_path(mouse_down_widget_path_id)
-      end
-
-      # Update drag state widget references to point to new tree nodes
-      # Without this, mid-drag rebuilds leave source_widget/current_target pointing at dead nodes
-      @drag_manager.state.update_widget_references(new_root)
+      # Hand the gesture to the widgets that replaced the ones it holds - the pressed one (a drag of a
+      # scrollbar or a panel goes on) and the drag's (a pending drag keeps the payload its pressed source
+      # offered). Without this they point at dead nodes.
+      @mouse_down_widget = @mouse_down_widget.try { |w| counterpart(w, new_root) }
+      @drag_manager.rebind { |w| counterpart(w, new_root) }
+      @counterparts.clear
 
       # Clean up orphaned layers from the registry
       # Old layers from the old widget tree are no longer reachable - remove them
@@ -528,6 +633,7 @@ module CrymbleUI
 
     # Copy state from old widget to new widget (preserves positions, etc.)
     private def copy_widget_state(old : Widget, new : Widget)
+      record_counterpart(old, new)
       {% if flag?(:DEBUG_RENDER) %}
         puts "[COPY_WIDGET_STATE] Copying from #{old.class.name.split("::").last}##{old.path_id} to #{new.class.name.split("::").last}##{new.path_id}"
       {% end %}
@@ -543,6 +649,49 @@ module CrymbleUI
       {% if flag?(:DEBUG_RENDER) %}
         puts "[COPY_WIDGET_STATE] Done calling copy_state_from"
       {% end %}
+    end
+
+    # Remember `new` as the counterpart of a widget the gesture holds (or of one of its ancestors). An old
+    # widget can be paired twice - an id-less new sibling by index, an id'd one by id, in either order: the
+    # id match wins, never the reverse. Everything inside it is then paired under BOTH copies (by index): a
+    # pairing under the copy its container went to replaces one recorded under a copy the container has since
+    # left (counterpart answers only a pairing under the container's copy).
+    private def record_counterpart(old : Widget, new : Widget) : Nil
+      key = old.object_id
+      return unless recorded = @counterparts[key]?
+      container = container_copy(old)
+      by_id = !old.id.nil? && old.id == new.id
+      unpaired = recorded[0].same?(old)
+      left_behind = container && new.parent.same?(container) && !recorded[0].parent.same?(container)
+      @counterparts[key] = {new, by_id} if unpaired || left_behind || (by_id && !recorded[1])
+    end
+
+    # The copy `old`'s container was paired with, if it was paired with a new one (not kept as itself).
+    private def container_copy(old : Widget) : Widget?
+      up = old.parent || return nil
+      paired = @counterparts[up.object_id]?.try(&.[0])
+      paired unless paired.nil? || paired.same?(up)
+    end
+
+    # The widget that is `old` after the rebuild into `new_root`: `old` itself if it is still in the new tree
+    # (a memoized root, an overlay the window migrated) - its parent chain reaches the new root; else the one
+    # reconcile paired it with; else nil (it is gone). (One false positive, accepted: an old child of a
+    # memoized parent still points at it.)
+    private def counterpart(old : Widget, new_root : Widget) : Widget?
+      node = old
+      while parent = node.parent
+        node = parent
+      end
+      return old if node.same?(new_root)
+      paired = @counterparts[old.object_id]?.try(&.[0])
+      return nil if paired.nil? || paired.same?(old)
+      # Paired under a copy its container has since left (the container went to its id match, which holds no
+      # counterpart for it): gone, as when reconcile paired the id match first. Checked up the whole chain -
+      # a container that is gone takes what is inside it along.
+      if (up = old.parent) && container_copy(old)
+        return nil unless paired.parent.same?(counterpart(up, new_root))
+      end
+      paired
     end
 
     # Update hover state based on what's under the mouse
@@ -572,6 +721,12 @@ module CrymbleUI
         current_hover.try &.on_mouse_enter
       end
 
+      # Tell the hovered widget where the mouse is, in its own space: what it highlights may be a part of
+      # it (a bar, a cell). Optional, duck-typed: `on_hover_move(point)`.
+      if (hovered = current_hover) && hovered.responds_to?(:on_hover_move)
+        hovered.on_hover_move(hovered.to_content(point))
+      end
+
       # Always fire hover callback (position-dependent widgets like VirtualMatrix
       # need updates on every move, not just widget changes)
       @hover_change_callback.try &.call
@@ -583,20 +738,16 @@ module CrymbleUI
     def handle_mouse_down(point : Vec2, button : MouseButton = MouseButton::Left)
       return unless root = @root
 
-      # Notify window of click for popup click-outside-to-close
-      # This happens BEFORE hit_test so popups can close before new interaction
-      if root.is_a?(Window)
-        root.notify_overlays_of_click(point)
-      end
+      dismiss_popups(point)
 
       @mouse_down = true
+      # A press focuses what it hits - only a focusable widget, so a scrollbar leaves a TextInput its
+      # focus - and clears focus on a press that hits nothing. Here, not in a renderer, so every path
+      # to a press (both renderers, test helpers, a spec calling this) gives the focus a real one does.
       if widget = root.hit_test(point)
+        Widget.focus_manager?.try &.focus(widget) if widget.takes_focus_on_click?
         @mouse_down_widget = widget
-
-        # A click outside every overlay surface dismisses the open menus.
-        unless is_inside_overlay_surface?(widget)
-          close_all_menus(root)
-        end
+        dismiss_menus(widget)
 
         # Start drag tracking if widget or an ancestor is Draggable
         if draggable = find_draggable_ancestor(widget)
@@ -613,18 +764,30 @@ module CrymbleUI
         if @drag_manager.state.pending? && widget.suppresses_drag?
           @drag_manager.cancel_drag
         end
-        # Rebuild only if explicitly requested (not for layout-only changes)
-        if needs_rebuild?
-          # Save path_id before rebuild (widget will be replaced with new instance)
-          widget_path = widget.path_id
-          rebuild
-          # Update @mouse_down_widget to point to NEW widget instance
-          # (old instance's parent chain is broken after rebuild)
-          if new_widget = find_by_path(widget_path)
-            @mouse_down_widget = new_widget
-          end
-        end
+        # Rebuild only if explicitly requested (not for layout-only changes); it hands the press to the pressed
+        # widget's replacement
+        rebuild if needs_rebuild?
+      else
+        Widget.focus_manager?.try &.clear_focus
       end
+    end
+
+    # The two dismissals a mouse-down makes around its handler, named so the test Driver runs the
+    # same ones for an act by id (src/testing/driver.cr). Their ORDER is part of the contract and
+    # is kept by handle_mouse_down: popups first, before the hit test, so a popup a click outside
+    # closes can never be the widget that click lands on; menus after, because whether they close
+    # depends on WHERE the click landed.
+
+    # Close every popup the click at `point` (window space) is outside of.
+    def dismiss_popups(point : Vec2) : Nil
+      @root.as?(Window).try &.notify_overlays_of_click(point)
+    end
+
+    # A click that landed outside every overlay surface dismisses the open menus. `target` is what
+    # the click landed on; nil (nothing hit) dismisses nothing, as ever.
+    def dismiss_menus(target : Widget?) : Nil
+      return unless (widget = target) && (root = @root)
+      close_all_menus(root) unless is_inside_overlay_surface?(widget)
     end
 
     # Did the mouse-down land inside a click-interactive overlay SURFACE (a Popup or an open
@@ -692,16 +855,7 @@ module CrymbleUI
         if widget = @mouse_down_widget
           widget.on_mouse_move(widget.to_content(point))
           # Rebuild only if explicitly requested (not for layout-only changes)
-          if needs_rebuild?
-            # Save path_id before rebuild (widget will be replaced with new instance)
-            widget_path = widget.path_id
-            rebuild
-            # Update @mouse_down_widget to point to NEW widget instance
-            # (old instance's parent chain is broken after rebuild)
-            if new_widget = find_by_path(widget_path)
-              @mouse_down_widget = new_widget
-            end
-          end
+          rebuild if needs_rebuild? # it hands the press to the pressed widget's replacement
           # Return true to trigger redraw during drag
           return true
         end
@@ -717,6 +871,9 @@ module CrymbleUI
 
       # Complete drag-and-drop if active
       if @drag_manager.dragging?
+        # The drop lands on what is under the release now - a scroll since the last move (with no frame
+        # between, in one input batch) may have moved another target there.
+        @drag_manager.follow_pointer(point, root)
         @drag_manager.end_drag(point)
         # Skip normal click processing after drag
         @mouse_down = false
@@ -756,22 +913,42 @@ module CrymbleUI
     # delta: Vec2 where y is vertical scroll (positive = up, negative = down)
     # point: Mouse position in window coordinates
     # shift: Whether shift key is held (for horizontal scrolling)
+    # Ctrl+wheel (`steps`: notches, positive away from the user). Offered first to the widgets under the
+    # mouse, innermost first, that zoom content of their own - `on_zoom_wheel(steps, point) : Bool`, the
+    # point in the widget's space - and only when none takes it, the whole UI's font zoom.
+    def handle_ctrl_wheel(steps : Float64, point : Vec2) : Nil
+      current : Widget? = @root.try(&.hit_test(point))
+      while current
+        if current.responds_to?(:on_zoom_wheel) && current.on_zoom_wheel(steps, current.to_content(point))
+          rebuild if needs_rebuild?
+          return
+        end
+        current = current.parent
+      end
+      if steps > 0
+        FontSizing.zoom_in
+      elsif steps < 0
+        FontSizing.zoom_out
+      end
+    end
+
     def handle_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false)
       return unless root = @root
 
-      # Find widget under mouse
+      # Find widget under mouse, then walk up the tree handing the wheel to each scroller in turn: each takes
+      # the axes it can move on and returns the rest (ScrollView#on_mouse_wheel), in the input frame and in its
+      # own space, until nothing is left - a scroller that cannot move that way passes the wheel on
       if widget = root.hit_test(point)
-        # Walk up tree to find first widget that handles wheel events
+        left = delta
         current : Widget? = widget
-        while current
+        while current && (left.x != 0.0 || left.y != 0.0)
           if current.responds_to?(:on_mouse_wheel)
-            current.on_mouse_wheel(delta, current.to_content(point), shift: shift)
-            # Rebuild only if explicitly requested
-            rebuild if needs_rebuild?
-            return
+            left = current.on_mouse_wheel(left, current.to_content(point), shift: shift)
           end
           current = current.parent
         end
+        # Rebuild only if explicitly requested
+        rebuild if needs_rebuild?
       end
     end
 
@@ -806,6 +983,10 @@ module CrymbleUI
       update_topmost_panel_cache
       topmost_changed = (old_topmost != @topmost_panel)
 
+      # A drag follows the tree moving under a still pointer (a scroll moves nothing through layout, a
+      # re-layout may): its target, highlight and on_drag_over are what is under the pointer this frame.
+      @drag_manager.follow_pointer(@drag_manager.state.current_position, root)
+
       did_layout || topmost_changed
     end
 
@@ -833,37 +1014,35 @@ module CrymbleUI
         end
       end
 
-      # SECOND: Check panels (only if NOT inside any popup)
-      # Find all panels sorted by z_index (highest first)
-      panels = root.find_all_panels.reject(&.closed).sort_by(&.z_index).reverse!
-
-      # Check panels front-to-back, stop at first hit
-      panels.each do |panel|
-        if panel.absolute_bounds.contains_point(point)
-          # Check if it's resizable and not maximized, and we're on an edge
-          if panel.resizable && !panel.maximized
-            resize_edge = panel.get_resize_edge(point)
-            if resize_edge != ResizeEdge::None
-              return case resize_edge
-              when ResizeEdge::TopLeft, ResizeEdge::BottomRight
-                CursorType::SizeNWSE
-              when ResizeEdge::TopRight, ResizeEdge::BottomLeft
-                CursorType::SizeNESW
-              when ResizeEdge::Left, ResizeEdge::Right
-                CursorType::SizeHorizontal
-              when ResizeEdge::Top, ResizeEdge::Bottom
-                CursorType::SizeVertical
-              else
-                CursorType::Arrow
-              end
+      # SECOND: the window's children front to back - its bars over the panels, the panels by z (the order a
+      # click takes): the first one under the point decides, and only a panel's edge sets a resize cursor
+      root.children_in_hit_order do |child|
+        next unless child.absolute_bounds.contains_point(point)
+        next if child.is_a?(WindowPanel) && child.closed
+        unless child.is_a?(WindowPanel)
+          next if child.hit_test(point).nil? # a click-through layer (a display-only LayerBox): what lies below decides
+          break
+        end
+        if child.resizable && !child.maximized
+          resize_edge = child.get_resize_edge(point)
+          if resize_edge != ResizeEdge::None
+            return case resize_edge
+            when ResizeEdge::TopLeft, ResizeEdge::BottomRight
+              CursorType::SizeNWSE
+            when ResizeEdge::TopRight, ResizeEdge::BottomLeft
+              CursorType::SizeNESW
+            when ResizeEdge::Left, ResizeEdge::Right
+              CursorType::SizeHorizontal
+            when ResizeEdge::Top, ResizeEdge::Bottom
+              CursorType::SizeVertical
+            else
+              CursorType::Arrow
             end
           end
-          # Over panel but not on resize edge
-          return infer_widget_cursor(root, point)
         end
+        break # over the panel but not on a resize edge
       end
 
-      # Not over any panel or popup
       infer_widget_cursor(root, point)
     end
 
@@ -880,26 +1059,26 @@ module CrymbleUI
     end
 
     # Reset all caches for recovery after exception (graceful degradation)
-    # Clears all widget render caches, layer backends, and interaction state
-    # Forces full re-render on next frame
+    # Releases every surface a frame that raised may have left half-drawn - every widget's, every layer's
+    # (owned layers too: a ScrollView's bands, a grid's overlays), the window overlays' and the widgets a layer
+    # hosts (grid cells) - and the interaction state. Forces full re-render on next frame
     def reset_all_caches
-      @root.try(&.reset_render_caches_recursive)
-      reset_layers_recursive(@root)
+      if root = @root
+        roots = [root] + (root.as?(Window).try(&.overlays) || [] of Widget)
+        roots.each do |top|
+          top.reset_render_caches_recursive
+          top.each_layer_in_subtree do |layer|
+            layer.reset_for_recovery
+            layer.widgets.each(&.reset_render_caches_recursive)
+          end
+        end
+      end
 
       # Clear interaction state (widgets may be invalid after exception)
       @hovered_widget = nil
       @mouse_down_widget = nil
       @topmost_panel = nil
       @drag_manager.cancel_drag if @drag_manager.dragging?
-    end
-
-    # Helper: Reset all layers in widget tree
-    private def reset_layers_recursive(widget : Widget?)
-      return unless widget
-      if layer = widget.layer
-        layer.reset_for_recovery
-      end
-      widget.children.each { |child| reset_layers_recursive(child) }
     end
 
     # Dump widget tree for debugging

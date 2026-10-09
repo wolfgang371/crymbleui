@@ -15,7 +15,11 @@ module CrymbleUI
         reactive_property width : Float64?, layout: true   # nil = fill available width from constraints
         reactive_property height : Float64?, layout: true  # nil = fill available height from constraints
 
-        property z_index : Int32
+        getter z_index : Int32
+
+        def z_index=(@z_index : Int32)
+            Layer.reorder!
+        end
         reactive_property background_color : Color = Color.new(0, 0, 0, 0)  # Fully transparent by default
 
         # Alignment properties for automatic positioning
@@ -26,8 +30,8 @@ module CrymbleUI
 
         # @internal_layer provided by LayerOwner mixin
 
-        # A LayerBox is its own compositing z-boundary (asked by the renderer's
-        # find_panel_z_index polymorphically, not via is_a?(LayerBox)).
+        # A LayerBox is a compositing z-boundary: among what is painted into the same layer it composites after
+        # plain content, by z (Layer.composite_order asks polymorphically, not via is_a?(LayerBox)).
         def compositing_z_index : Int32
             z_index
         end
@@ -51,7 +55,7 @@ module CrymbleUI
 
         # Pull-based layer bounds: LayerBox positions itself via @bounds
         def compute_bounds_for_layer(layer : Layer) : Rect
-            @bounds
+            absolute_bounds
         end
 
         def measure(constraints : BoxConstraints) : Size
@@ -68,8 +72,7 @@ module CrymbleUI
             @bounds = Rect.new(x, y, actual_width, actual_height)
 
             # Lazily create the compositing layer on first layout; carried across reconciles.
-            layer = (@internal_layer ||= Layer.new("layer_#{id}", Rect.zero, z_index: @z_index, background_color: Color.new(0, 0, 0, 0), owner_widget: self))
-            layer.z_index = @z_index
+            layer = (@internal_layer ||= Layer.new("layer_#{id}", Rect.zero, owner_widget: self))
             # Populate layer with children
             layer.widgets.clear
             children.each { |child| layer.widgets << child }
@@ -95,7 +98,7 @@ module CrymbleUI
             return nil unless absolute_bounds.contains_point(point)
 
             # Check if any children handle this click
-            children.reverse_each do |child|
+            children_in_hit_order do |child|
                 if hit = child.hit_test(point)
                     return hit
                 end

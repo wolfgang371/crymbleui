@@ -53,6 +53,11 @@ module CrymbleUI
 
         def open? : Bool; @open end
 
+        # The menu's items, open or closed (a closed menu keeps them here, not in @children).
+        def items : Array(Widget)
+            @menu_items
+        end
+
         # Closed menus keep their items in @menu_items rather than @children,
         # so the default Widget#find_by_id (which walks @children only) can't
         # reach them — which would force every headless UX test to first

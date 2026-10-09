@@ -166,4 +166,47 @@ describe CrymbleUI::TextInput do
             input.value.should eq("hello")
         end
     end
+
+    # A consumer that knows its payload's format (a spreadsheet cell's quoting, say) reads it before the
+    # library flattens it. Mutations: ignore the transform; apply it after the sanitising.
+    describe "a paste transform" do
+        it "inserts what the transform reads the payload as" do
+            CrymbleUI::Widget.clipboard.text = "<raw>"
+            input = CrymbleUI::TextInput.new(value: "")
+            input.paste_transform = ->(raw : String) : String? { "read" if raw == "<raw>" }
+            input.on_key_down(SF::Keyboard::Key::V, true, false)
+
+            input.value.should eq("read")
+        end
+
+        # Mutation: read the transform's nil as "paste nothing" (`|| ""`).
+        it "pastes the payload as it is when the transform does not read it" do
+            CrymbleUI::Widget.clipboard.text = "other"
+            input = CrymbleUI::TextInput.new(value: "")
+            input.paste_transform = ->(raw : String) : String? { "read" if raw == "<raw>" }
+            input.on_key_down(SF::Keyboard::Key::V, true, false)
+
+            input.value.should eq("other")
+        end
+
+        it "flattens the transform's result by the same policy - the transform comes first" do
+            CrymbleUI::Widget.clipboard.text = "<raw>"
+            input = CrymbleUI::TextInput.new(value: "")
+            input.paste_transform = ->(_raw : String) : String? { "x\ty" }
+            input.on_key_down(SF::Keyboard::Key::V, true, false)
+
+            input.value.should eq("x y")
+        end
+
+        it "leaves the selection INTACT when the transform's result flattens to nothing" do
+            CrymbleUI::Widget.clipboard.text = "<raw>"
+            input = CrymbleUI::TextInput.new(value: "hello")
+            input.paste_transform = ->(_raw : String) : String? { "\r\n" }
+            input.on_key_down(SF::Keyboard::Key::A, true, false)
+            input.on_key_down(SF::Keyboard::Key::V, true, false)
+
+            input.value.should eq("hello")
+            input.has_selection?.should be_true
+        end
+    end
 end

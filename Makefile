@@ -11,7 +11,7 @@ TUTORIALS = tutorial-01 tutorial-02 tutorial-03 tutorial-04 tutorial-05 \
             tutorial-11 tutorial-12 tutorial-13 tutorial-14 tutorial-15 \
             tutorial-16 tutorial-17 tutorial-18 tutorial-19 tutorial-20 \
             tutorial-21 tutorial-22 tutorial-23 tutorial-24 tutorial-25 \
-            tutorial-26 tutorial-27
+            tutorial-26 tutorial-27 tutorial-28 tutorial-29
 
 .PHONY: all examples tutorials clean
 

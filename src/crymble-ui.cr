@@ -22,7 +22,6 @@ require "./widgets/window"
 require "./widgets/window_panel"
 require "./widgets/scroll_view"
 require "./widgets/virtual_matrix"
-require "./widgets/simple_matrix"
 require "./widgets/dir_browser"
 require "./widgets/tree_node"
 require "./widgets/tabs"
@@ -32,16 +31,17 @@ require "./layout/vstack"
 require "./layout/hstack"
 require "./layout/flow"
 require "./layout/decorated_container"
+require "./layout/split_view"
 
 # Rendering
-require "./rendering/sfml_paint_context"
 require "./rendering/sfml_renderer"
 require "./rendering/cache_validation"
 require "./rendering/blit_probe"
 
 # DSL and testing
 require "./dsl/builder"
-require "./testing/widget_tester"
+require "./widgets/dir_picker"
+require "./widgets/file_dialog"
 
 # Main module-level convenience method
 module CrymbleUI

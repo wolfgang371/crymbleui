@@ -22,10 +22,10 @@ Rules for this file:
 | UC-1 | A compound header spans many rows; its group is partly scrolled off | Its label stays visible, inside the visible part of the SPAN it names | The label names the whole group, so placing it against its box puts it in the wrong place entirely. The defect the rule was written for | `compound_label_visibility` |
 | UC-2 | A ruler number, a row header and a value all name the SAME line | They sit on one line, not three | Field report #45 — "'1', 'a' and '1' all at different vpos!!" | I9 |
 | UC-3 | A value taller than the band | It is NOT moved; it scrolls and is clipped by its box. EXCEPT in a PINNED row, which does not scroll at all: its content below the fold is unreachable. Measured 2026-09-21 (a one-row grid derives as all-sticky, so this is reachable by deleting records down to one), put to Wolfgang, and accepted as-is on 2026-09-22 - "UC-3 we ignore". Unpinning such a row, or scrolling the strip, is the fix if it ever matters. | You must be able to read past a long value's first screenful — core `doc/08-shapes.md` | sweep S scope, I6 |
-| UC-4 | A block that overflows its box | Line 1 is never the cut one (top-aligned) | You read the first line first | `vcentered_block_y` regimes |
-| UC-5 | An ordinary row, roughly as tall as its text, cut by the viewport edge | Its labels are never pulled UP; they clip like the cell background | Field reports #74/#75. Holding bought a few pixels of visibility and cost visible jitter on every resize | I10, sweep T |
+| UC-4 | A block that overflows its box | Line 1 is never the cut one (top-aligned). A ROW's block keeps its anchor - a padding below the row's top - and overflows at the bottom, at rest and at every edge, and as the row is resized; a SPAN's block is contained, pulled up into its padding when the span less its padding is too short | You read the first line first. The row's case was a 5px jump into the padding the frame an edge touched the row, until 2026-10-01: the region path pulled the block up where the plain path lets it overflow | `vcentered_block_y` regimes, `one_line_hold_spec` (overflowing row; resized across a line; a span's block) |
+| UC-5 | An ordinary row, no taller than one line, cut by an edge - the panel's bottom as it shrinks, the sticky header as the rows scroll | Its labels and its ruler number stay exactly where they sit in the row at rest; the edge cuts them like the cell background - never pulled up, never pushed down | Field reports #74/#75; reported again 2026-09-30 ("row 8 gets scrolled a few px up until it stays stuck and gets hidden by further shrinks; this is ugly"): the old bound, "never above top-alignment", let a label ride its 3px padding up as the edge cut the row | `one_line_hold_spec`, I10, core `cut_row_label_spec` |
 | UC-6 | A row made TALL by a multiline cell; a SHORT cell in that row | The short cell's label is CENTRED in that row | Wolfgang 2026-09-10: "vcentering on higher cells where applicable (e.g. single-text-line in higher or combined cells)". Between 2026-09-08 and 2026-09-10 this said "sits on the row's FIRST line" (from #78) and was wrong | I13 |
-| UC-7 | Same tall row, scrolled up under the sticky header | The short cell's label must not disappear under the header | Why plain top-alignment cannot be the answer on its own (Wolfgang, 2026-09-08) | I14, sweep S |
+| UC-7 | Same tall row, scrolled up under the sticky header | The short cell's label must not disappear under the header while more than one line of the row shows | Why plain top-alignment cannot be the answer on its own (Wolfgang, 2026-09-08) | I14, sweep S, `one_line_hold_spec` |
 | UC-8 | Two adjacent labels approach each other | They never converge or stack | Field report #40 | I4 |
 | UC-9 | Any input moves by n px | Nothing moves further than n | Every jump report this arc | sweep J |
 | UC-10 | Any cell | Content is never displaced outside its own box | Field reports #55, #58–#60 | sweep X |
@@ -33,27 +33,31 @@ Rules for this file:
 | UC-12 | The panel is resized a pixel at a time | Content does not step inside its box | Field reports of text jumping a line on resize | I5 |
 | UC-13 | A cell whose ink did not move | Is not repainted | Perf: 22.4ms/frame, two-thirds of it invisible cells. Was "a cell that can show nothing is not repainted" until 2026-09-12: true of the SCREEN, false of the CACHE, because the viewport cache blit-shifts a cell's pixels back into view without re-rendering it (UC-27) | I7 + `placement_cost_spec` |
 | UC-27 | A cell leaves the band and its ink moves in the same frame | It is repainted anyway | The 2026-09-10 rendering glitch. `handle_viewport_cache_scroll` blit-shifts the content layer's buffer, so pixels of cells outside the band come back into view unrendered; a cell that took its ink with it on the way out shows the old position. Only expressible at WHEEL-SIZED steps -- swept 3px at a time the ink reaches its clamp before the cell leaves, and 1100+ moves produced 0 of this class (step 50: 253) | I7 + `cache_validation_spec` (-Dcache_validation) |
-| UC-14 | A held label whose visible slice has room for it | Is not clipped | The `slack` CAP dragged labels out of the band; 8.5px of 14 shown with 27px of room | sweep S |
+| UC-14 | A label whose region shows at least one line (or all of itself, if shorter) | Is not clipped | The `slack` CAP dragged labels out of the band; 8.5px of 14 shown with 27px of room | sweep S, B1 |
 
 | UC-15 | A ruler number and a cell on the same line, that line cut by the viewport | They stay on one line | They are different glyph sizes, so a hold that clamps each by its OWN height pushes them by different amounts — measured at up to 4.2px apart on a cut row | I9 |
 | UC-16 | A compound label, panel collapsed until its span barely shows | It stays visible | #80/#81 — `a` dropped out through the bottom border. Its natural place is the middle of a span far taller than the viewport | sweep S, I15 |
-| UC-26 | A group leaving at the leading edge | Its label never STALLS, and lands on the group's last visible row | Images #93-#96, both halves at once: "stays sticky ... before scrolling out entirely" and "'a' and '4' don't scroll out level at the end". They read as contradictory for two days because the first was operationalised as "offset inside the span is constant", which is a different property and forbids the second | `compound_scroll_out_spec` |
+| UC-26 | A group leaving at the leading edge | Its label never STALLS, and lands on the group's last visible line and leaves with it - in a sticky column too, where its box is pinned | Images #93-#96, both halves at once: "stays sticky ... before scrolling out entirely" and "'a' and '4' don't scroll out level at the end". They read as contradictory for two days because the first was operationalised as "offset inside the span is constant", which is a different property and forbids the second | `compound_scroll_out_spec`, `one_line_hold_spec` |
 | UC-25 | Two groups on screen, one clipped at the TOP and one at the BOTTOM | Their labels move at the SAME rate — half the scroll | Images #105/#106, 2026-09-11: "r1a having ruler speed and r1b half of it — this is a bug". Holding the leading edge by the span's overflow made `lo` track the span's bottom: full speed, then jammed against the edge | `compound_edge_symmetry_spec` |
 | UC-24 | A group hanging off the FAR edge, the panel then grown | Its label keeps moving for as long as more of the group comes into view, at half the panel's rate | Images #103/#104, 2026-09-11: "'b' only moves the first half of the full spanned height - why?" A position cap at the far edge rides the edge 1:1 and releases at the span's centre — half the span, exactly | `compound_scroll_out_spec` |
 | UC-23 | A group TALLER than the viewport, scrolled into its middle | Its label sits in the middle of the part you can SEE, not against an edge | Images #99/#100, 2026-09-10: "it's placed at the very top, long before being scrolled out — this doesn't look nice" | `compound_scroll_out_spec` |
 | UC-22 | A row TALLER than the viewport | Its content stays on screen, and the line's cells stay level | Images #97/#98, 2026-09-10: "the ruler isn't staying in the viewport"; "it's always visible on the upper part, but not in the lower one". The rule had a floor at the leading edge and no ceiling | `tall_row_visibility_spec` |
 | UC-21 | A SMALL group scrolling out through the top | Its label leaves WITH the group, never lingering at the edge | Images #93-#96, 2026-09-10: "see how 'a' stays sticky again before scrolling out entirely?" A leading-edge clamp made the label drift 25.5px down through its own span | `compound_scroll_out_spec` |
 | UC-17 | The band passes through one line's height | No step | The not-moved exit for long values was swallowing single-line labels too: 198.5px for 1px of resize | sweep J/V |
-| UC-20 | A compound cell | Its label is centred in the part of the SPAN it names that you can see | Wolfgang 2026-09-10: "of course vcentering was always for compound cells". Held the opposite (level with its span's first row) for two days, from #83/#84 — which were the HOLD pushing a pinned compound and its row-mate by different amounts, fixed in `held_in_region` | I15 |
-| UC-19 | A label frozen under the sticky header | Sits below the edge by half of what is left of its line; never flush on it | #82 — "the freezing is a couple of bits too high". Flush is 5.5px above where that same label sits in any row, and reads as shaved against the header. Delivered by the band clamp itself now: the slice shrinks continuously, so the label approaches the edge and leaves with its line rather than jamming | I14 |
+| UC-20 | A compound cell | Its label is centred in the part of the SPAN it names that you can see - and once less than one line of it shows, in that last line | Wolfgang 2026-09-10: "of course vcentering was always for compound cells". Held the opposite (level with its span's first row) for two days, from #83/#84 — which were the HOLD pushing a pinned compound and its row-mate by different amounts, fixed in `held_in_region` | I15 |
+| UC-19 | A label under the sticky header | A one-line row's label leaves with its row, cut where it sits (UC-5). A taller row's label is never closer to the edge than a one-line label sits in its own line; once less than one line of the row is left, it leaves with that line | #82 — "the freezing is a couple of bits too high": flush on the edge reads as shaved against the header. Until 2026-10-01 a one-line row's label was pushed down into what was left of its line; reversed then (Wolfgang: leave with the row) | I14 |
+| UC-29 | A cut row resized across one line's height | Its label - one line or a block - moves continuously, no step at one line | The rule has no threshold: a region gives the band exactly what it exceeds one line, so a row a pixel taller than a line gives the band that pixel (decided 2026-10-01, against a "one-line row?" test that jumps a label by its padding at the boundary). | `one_line_hold_spec` |
+| UC-30 | A column cut by an edge, its letter in the column ruler | A column no wider than a default column keeps its letter where it sits, cut; a wider one gives the band its excess, no more, and its letter leaves with its last default width | UC-5 on X, decided with it (2026-10-01) | `column_ruler_x_spec` |
+| UC-31 | A label crossing the band's leading edge with its line | Nothing of it paints over the sticky strips - header row, column ruler, corner, gutters | Since UC-5 a label crosses the edge with its row instead of being held inside the band, so the strips' opacity is what hides it | `one_line_hold_spec` (pixels) |
 | UC-28 | The panel is RESIZED under a row taller than what is left | The ruler number moves with its row's value, not with the size it was placed at | Wolfgang 2026-09-21: the number stayed where the tall panel had put it, ~37px below its own value, because a layer re-render redraws cached primitives | `sticky_ink_band_spec` ("after the panel is resized") |
 
 ## The rule, and when centring outranks levelness
 
-**There is ONE rule: content is centred in the part of its region you can SEE, then confined to its
-own box.** A region is the cell's own row for an ordinary cell and for a ruler number; the whole
-SPAN for a compound. There are no conditions in it — not on the region's size, not on which edge
-clips it, not on whether it is a row or a span.
+**There is ONE rule: content is centred in what the band leaves of its region - and the band takes no
+more of a region than the region exceeds one line - then confined to its own box.** A region is the
+cell's own row for an ordinary cell and for a ruler number; the whole SPAN for a compound. There are
+no conditions in it — not on the region's size, not on which edge clips it, not on whether it is a
+row or a span. A one-line row gives the band nothing, so it is cut where it sits (UC-5).
 
 It had all three of those conditions between 2026-09-08 and 2026-09-11, and every one of them was
 there to protect the same misreading: that "sticky" (#93-#96) meant the label's offset inside its
@@ -71,14 +75,14 @@ answered by asking "do they name the same region?":
 | A ruler number, a row header and a value on one line | yes — that row | **Always**, at rest and while held (UC-2, #45) |
 | A compound and the cells of a row its span covers | **no** — a span is not a row | No. They never named the same thing, so there is nothing to reconcile (UC-20) |
 | A one-line label and a multiline block in the same row | yes, but different content extents | No — each is placed as what it is (UC-6, UC-4) |
-| Any two cells whose regions have climbed above the band | — | **Yes**: both sit at `band_lo` plus their own padding, capped at a line (UC-19, #87) |
+| The cells of one row cut by the band's edge | yes — that row | **Yes**: a one-line row's cells keep their places at rest; a taller row's keep one line of it (UC-19, #87) |
 
 So centring never *overrules* levelness in a contest. Where two cells share a region and an extent,
 centring hands you levelness for free; where they do not, levelness was never a claim about them.
-The one place the two genuinely meet is the last row of that table -- at the band edge the push,
-not the region, decides -- and it is written to keep centres together: the floor `band_lo + pad`
-with `pad` capped at one line puts a cell's CENTRE at `band_lo + region_size/2` whatever its glyph
-size, which is why a ruler number and its cell stay on one line while both are frozen (UC-15).
+The one place the two genuinely meet is the last row of that table -- at the band edge the hold
+decides -- and it is stated in terms the cells share: ONE LINE of their region, never their glyph
+heights, which is why a ruler number and its cell keep the offsets they have at rest while an edge
+cuts their row (UC-15).
 
 **The one asymmetry, and why it has to be there.** A multi-line block anchors at its region's top
 instead of centring. A span can be many screens tall, and a centred label then sits half a span down,
@@ -93,9 +97,11 @@ its cell ride the bottom edge by different amounts -- measured at 4.2px when thi
   which is where it sat for years and where Wolfgang asked for it back on 2026-09-10. The version
   that pinned it to the row's first line lived for two days and produced "seems level, now, finally,
   but I see no vcentering at all".
-- **UC-5 costs nothing.** Content is bounded by a slice of its OWN region, so it can never travel
-  further than that region does and never rises above the region's top — the unbounded chase that
-  caused the jitter of #74/#75 is not expressible in this rule.
+- **UC-5 is the hold.** Bounded by a slice of its OWN region, content could never chase the edge
+  unboundedly (#74/#75) - but the slice of a one-line row is smaller than the row, so its label still
+  rode its padding up as the edge cut it, 3px, until reported on 2026-09-30. A region now gives the
+  band only what it exceeds one line (`hold`, one default line's box): a one-line row gives nothing
+  and is cut where it sits, a taller one gives the band its excess and no more.
 
 ## What each instrument can and cannot see
 
@@ -105,11 +111,11 @@ its cell ride the bottom edge by different amounts -- measured at 4.2px when thi
 | `spec/widgets/virtual_matrix/placement_sweep_spec` | 5 fixtures x 4 inputs, a pixel at a time, 7 properties on every label in every frame | Whatever is there, including in regimes nobody considered — it found a 198.5px jump at one panel height in one fixture | Anything outside its fixtures' shapes, and anything about actual PIXELS: it reads placement, not paint |
 | `spec/widgets/virtual_matrix/compound_scroll_out_spec` | A shape of SMALL groups scrolled until each leaves, and a viewport small enough that a group covers the band | A group's label drifting inside its own span (the "sticky" of #93-#96), and a long group's label parking against an edge (#99/#100) | Anything about a group that fits AND never moves — its two examples both need travel |
 | `spec/widgets/virtual_matrix/tall_row_visibility_spec` | A row taller than the viewport, swept a pixel at a time | Content placed off-band while its own line is on screen (#97/#98), and that line's cells parting | The ruler WIDGET's own band: in this harness a matrix's content layer is sized to the viewport, so the two agree and the mismatch cannot arise (I9 catches that instead) |
-| `core/spec/gui/perspective_placement_invariants_spec` | The same properties on embrace's REAL pivot | Defects that need the real adapter — it found the box-clipping one crymbleui's fixtures never produced | Text metrics: `measure_text` returns 0x0 in core specs, so auto-size never expands a row there |
+| `core/spec/gui/perspective_placement_invariants_spec` | CONTAINMENT only, over a scroll sweep of embrace's REAL pivot | A label displaced outside its own box — the box-clipping defect crymbleui's fixtures never produced, which `confine` answers (removing `confine` turns it red) | Jumps, and anything under resize: every compound there is pinned in a sticky column, so a lost region drifts instead of jumping, and resize moves held content correctly. Both were tried and removed (its header says how). Text metrics: `measure_text` returns 0x0 in core specs, so auto-size never grows a row |
 
 The seven sweep properties: **J** nothing moves further than the input that moved it · **V** no abrupt
 change of speed · **R** no reversal while the input goes one way · **T** never above the rule's own answer, or its box's bottom edge, whichever is higher ·
-**B** never past the region's trailing end · **S** visible whenever the rule could have placed it so ·
+**B** never past the region's trailing end · **S** visible whenever the rule's own answer is in the band ·
 **X** never outside its own box.
 
 **A guard on a fixture that cannot produce the situation is not a guard.** I14 — the guard for #82
@@ -140,8 +146,11 @@ crosses, whether its box still equals its region (a pinned clone's does not), an
 | content | region | vs band | crossing | fixture |
 |---|---|---|---|---|
 | one line | its row | fits | inside | every fixture, at rest |
-| one line | its row | fits | leading | `placement_invariants` I14 (`pushed_matrix`), sweep |
-| one line | its row | fits | far | sweep (`height`), `placement_boxes` B1 |
+| one line | its row, one line | fits | leading | `one_line_hold`, `placement_invariants` I14, sweep, core `cut_row_label` |
+| one line | its row, one line | fits | far | `one_line_hold`, I10, sweep (`height`), core `cut_row_label` |
+| one line | its row, shorter than a line | fits | either | `one_line_hold` |
+| one line | its row, TALLER than a line | fits | either | `one_line_hold` (exact), I14, `placement_boxes` B1 |
+| block | its row, one line (overflowing it) | fits | either | `one_line_hold` |
 | one line | its row | **exceeds** | either | `tall_row_visibility` (12-line sibling in a 160px band) |
 | block | its row | fits | inside | `reported_shape`, sweep "tall row" |
 | block | its row | fits | leading/far | sweep; UC-3's exit covers "cannot be shown whole" |
@@ -177,9 +186,9 @@ write one taught something the code did not know it was saying.
   `InkRegion` is a Y-only record, so CELLS do no horizontal region placement at all. Exactly one
   caller places on X — the column ruler — and it now has the X twin of #97/#98: a column wider than
   the viewport keeps its label on screen, and no label moves more than the scroll that moved it.
-  Verified RED at 220 off-band placements. Scoped like its Y twin: a column LEAVING takes its label
-  with it, and a column ARRIVING with less visible than the glyph is wide shows it progressively —
-  forcing either fully into view is the 1:1 edge-riding of #74/#75.
+  Verified RED at 220 off-band placements. Scoped like its Y twin, with the same hold (UC-30): a
+  column no wider than a default column keeps its letter where it sits and is cut; a wider one gives
+  the band its excess, no more, and its letter leaves with its last default width.
 
 **The `pinned` heuristic is gone** (2026-09-11): the matrix tells the rule, instead of the rule
 guessing from coordinates. A compound on a sticky column outside the sticky rows has its Y box set

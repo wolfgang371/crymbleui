@@ -40,7 +40,8 @@ module CrymbleUI
     abstract def accepts_drop?(data : DragData) : Bool
 
     # Handle the actual drop
-    # Called when mouse released over this target
+    # Called when mouse released over this target. `position` is in this widget's own space - the space
+    # its bounds live in, as a mouse handler's point is - so `position - absolute_bounds` is correct.
     abstract def on_drop(data : DragData, position : Vec2)
 
     # Track if currently being hovered during drag
@@ -56,10 +57,10 @@ module CrymbleUI
       @drag_hover = value
     end
 
-    # Get highlight color for overlay layer
+    # Get highlight color for overlay layer: the theme's drag highlight, read live (follows Theme.set)
     # Override in concrete classes to customize (alpha applied during compositing)
     def highlight_color : Color
-      Color.new(180, 220, 255, 255)  # Default: blue
+      Theme.current.drag_highlight
     end
 
     # Get highlight opacity for overlay layer (0.0-1.0)
@@ -70,7 +71,8 @@ module CrymbleUI
       Theme.current.brightness_drag_opacity
     end
 
-    # Called when drag enters this target
+    # Called when drag enters this target - or on the widget a rebuild put in place of the hovered one
+    # (it is the target now, and drag_hover? says so)
     # Highlight is now handled by overlay layer in DragManager
     def on_drag_enter(data : DragData)
       # Override for custom behavior
@@ -82,7 +84,9 @@ module CrymbleUI
       # Override for custom behavior
     end
 
-    # Called while dragging over this target (for position feedback)
+    # Called while dragging over this target (for position feedback); `position` in its own space. Also once
+    # a frame while the pointer is still (the tree may have moved under it) - keep it cheap and idempotent,
+    # and never rebuild synchronously from it (it runs after the frame's layout); request_rebuild instead.
     # Override for custom behavior (e.g., insertion point preview)
     def on_drag_over(data : DragData, position : Vec2)
       # Default: do nothing

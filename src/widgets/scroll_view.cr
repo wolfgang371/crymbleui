@@ -97,20 +97,13 @@ module CrymbleUI
       mark_scrollbar_needs_render
     end
 
-    # Get z_index from parent layer (for proper z-ordering when inside Popup/etc.)
-    # Returns 0 if no parent layer found
-    private def parent_layer_z_index : Int32
-      widget = self.parent
-      while widget
-        if widget.responds_to?(:layer)
-          if layer = widget.layer
-            return layer.z_index
-          end
-        end
-        widget = widget.parent
-      end
-      0
-    end
+    # Local z of this view's own layers - the order they composite in (Layer.composite_order). What this
+    # view contains composites right after the content layer, under the sticky bands and scrollbars.
+    CONTENT_Z       = 1
+    STICKY_ROW_Z    = 2 # horizontal headers (scroll X only)
+    STICKY_COL_Z    = 3 # vertical headers (scroll Y only)
+    STICKY_CORNER_Z = 4 # fixed corner
+    SCROLLBAR_Z     = 5 # overlay scrollbars
 
     def layer : Layer?
       @internal_layer
@@ -127,38 +120,42 @@ module CrymbleUI
       end
     end
 
-    # Pull-based layer bounds: dispatch by layer identity
-    # Sticky layers need per-axis resize clipping (row=width only, col=height only, corner=none)
+    # The four regions a sticky grid shows, relative to this view: the corner, the sticky row band, the sticky
+    # column band, and the CONTENT region - the viewport minus both bands (the content layer itself spans the
+    # whole viewport, under the bands). The one owner of the band geometry: the layers' rects
+    # (compute_bounds_for_layer) and what a grid clips its cells' painted rects to (VirtualMatrix#painted_rect).
+    #
+    # A sticky extent BIGGER than the viewport is possible — the sizes come from the consumer's grid, and a
+    # resize drag has no upper bound. Unclamped it laid the bands outside the widget, compositing over whatever
+    # sits next to it, while the perpendicular subtraction went to zero and took the other header strip with it
+    # (measured: a tall sticky row collapsed the sticky COLUMN layer to 0.0 height). Bounding it here, where the
+    # value is read, covers every producer — content sizing, the drag, and any future one.
+    def sticky_regions : NamedTuple(corner: Rect, row: Rect, col: Rect, content: Rect)
+      ew = Math.max(0.0, effective_viewport_width)
+      eh = Math.max(0.0, effective_viewport_height)
+      sw = Math.min(@sticky_col_width, ew)
+      sh = Math.min(@sticky_row_height, eh)
+      {corner: Rect.new(0.0, 0.0, sw, sh),
+       row: Rect.new(sw, 0.0, ew - sw, sh),
+       col: Rect.new(0.0, sh, sw, eh - sh),
+       content: Rect.new(sw, sh, ew - sw, eh - sh)}
+    end
+
+    # Pull-based layer bounds: dispatch by layer identity (content space: the layer derives where it is
+    # composited, Layer#bounds). The sticky layers are the regions of sticky_regions.
     def compute_bounds_for_layer(layer : Layer) : Rect
-      abs = viewport_bounds # painted: this view may itself sit inside a scrolled one
-      ew = effective_viewport_width
-      eh = effective_viewport_height
-
-      # A sticky extent BIGGER than the viewport is possible — the sizes come from the consumer's
-      # grid, and a resize drag has no upper bound. Unclamped it laid these layers outside the
-      # widget, compositing over whatever sits next to it, while the perpendicular subtraction below
-      # went to zero and took the other header strip with it (measured: a tall sticky row collapsed
-      # the sticky COLUMN layer to 0.0 height). Bounding it here, where the value is read, covers
-      # every producer — content sizing, the drag, and any future one.
-      sticky_w = Math.min(@sticky_col_width, Math.max(0.0, ew))
-      sticky_h = Math.min(@sticky_row_height, Math.max(0.0, eh))
-
-      natural = case layer
-      when @internal_layer
-        Rect.new(abs.x, abs.y, Math.max(0.0, ew), Math.max(0.0, eh))
-      when @scrollbar_layer
-        Rect.new(abs.x, abs.y, Math.max(0.0, @viewport_size.width), Math.max(0.0, @viewport_size.height))
-      when @sticky_row_layer
-        Rect.new(abs.x + sticky_w, abs.y, Math.max(0.0, ew - sticky_w), sticky_h)
-      when @sticky_col_layer
-        Rect.new(abs.x, abs.y + sticky_h, sticky_w, Math.max(0.0, eh - sticky_h))
-      when @sticky_corner_layer
-        Rect.new(abs.x, abs.y, sticky_w, sticky_h)
-      else
-        abs
-      end
-
-      natural
+      abs = absolute_bounds
+      region = case layer
+               when @internal_layer
+                 Rect.new(0.0, 0.0, Math.max(0.0, effective_viewport_width), Math.max(0.0, effective_viewport_height))
+               when @scrollbar_layer
+                 Rect.new(0.0, 0.0, Math.max(0.0, @viewport_size.width), Math.max(0.0, @viewport_size.height))
+               when @sticky_row_layer    then sticky_regions[:row]
+               when @sticky_col_layer    then sticky_regions[:col]
+               when @sticky_corner_layer then sticky_regions[:corner]
+               else                           return abs
+               end
+      Rect.new(abs.x + region.x, abs.y + region.y, region.width, region.height)
     end
 
     # Content layer (viewport_cache for efficient scrolling)
@@ -188,29 +185,13 @@ module CrymbleUI
 
     # Auxiliary layers this ScrollView owns beyond its primary content layer
     # (@internal_layer, returned by #layer): the scrollbar overlay + 3 sticky
-    # headers. Published for LayerRenderer#collect_layers (the each_owned_layer
+    # headers. Published for Layer.composite_order (the each_owned_layer
     # protocol) so none is ever missed by the render pass.
     def each_owned_layer(& : Layer ->)
       @scrollbar_layer.try { |l| yield l }
       @sticky_row_layer.try { |l| yield l }
       @sticky_col_layer.try { |l| yield l }
       @sticky_corner_layer.try { |l| yield l }
-    end
-
-    # Update layer z-indices when parent panel's z-index changes
-    # Called by WindowPanel.bring_to_front() to fix scrollbar bleeding
-    # Layer z-order (bottom to top):
-    #   content_layer (base+1) - main scrollable content
-    #   sticky_row_layer (base+2) - horizontal headers (scrolls X only)
-    #   sticky_col_layer (base+3) - vertical headers (scrolls Y only)
-    #   sticky_corner_layer (base+4) - fixed corner
-    #   scrollbar_layer (base+5) - overlay scrollbars
-    def update_layer_z_indices(parent_z : Int32)
-      @internal_layer.try { |l| l.z_index = parent_z + 1 }
-      @sticky_row_layer.try { |l| l.z_index = parent_z + 2 }
-      @sticky_col_layer.try { |l| l.z_index = parent_z + 3 }
-      @sticky_corner_layer.try { |l| l.z_index = parent_z + 4 }
-      @scrollbar_layer.try { |l| l.z_index = parent_z + 5 }
     end
 
     # Mark all layers as needing full render
@@ -223,8 +204,7 @@ module CrymbleUI
       @scrollbar_layer.try(&.mark_needs_layout)
     end
 
-    def on_ancestor_z_index_changed(base_z : Int32)
-      update_layer_z_indices(base_z)
+    def on_ancestor_raised
       mark_layers_need_render
     end
 
@@ -367,31 +347,29 @@ module CrymbleUI
       end
 
       # Create/update layer with effective bounds (excludes scrollbar area)
+      abs = absolute_bounds # content space, as compute_bounds_for_layer states it
       effective_bounds = Rect.new(
-        viewport_bounds.x,
-        viewport_bounds.y,
+        abs.x,
+        abs.y,
         effective_width,
         effective_height
       )
 
-      # Use parent's z_index as base to ensure proper layering inside popups/etc.
-      base_z = parent_layer_z_index
       @internal_layer ||= Layer.new(
         "scrollview_#{id}",
         effective_bounds,
-        z_index: base_z + 1,
+        z_index: CONTENT_Z,
         background_color: Color.new(0, 0, 0, 0),  # Transparent
         owner_widget: self
       )
       layer = @internal_layer.not_nil!
-      layer.z_index = base_z + 1  # Update z_index each layout (parent may have changed)
       layer.viewport_cache = true  # Enable viewport_cache buffer for efficient scrolling
       layer.cache_extent = 100.0  # Pre-render 100px margin around viewport for smooth scrolling
       layer.scroll_offset = scroll_offset  # Sync layer scroll offset
 
       # Create/update sticky layers if configured
       # Sticky layers render headers at fixed positions relative to scroll
-      setup_sticky_layers(base_z, effective_width, effective_height)
+      setup_sticky_layers(effective_width, effective_height)
 
       # Create separate scrollbar layer (non-viewport_cache overlay)
       # This layer sits above content and doesn't scroll with it
@@ -404,11 +382,10 @@ module CrymbleUI
       @scrollbar_layer ||= Layer.new(
         "scrollbar_#{id}",
         scrollbar_bounds,
-        z_index: base_z + 5,  # Above all content layers (including sticky)
+        z_index: SCROLLBAR_Z,
         background_color: Color.new(0, 0, 0, 0),  # Transparent
         owner_widget: self
       )
-      @scrollbar_layer.not_nil!.z_index = base_z + 5  # Update z_index each layout
       @scrollbar_layer.not_nil!.viewport_cache = false  # Scrollbars are fixed, not viewport_cache
       @scrollbar_layer.not_nil!.cache_extent = 0.0  # No extra buffer space for scrollbar layer
 
@@ -457,7 +434,7 @@ module CrymbleUI
     #   | (left)     |      content              |  <- scrolls both X and Y
     #   | scrolls Y  |                           |
     #   +------------+---------------------------+
-    private def setup_sticky_layers(base_z : Int32, effective_width : Float64, effective_height : Float64)
+    private def setup_sticky_layers(effective_width : Float64, effective_height : Float64)
       abs = absolute_bounds
 
       # Create sticky layers when there's pixel space for them.
@@ -477,12 +454,11 @@ module CrymbleUI
         @sticky_row_layer ||= Layer.new(
           "sticky_row_#{id}",
           Rect.new(row_layer_x, row_layer_y, row_layer_width, row_layer_height),
-          z_index: base_z + 2,
+          z_index: STICKY_ROW_Z,
           background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_row_layer.not_nil!
-        layer.z_index = base_z + 2
         layer.viewport_cache = false  # NOT cached - redraws on X-scroll
         # Sync X scroll offset only (Y is fixed at 0)
         layer.scroll_offset = Vec2.new(scroll_offset.x, 0.0)
@@ -502,12 +478,11 @@ module CrymbleUI
         @sticky_col_layer ||= Layer.new(
           "sticky_col_#{id}",
           Rect.new(col_layer_x, col_layer_y, col_layer_width, col_layer_height),
-          z_index: base_z + 3,
+          z_index: STICKY_COL_Z,
           background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_col_layer.not_nil!
-        layer.z_index = base_z + 3
         layer.viewport_cache = false  # NOT cached - redraws on Y-scroll
         # Sync Y scroll offset only (X is fixed at 0)
         layer.scroll_offset = Vec2.new(0.0, scroll_offset.y)
@@ -526,12 +501,11 @@ module CrymbleUI
         @sticky_corner_layer ||= Layer.new(
           "sticky_corner_#{id}",
           Rect.new(corner_layer_x, corner_layer_y, corner_layer_width, corner_layer_height),
-          z_index: base_z + 4,
+          z_index: STICKY_CORNER_Z,
           background_color: sticky_background_color,
           owner_widget: self
         )
         layer = @sticky_corner_layer.not_nil!
-        layer.z_index = base_z + 4
         layer.viewport_cache = false  # NOT cached - fixed position
         layer.scroll_offset = Vec2.zero  # No scrolling for corner
       else
@@ -725,39 +699,37 @@ module CrymbleUI
     # Mouse wheel scrolling
     SCROLL_WHEEL_SPEED = 20.0  # Pixels per wheel notch
 
-    def on_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false)
-      # Only handle scroll if point is within our bounds
-      return unless absolute_bounds.contains_point(point)
+    # The wheel, in the input frame. Returns what this view did NOT take, in that same frame, for
+    # App#handle_mouse_wheel to hand on to the next scroller: an axis it moved on is taken whole (a partial
+    # move still takes it - the rest is dropped, as in a browser), an axis it cannot move on goes on - no
+    # overflow there, or already at its end. Shift swaps the axes it READS; the leftover goes back unswapped,
+    # so the next handler swaps it once. No latching: each event is judged on its own.
+    def on_mouse_wheel(delta : Vec2, point : Vec2, shift : Bool = false) : Vec2
+      # Only handle scroll if point is within our bounds - and a grid's chrome view takes nothing: the wheel
+      # over the grid's scrollbar does what it does over the grid (one scroll, the grid's clamp)
+      return delta unless absolute_bounds.contains_point(point) && !hands_wheel_on?
 
-      # Shift key swaps horizontal and vertical axes
-      effective_delta = if shift
-                          Vec2.new(delta.y, delta.x)  # Swap X and Y
-                        else
-                          delta
-                        end
+      read = shift ? Vec2.new(delta.y, delta.x) : delta # Shift key swaps horizontal and vertical axes
+      before = scroll_offset
 
-      # Update scroll offset based on direction
-      # Each direction only responds to its matching axis
+      # Each direction only responds to its matching axis; the other passes on
       case @direction
       when ScrollDirection::Vertical
-        # Only responds to vertical scroll (effective_delta.y)
-        # Horizontal touchpad swipes are ignored
         # in-place set: scroll path must NOT trigger layout (viewport_cache, see below)
-        @scroll_offset.set(Vec2.new(scroll_offset.x, scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED))
+        @scroll_offset.set(Vec2.new(scroll_offset.x, scroll_offset.y - read.y * SCROLL_WHEEL_SPEED))
       when ScrollDirection::Horizontal
-        # Only responds to horizontal scroll (effective_delta.x)
-        # Vertical touchpad swipes are ignored
-        @scroll_offset.set(Vec2.new(scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED, scroll_offset.y))
+        @scroll_offset.set(Vec2.new(scroll_offset.x - read.x * SCROLL_WHEEL_SPEED, scroll_offset.y))
       when ScrollDirection::Both
-        # Responds to both axes independently
         @scroll_offset.set(Vec2.new(
-          scroll_offset.x - effective_delta.x * SCROLL_WHEEL_SPEED,
-          scroll_offset.y - effective_delta.y * SCROLL_WHEEL_SPEED
+          scroll_offset.x - read.x * SCROLL_WHEEL_SPEED,
+          scroll_offset.y - read.y * SCROLL_WHEEL_SPEED
         ))
       end
 
       # Clamp to valid range
       clamp_scroll_offset
+      after = scroll_offset
+      return delta if after == before # stuck both ways: nothing to repaint, all of it goes on
 
       # VIEWPORT_CACHE: Update layer scroll_offset instead of triggering layout
       # Widget positions don't change, only the viewport offset changes
@@ -768,7 +740,13 @@ module CrymbleUI
       # Update visibility and render only scrollbar (no layout needed!)
       update_visibility_on_scroll
       mark_scrollbar_needs_render
+
+      left = Vec2.new(after.x == before.x ? read.x : 0.0, after.y == before.y ? read.y : 0.0)
+      shift ? Vec2.new(left.y, left.x) : left
     end
+
+    # Set by a VirtualMatrix on its chrome view (sticky bands, scrollbars): the grid owns the scroll.
+    property? hands_wheel_on : Bool = false
 
     # Adopt new content extents WITHOUT a layout — the entry point a consumer needs when it changes
     # the size of what it scrolls between layouts (VirtualMatrix content sizing).
@@ -899,6 +877,11 @@ module CrymbleUI
       child.same?(@content_widget) ? scroll_offset : Vec2.zero
     end
 
+    # The content shows within the viewport; the view's own chrome is not clipped by it
+    def clip_for(child : Widget) : Rect?
+      child.same?(@content_widget) ? @internal_layer.try(&.bounds) : nil
+    end
+
     def hit_test(point : Vec2) : Widget?
       abs = absolute_bounds
       return nil unless abs.contains_point(point)
@@ -923,7 +906,7 @@ module CrymbleUI
 
       # Check content children with adjusted point
       if content = @content_widget
-        content.children.reverse_each do |child|
+        content.children_in_hit_order do |child|
           if hit = hit_test_with_offset(child, content_point)
             return hit
           end

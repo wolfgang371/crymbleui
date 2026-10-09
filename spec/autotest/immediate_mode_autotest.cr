@@ -40,7 +40,6 @@ class ImmediateModeAutoTest < CrymbleUI::App
   DELAY_MS     = 100 # ms between steps
 
   @adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)
-  @scheduled_first = false
 
   enum Phase
     Settle
@@ -54,15 +53,15 @@ class ImmediateModeAutoTest < CrymbleUI::App
   @step = 0
   @total_failures = 0
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      # Enable immediate mode validation
-      CrymbleUI::CacheValidation.enable(:immediate_mode)
-      CrymbleUI::CacheValidation.clear_failures!
-      schedule(800) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    # Enable immediate mode validation
+    CrymbleUI::CacheValidation.enable(:immediate_mode)
+    CrymbleUI::CacheValidation.clear_failures!
+    after(800.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     window("ImmediateMode Autotest", WINDOW_W, WINDOW_H) do
       expanded do
         widget(CrymbleUI::VirtualMatrix.new(
@@ -73,19 +72,6 @@ class ImmediateModeAutoTest < CrymbleUI::App
         ))
       end
     end
-  end
-
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000), &block)
   end
 
   private def get_matrix : CrymbleUI::VirtualMatrix?
@@ -106,37 +92,37 @@ class ImmediateModeAutoTest < CrymbleUI::App
       LayerCapture.save_layer_image(get_content_layer, "/tmp/imm_content_initial.png")
       @phase = Phase::ScrollOut
       @step = 0
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::ScrollOut
       if @step < SCROLL_STEPS
         do_scroll_step(:out)
         @step += 1
-        schedule(DELAY_MS) { run_phase }
+        after(DELAY_MS.milliseconds) { run_phase }
       else
         log("=== ScrollOut done (#{SCROLL_STEPS} steps) ===")
         LayerCapture.save_layer_image(get_content_layer, "/tmp/imm_content_scrolled_out.png")
         @phase = Phase::ScrollBack
         @step = 0
-        schedule(300) { run_phase }
+        after(300.milliseconds) { run_phase }
       end
 
     when Phase::ScrollBack
       if @step < SCROLL_STEPS
         do_scroll_step(:back)
         @step += 1
-        schedule(DELAY_MS) { run_phase }
+        after(DELAY_MS.milliseconds) { run_phase }
       else
         log("=== ScrollBack done (#{SCROLL_STEPS} steps) ===")
         LayerCapture.save_layer_image(get_content_layer, "/tmp/imm_content_scrolled_back.png")
         @phase = Phase::Results
-        schedule(300) { run_phase }
+        after(300.milliseconds) { run_phase }
       end
 
     when Phase::Results
       output_results
       @phase = Phase::Done
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when Phase::Done
       quit

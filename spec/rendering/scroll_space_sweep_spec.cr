@@ -152,17 +152,21 @@ private def sweep_focus(f, subject : CrymbleUI::Widget, direction : CrymbleUI::S
   sv.scroll_offset
 end
 
-# The centre of what is actually VISIBLE of the subject: its painted rect clipped to the view.
-private def sweep_visible_point(subject : CrymbleUI::Widget, sv : CrymbleUI::Widget) : CrymbleUI::Vec2
+# What is actually VISIBLE of the subject: its painted rect clipped to `v`.
+private def sweep_visible_rect(subject : CrymbleUI::Widget, v : CrymbleUI::Rect) : CrymbleUI::Rect
   p = subject.viewport_bounds
-  v = sv.viewport_bounds
   left = {p.x, v.x}.max
   right = {p.x + p.width, v.x + v.width}.min
   top = {p.y, v.y}.max
   bottom = {p.y + p.height, v.y + v.height}.min
   (right - left).should be > 2.0
   (bottom - top).should be > 2.0
-  CrymbleUI::Vec2.new((left + right) / 2.0, (top + bottom) / 2.0)
+  CrymbleUI::Rect.new(left, top, right - left, bottom - top)
+end
+
+# The centre of what is actually VISIBLE of the subject.
+private def sweep_visible_point(subject : CrymbleUI::Widget, sv : CrymbleUI::Widget) : CrymbleUI::Vec2
+  sweep_visible_rect(subject, sv.viewport_bounds).center
 end
 
 SWEEP_CASES = [
@@ -216,13 +220,17 @@ describe "scroll-space sweep" do
         ghost.bounds.y.should be_close(grab.y + 8.0 - grab_dy, 0.5)
         ghost.bounds.x.should be_close(grab.x - grab_dx, 0.5)
 
-        tp = target.viewport_bounds
         over = sweep_visible_point(target, f[:sv])
         manager.update_drag(over, f[:window])
         manager.state.current_target.should eq(target)
         highlight = manager.highlight_layer.should_not be_nil
-        highlight.bounds.y.should be_close(tp.y, 0.5)
-        highlight.bounds.x.should be_close(tp.x, 0.5)
+        # Over the part of the row that shows: the scroll may have taken part of it out of the content
+        # viewport, and a scrollbar is over its end (neither is the row's to wash)
+        shown = sweep_visible_rect(target, f[:sv].layer.not_nil!.bounds)
+        highlight.bounds.x.should be_close(shown.x, 0.5)
+        highlight.bounds.y.should be_close(shown.y, 0.5)
+        highlight.bounds.right.should be_close(shown.right, 0.5)
+        highlight.bounds.bottom.should be_close(shown.bottom, 0.5)
       end
 
       it "anchors a popup to the painted control" do

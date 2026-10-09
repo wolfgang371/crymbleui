@@ -175,23 +175,15 @@ describe "unreachable backend census" do
 
     CrymbleUI::Testing::TestRenderBackend.census_take
     live_root = app.root.not_nil!
-    live = CrymbleUI::Testing::SurfaceLeaks.reachable(live_root, renderer)
+    live = CrymbleUI::Testing::SurfaceLeaks.reachable(live_root, renderer, app)
     live.should_not be_empty, "the live tree holds no backends at all — the fixture proves nothing"
 
     # The other direction of the same invariant: reachable implies NOT released. A census that only
-    # checked the unreachable half would pass an over-eager sweep that frees the live tree.
-    disposed_live = [] of String
-    walk = uninitialized CrymbleUI::Widget -> Nil
-    walk = ->(w : CrymbleUI::Widget) do
-      {w.widget_backend, w.background_backend}.each do |b|
-        disposed_live << "#{w.class.name.split("::").last}##{w.path_id}" if b && b.disposed?
-      end
-      w.children.each { |c| walk.call(c) }
-      nil
-    end
-    walk.call(live_root)
+    # checked the unreachable half would pass an over-eager sweep that frees the live tree. The rebuild
+    # above RECONCILED widgets that had rendered (their backgrounds are transferred, never released).
+    disposed_live = CrymbleUI::Testing::SurfaceLeaks.disposed_live(live_root, renderer, app)
     disposed_live.should be_empty,
-      "the live tree holds RELEASED backends (#{disposed_live.first(5).join(", ")}) — the next " \
+      "the live tree holds #{disposed_live.size} RELEASED backends — the next " \
       "draw would read freed memory"
   end
 end

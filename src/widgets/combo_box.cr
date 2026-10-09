@@ -63,6 +63,12 @@ module CrymbleUI
     # whatever the list stands for is application knowledge, not widget knowledge.
     property on_custom_requested : Proc(String, Nil)? = nil
 
+    # Fired on every change of the open list's filter text - typed, deleted or pasted - from
+    # its first character on (the one that opens the list, when typed on the closed box);
+    # not when the list merely opens. Tells a consumer the user is typing into this box,
+    # before anything is picked.
+    property on_filter : Proc(String, Nil)? = nil
+
     # Popup reference (NOT a child - uses Window.overlays)
     @current_popup : ComboBoxPopup?
 
@@ -423,51 +429,10 @@ module CrymbleUI
         allow_custom: @allow_custom
       )
 
-      # Wire up callbacks
-      popup.on_select = ->(idx : Int32, val : String) {
-        select_and_close(idx, val)
-      }
-      popup.on_custom_requested = ->(prefill : String) {
-        collapse
-        @on_custom_requested.try(&.call(prefill))
-      }
-      popup.on_cancel = -> {
-        collapse
-      }
-
-      # Type-to-filter mode: Up/Down also close popup + navigate grid
-      if initial_char
-        popup.text_input.on_vertical_arrow = ->(is_down : Bool) {
-          popup.select_highlighted
-          if scope = focus_scope_ancestor
-            key = is_down ? SF::Keyboard::Key::Down : SF::Keyboard::Key::Up
-            scope.on_key_down(key, false, false)
-          end
-          true
-        }
-      end
-
-      # Type-to-filter mode: Left/Right also close popup + navigate grid
-      # In Enter/click mode: Left/Right stay in TextInput for cursor movement
-      if initial_char
-        popup.text_input.on_horizontal_arrow = ->(is_right : Bool) {
-          popup.select_highlighted
-          if scope = focus_scope_ancestor
-            key = is_right ? SF::Keyboard::Key::Right : SF::Keyboard::Key::Left
-            scope.on_key_down(key, false, false)
-          end
-          true
-        }
-      end
-
-      # Tab/Shift+Tab: commit highlight + advance the grid cursor (spreadsheet Tab).
-      # Mode-independent (Tab never moves the text caret), so wired unconditionally.
-      wire_popup_tab_callback(popup)
-
-      # Click-outside-to-close (notified by App.handle_mouse_down → Window.notify_overlays_of_click)
-      popup.on_click_outside_callback = -> {
-        collapse
-      }
+      # Every callback in one place - the same one copy_state_from re-wires, so none can be missed there.
+      # Before the initial character goes in below: it is the first one on_filter must hear.
+      popup.type_to_filter = !initial_char.nil?
+      wire_popup(popup)
 
       mount_popup(popup)
 
@@ -532,26 +497,46 @@ module CrymbleUI
           @lazy_payloads = old.@lazy_payloads
         end
         # Re-wire callbacks (closures capture old widget instance)
-        popup.on_select = ->(idx : Int32, val : String) {
-          select_and_close(idx, val)
-        }
-        popup.on_cancel = -> {
-          collapse
-        }
-        popup.on_click_outside_callback = -> {
-          collapse
-        }
-        # Re-bind Tab too, so a rebuild-while-open keeps routing Tab to THIS combo
-        # (the arrow intercepts are filter-mode-gated and not preserved here).
-        wire_popup_tab_callback(popup)
+        wire_popup(popup)
       end
+    end
+
+    # Point every callback of the popup at THIS box - at expand, and again on the box a rebuild puts in
+    # place while the list is open (a closure left on the old box acts on a discarded tree: its collapse
+    # cannot unmount from the live window, its focus scope is the old one). The handlers are read when they
+    # fire, so a consumer's handler set after the popup opened counts too.
+    private def wire_popup(popup : ComboBoxPopup) : Nil
+      popup.on_select = ->(idx : Int32, val : String) { select_and_close(idx, val) }
+      popup.on_custom_requested = ->(prefill : String) {
+        collapse
+        @on_custom_requested.try(&.call(prefill))
+      }
+      popup.on_cancel = -> { collapse }
+      # Click-outside-to-close (notified by App.handle_mouse_down → Window.notify_overlays_of_click)
+      popup.on_click_outside_callback = -> { collapse }
+      popup.on_filter = ->(filter : String) { @on_filter.try &.call(filter); nil }
+      # Tab/Shift+Tab: commit highlight + advance the grid cursor (spreadsheet Tab). Mode-independent (Tab
+      # never moves the text caret).
+      wire_popup_tab_callback(popup)
+      # Type-to-filter mode only: the arrows also commit the highlight and move the grid cursor; opened by
+      # Enter/click, Left/Right stay in the filter for the caret, Up/Down move the highlight.
+      if popup.type_to_filter?
+        popup.text_input.on_vertical_arrow = ->(is_down : Bool) { hand_back(popup, is_down ? SF::Keyboard::Key::Down : SF::Keyboard::Key::Up) }
+        popup.text_input.on_horizontal_arrow = ->(is_right : Bool) { hand_back(popup, is_right ? SF::Keyboard::Key::Right : SF::Keyboard::Key::Left) }
+      end
+    end
+
+    # Commit the highlighted item and hand the arrow to the focus scope around this box (the grid).
+    private def hand_back(popup : ComboBoxPopup, key : SF::Keyboard::Key) : Bool
+      popup.select_highlighted
+      focus_scope_ancestor.try &.on_key_down(key, false, false)
+      true
     end
 
     # Wire Tab/Shift+Tab on the popup's TextInput: commit the highlighted value, then —
     # inside a focus-scope (VirtualMatrix) — re-dispatch Tab so the grid cursor advances
     # and focus stays in the matrix (return true to hold the Tab-trap); standalone,
-    # return false so FocusManager cycles to the next widget. Called from expand and,
-    # since closures capture this combo, re-bound from copy_state_from on DSL rebuild.
+    # return false so FocusManager cycles to the next widget. Called from wire_popup.
     private def wire_popup_tab_callback(popup)
       popup.text_input.on_tab = ->(shift : Bool) {
         popup.select_highlighted

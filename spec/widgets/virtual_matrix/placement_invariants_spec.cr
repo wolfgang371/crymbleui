@@ -34,8 +34,13 @@ private record Snapshot, input : Float64, items : Array(Placed)
 private VP_W = 900
 private VP_H = 600
 
-private def demo_matrix(vp_h = VP_H)
-  adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10) # the demo's own defaults
+# The demo with every third data row two and a half lines tall: a one-line row's ink never moves at the band
+# (it is cut where it sits, UC-5), so a sweep that needs ink moving in content cells needs taller rows.
+class TallRowsDemoAdapter < ConfigurableMatrixAdapter
+  include EveryThirdRowTall
+end
+
+private def demo_matrix(vp_h = VP_H, adapter = ConfigurableMatrixAdapter.new(2, 2, 3, 3, 10, 10)) # the demo's own defaults
   matrix = CrymbleUI::VirtualMatrix.new(adapter, id: "placement_invariants")
   app = TestApp.new
   app.root_widget = matrix
@@ -424,7 +429,9 @@ describe "placement invariants, swept one pixel at a time" do
     #
     # Compared frame-to-frame, never against a re-render, so it cannot be satisfied by recomputing
     # both sides -- which left two earlier drafts green with `mark_needs_render` deleted outright.
-    renderer, app, matrix = demo_matrix
+    #
+    # TALL ROWS in the fixture: only a region taller than one line moves its ink at the band.
+    renderer, app, matrix = demo_matrix(adapter: TallRowsDemoAdapter.new(2, 2, 3, 3, 10, 10))
     steps = [] of Tuple(Float64, Float64)
     (0..60).each { |i| steps << {0.0, i.to_f64 * 3.0} }          # fine: in-band movement
     (0..18).each { |i| steps << {0.0, i.to_f64 * 50.0} }         # wheel-sized: crossings
@@ -561,8 +568,15 @@ describe "placement invariants, swept one pixel at a time" do
     # (#78), and it did not forbid the movement that actually looked broken. What looked broken was
     # UNBOUNDED movement -- content chasing the viewport edge 1:1 with no stopping point (#74/#75).
     # Bounded at top-alignment, content slides until it reaches that bound and then stops.
+    #
+    # And for a row no taller than one line, there is no slide at all (UC-5, as reported 2026-09-30:
+    # "row 8 gets scrolled a few px up until it stays stuck and gets hidden"): its label keeps the
+    # offset it has at rest, exactly, while the shrinking panel cuts the row. Top-alignment alone let
+    # it ride its padding up by 3px.
     _, _, matrix = tall_row_matrix
     offenders = [] of String
+    resting = {} of Tuple(Int32, Int32) => {Float64, Float64} # box height, label offset in it
+    ordinary_cut = 0
 
     (150..300).reverse_each do |h|
       matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(VP_W.to_f64, h.to_f64)),
@@ -577,11 +591,22 @@ describe "placement invariants, swept one pixel at a time" do
         # clamping content into the band at the far edge (2026-09-10), which moves content UP and
         # is exactly what keeps a tall row's number on screen.
         top = r ? box_y + r.pos : box_y
+        if w.bounds.height <= matrix.line_extent + 0.0001
+          if box_y + w.bounds.height <= matrix.bounds.height
+            resting[key] = {w.bounds.height, p.position.y}
+          elsif (rest = resting[key]?) && rest[0] == w.bounds.height
+            ordinary_cut += 1
+            offenders << "#{key} '#{p.text}' cut by the edge sits #{p.position.y.round(2)} into its box, " \
+                         "#{rest[1].round(2)} at rest, at panel height #{h}" unless (p.position.y - rest[1]).abs <= 0.001
+          end
+        end
         next if box_y + p.position.y >= top - 0.6
         offenders << "#{key} '#{p.text}' at #{(box_y + p.position.y).round(1)} is above " \
                      "top-alignment #{top.round(1)} at panel height #{h}"
       end
     end
+
+    (ordinary_cut > 0).should be_true # instrument: the edge cut a one-line row
 
     offenders.should be_empty,
       "content was pulled above top-alignment:\n  #{offenders.first(6).join("\n  ")}"
@@ -624,94 +649,83 @@ describe "placement invariants, swept one pixel at a time" do
       "a one-line label was not centred in its row:\n  #{offenders.first(5).join("\n  ")}"
   end
 
-  it "I14 (UC-19): a frozen label keeps its row's padding, and does not jam the band edge" do
+  it "I14 (UC-19): under the header an ordinary row's label leaves with its row; a taller one's keeps a line's padding" do
     # Field report #82: "'1' in this case is clipped a bit at top — the freezing is a couple of
     # bits too high". A label pushed under the sticky header was landing with its ink exactly ON
-    # band_lo, which is 5.5px higher than the SAME label sits in a row that merely begins there —
-    # nowhere a label ever sits otherwise, and it reads as shaved against the header.
+    # band_lo — nowhere a label ever sits otherwise, and it reads as shaved against the header.
     #
-    # So the assertion is a comparison against the label's own unfrozen offset, not a magic gap:
-    # freezing may change WHERE a line is, never how a line sits in it.
+    # REVERSED for one-line rows on 2026-10-01 (Wolfgang: "Yes, leave with its row"): a row no taller
+    # than one line is not slid at all - its label keeps its offset in the row and leaves with it,
+    # cut by the header as the row's background is (UC-5 at the leading edge). #82's guard stands for
+    # a TALLER row, whose label slides by as much as the row exceeds one line: it is never closer to
+    # the edge of what is left than a one-line label sits in its own line - not jammed - and once
+    # less than one line is left, it leaves with that line.
     #
     # THE COUNTERS ARE PART OF THE GUARD. This example was DEAD until 2026-09-10 -- it ran on
     # `tall_row_matrix`, whose content is shorter than its viewport, so nothing ever scrolled and
-    # it asserted on 0 of the 202 cells it looked at. Reinstating the defect left it green. It now
-    # runs on `pushed_matrix` and prints what it actually reached; if `push-BINDING` ever drops to
-    # 0 again the example is dead again, whatever its colour. Verified RED at the same time:
-    # `pad = 0.0` takes the closest approach from 14.0px to 0.0px and names its offenders.
-    _, _, matrix = pushed_matrix
+    # it asserted on 0 of the 202 cells it looked at. It runs on `pushed_matrix` and requires both
+    # kinds of row to have been pushed: a viewport short enough that the one-line rows below the
+    # tall one reach the header too.
+    _, _, matrix = pushed_matrix(100)
+    hold = matrix.line_extent
     offenders = [] of String
     resting = {} of Tuple(Int32, Int32) => Float64
-    with_region = 0
-    pushed_seen = 0
-    compounds_seen = 0
-    binding_push = 0
-    binding_compounds = 0
+    ordinary_pushed = 0
+    tall_pushed = 0
     held_small = [] of String
-    closest = Float64::INFINITY
 
-    (0..80).each do |i|
+    (0..160).each do |i|
       matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, i.to_f64)
       matrix.pre_render_flush
       band_lo = matrix.ruler_row_height_pixels + matrix.sticky_row_height_pixels
       band_hi = matrix.bounds.height
       one_line_cells(matrix) do |key, w, p, box_y|
-        r = w.ink_region
-        next unless r
-        with_region += 1
-        compounds_seen += 1 if compound?(matrix, key)
-        # COMPOUNDS PASS THROUGH, and are expected to contribute nothing: since 2026-09-10 a
-        # compound is not held at the leading edge in ANY form, so the push cannot make it flush
-        # and #87's defect has no way back. That claim now lives in `compound_scroll_out_spec`,
-        # which asserts the stronger thing -- a compound's label rides its group exactly.
-        offset = box_y + p.position.y - (box_y + r.pos) # where the line sits inside its region
+        next if key[0] < matrix.sticky_row_count
+        r = w.ink_region # absent where the rule can move nothing: the region is the box
+        region_top = box_y + (r ? r.pos : 0.0)
+        region_size = r ? r.size : w.bounds.height
+        ink = box_y + p.position.y
+        offset = ink - region_top # where the line sits inside its region
         if box_y >= band_lo
           resting[key] = offset # not pushed: this is the label's own answer
           next
         end
         next unless rest = resting[key]?
-        pushed_seen += 1
-        ink = box_y + p.position.y
-        natural = box_y + r.pos + rest
-        if natural < band_lo - 0.5
-          binding_push += 1
-          if compound?(matrix, key)
-            binding_compounds += 1
-            # A COMPOUND MAY BE HELD AT THE LEADING EDGE, but ONLY when its span is taller than the
-            # band: a group you cannot see the middle of has to centre in the part you can, or its
-            # label parks against an edge and stays there (image #99). A group SMALLER than the
-            # screen is never held — it rides its span and leaves with it (#93-#96).
-            held_small << "#{key} '#{p.text}' held at the edge with a span of " \
-                          "#{r.size.round(1)} in a band of #{(band_hi - band_lo).round(1)}" \
-              unless r.size > band_hi - band_lo + 0.5
-          end
+        if compound?(matrix, key)
+          # A COMPOUND MAY BE HELD AT THE LEADING EDGE, but ONLY when its span is taller than the
+          # band: a group you cannot see the middle of has to centre in the part you can, or its
+          # label parks against an edge and stays there (image #99). A group SMALLER than the
+          # screen is never held — it rides its span and leaves with it (#93-#96); that claim, and
+          # its levelness with its rows, live in `compound_scroll_out_spec`.
+          held_small << "#{key} '#{p.text}' held at the edge with a span of " \
+                        "#{region_size.round(1)} in a band of #{(band_hi - band_lo).round(1)}" \
+            if region_top + rest < band_lo - 0.5 && ink > region_top + rest + 0.5 &&
+               region_size <= band_hi - band_lo + 0.5
+          next
         end
-        # COUNTED ABOVE, ASSERTED ON BELOW ONLY IF IT IS ONE LINE. A compound is not held at the
-        # leading edge at all now, so it slides smoothly out through the header with its group and
-        # legitimately passes `band_lo + padding` on the way (measured: 'a' at 55.5, 54.5, 53.5 as
-        # it left). That IS the fix of images #93-#96; asserting the padding on it would forbid it.
-        next if compound?(matrix, key)
-        gap = ink - band_lo
-        closest = gap if gap < closest
-        # NOT JAMMED ON THE EDGE (#82): however far its row has scrolled, a label keeps at least a
-        # line-capped padding below the band's top. It is not required to BE there — while its
-        # centred position is still lower, that is where it sits, and it slides down to this bound
-        # only as the band climbs past it.
-        floor = band_lo + Math.min(rest, line_height)
-        next if ink >= floor - 0.6
-        offenders << "#{key} '#{p.text}' jammed at #{ink.round(1)}, band_lo #{band_lo.round(1)} " \
-                     "+ padding #{Math.min(rest, line_height).round(1)} = #{floor.round(1)} (scroll #{i})"
+        if region_size <= hold + 0.0001
+          ordinary_pushed += 1
+          next if (offset - rest).abs <= 0.001
+          offenders << "#{key} '#{p.text}' (one line) sits #{offset.round(2)} into its row, #{rest.round(2)} at rest (scroll #{i})"
+        else
+          tall_pushed += 1
+          # the one line of it the label keeps to: the band's top, or - once less than a line is
+          # left - the region's last line
+          line_top = Math.min(band_lo, region_top + region_size - hold)
+          floor = line_top + (hold - CrymbleUI::Widget.measure_text(p.text, p.size).height) / 2.0
+          next if ink >= floor - 0.6
+          offenders << "#{key} '#{p.text}' jammed at #{ink.round(1)}, a line's padding below " \
+                       "#{line_top.round(1)} is #{floor.round(1)} (scroll #{i})"
+        end
       end
     end
 
-    puts "\n  [I14] regions #{with_region} (compound #{compounds_seen}); pushed #{pushed_seen}, " \
-         "of them push-BINDING #{binding_push} (compound #{binding_compounds}); " \
-         "closest ink came to band_lo: #{closest.round(2)}px"
-    binding_push.should be > 20, "I14 examined no frozen label — the example is dead"
+    puts "\n  [I14] pushed: one-line #{ordinary_pushed}, taller #{tall_pushed}"
+    (ordinary_pushed > 20 && tall_pushed > 20).should be_true # instrument: both kinds were pushed
     held_small.should be_empty,
       "a compound smaller than the band was held at the leading edge:\n  #{held_small.first(4).join("\n  ")}"
     offenders.should be_empty,
-      "a frozen label lost its row's padding:\n  #{offenders.first(6).join("\n  ")}"
+      "a label under the header left its place:\n  #{offenders.first(6).join("\n  ")}"
   end
 
   it "I15 (UC-1/UC-20): a compound is centred in its span, and never sits below the screen" do

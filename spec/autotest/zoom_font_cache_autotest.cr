@@ -84,18 +84,17 @@ class ZoomFontCacheAutoTest < CrymbleUI::App
   end
 
   @phase = Phase::Settle
-  @scheduled_first = false
 
   # Pixel data: array of (x, y, rgba_packed) tuples
   @baseline_pixels : Array(Tuple(Int32, Int32, UInt32)) = [] of Tuple(Int32, Int32, UInt32)
   @test_results = [] of String
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      schedule(500) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    after(500.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     # Simple window with large text labels — font rendering is what we're testing
     window("Zoom Font Cache Test", 400, 300) do
       vstack(spacing: 12.0, padding: 20.0) do
@@ -108,28 +107,12 @@ class ZoomFontCacheAutoTest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(
-      Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000),
-      &block
-    )
-  end
-
   private def run_phase
     case @phase
     when .settle?
       log("=== PHASE: Settle (wait for stable rendering) ===")
       @phase = Phase::CaptureBaseline
-      schedule(300) { run_phase }
+      after(300.milliseconds) { run_phase }
 
     when .capture_baseline?
       log("=== PHASE: Capture baseline at 100% zoom ===")
@@ -139,40 +122,40 @@ class ZoomFontCacheAutoTest < CrymbleUI::App
       log("  Captured #{@baseline_pixels.size} baseline pixels")
       @test_results << "BASELINE: #{@baseline_pixels.size} pixels captured"
       @phase = Phase::ZoomIn1
-      schedule(200) { run_phase }
+      after(200.milliseconds) { run_phase }
 
     when .zoom_in1?
       log("=== PHASE: Zoom In (cycle 1) ===")
       do_zoom_in
       @phase = Phase::ZoomOut1
-      schedule(400) { run_phase }
+      after(400.milliseconds) { run_phase }
 
     when .zoom_out1?
       log("=== PHASE: Zoom Out back to 100% (cycle 1) ===")
       do_zoom_out
       log("  Zoom factor after cycle 1: #{CrymbleUI::FontSizing.zoom_percentage}")
       @phase = Phase::ZoomIn2
-      schedule(400) { run_phase }
+      after(400.milliseconds) { run_phase }
 
     when .zoom_in2?
       log("=== PHASE: Zoom In (cycle 2) ===")
       do_zoom_in
       @phase = Phase::ZoomOut2
-      schedule(400) { run_phase }
+      after(400.milliseconds) { run_phase }
 
     when .zoom_out2?
       log("=== PHASE: Zoom Out back to 100% (cycle 2) ===")
       do_zoom_out
       log("  Zoom factor after cycle 2: #{CrymbleUI::FontSizing.zoom_percentage}")
       @phase = Phase::CompareResults
-      schedule(400) { run_phase }
+      after(400.milliseconds) { run_phase }
 
     when .compare_results?
       log("=== PHASE: Compare pixels after 2 zoom cycles ===")
       compare_with_baseline
       output_results
       @phase = Phase::Done
-      schedule(500) { run_phase }
+      after(500.milliseconds) { run_phase }
 
     when .done?
       quit

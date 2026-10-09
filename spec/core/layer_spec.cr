@@ -139,20 +139,6 @@ describe "Window layer integration" do
       layers.size.should eq(1)
       layers[0].should eq(window.root_layer)
     end
-
-    it "sorts layers by z-index" do
-      window = CrymbleUI::Window.new("Test", 800, 600)
-      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
-      window.layout(constraints, CrymbleUI::Vec2.zero)
-
-      layers = window.collect_all_layers
-
-      # Should be sorted (ascending z-index)
-      layers.size.times do |i|
-        next if i == 0
-        layers[i].z_index.should be >= layers[i - 1].z_index
-      end
-    end
   end
 
   describe "root layer widget population" do
@@ -180,9 +166,7 @@ describe "Window layer integration" do
 
       panel.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 150.0)), CrymbleUI::Vec2.new(100.0, 100.0))
 
-      layer = panel.layer
-      layer.should_not be_nil
-      layer.not_nil!.z_index.should eq(5)
+      panel.layer.should_not be_nil
     end
 
     it "updates layer bounds during layout (equal to panel bounds)" do
@@ -197,19 +181,6 @@ describe "Window layer integration" do
       layer.bounds.y.should eq(100.0)
       layer.bounds.width.should eq(200.0)
       layer.bounds.height.should eq(150.0)
-    end
-
-    it "syncs layer z_index with panel z_index during layout" do
-      panel = CrymbleUI::WindowPanel.new("Panel", 100.0, 100.0, 200.0, 150.0, z_index: 3)
-      constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(200.0, 150.0))
-
-      panel.layout(constraints, CrymbleUI::Vec2.new(100.0, 100.0))
-
-      panel.layer.not_nil!.z_index.should eq(3)
-
-      # After bring_to_front, layer z_index should sync
-      panel.bring_to_front
-      panel.layer.not_nil!.z_index.should eq(panel.z_index)
     end
 
     it "populates layer with chrome first, then content (NEW architecture)" do
@@ -248,10 +219,8 @@ describe "Window layer integration" do
       # Should have root layer + 2 panel layers
       layers.size.should eq(3)
 
-      # Should be sorted by z_index (root=0, panel2=2, panel1=5)
-      layers[0].z_index.should eq(0)  # root
-      layers[1].z_index.should eq(2)  # panel2
-      layers[2].z_index.should eq(5)  # panel1
+      # Composite order: root, then the panels by z (panel2=2, panel1=5) - not their tree order
+      layers.map(&.owner_widget).should eq([window, panel2, panel1])
     end
   end
 
@@ -275,7 +244,6 @@ describe "Window layer integration" do
       # Window menubar should have its own layer (high z-index above panels)
       layer = menubar.layer
       layer.should_not be_nil
-      layer.not_nil!.z_index.should eq(1000)
       layer.not_nil!.bounds.width.should eq(800.0)
     end
 
@@ -326,16 +294,14 @@ describe "Window layer integration" do
       # Should have root layer + panel layer + menubar layer
       layers.size.should eq(3)
 
-      # Should be sorted by z_index (root=0, panel1=5, menubar=1000)
-      layers[0].z_index.should eq(0)     # root
-      layers[1].z_index.should eq(5)     # panel1
-      layers[2].z_index.should eq(1000)  # menubar
+      # Composite order: root, the panel, then the window's menubar over it (added first in the tree)
+      layers.map(&.owner_widget).should eq([window, panel1, menubar])
     end
 
-    it "z_index ensures menubar renders on top" do
+    it "composites the window's menubar over every panel, whatever the panel's z" do
       window = CrymbleUI::Window.new("Test", 800, 600)
       menubar = CrymbleUI::MenuBar.new
-      panel1 = CrymbleUI::WindowPanel.new("P1", 100.0, 100.0, 200.0, 150.0, z_index: 999)
+      panel1 = CrymbleUI::WindowPanel.new("P1", 100.0, 100.0, 200.0, 150.0, z_index: 999_999)
 
       window.add_child(menubar)
       window.add_child(panel1)
@@ -343,11 +309,7 @@ describe "Window layer integration" do
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0))
       window.layout(constraints, CrymbleUI::Vec2.zero)
 
-      layers = window.collect_all_layers
-
-      # MenuBar layer should be last (highest z_index)
-      menubar_layer = menubar.layer.not_nil!
-      menubar_layer.z_index.should be > panel1.layer.not_nil!.z_index
+      window.collect_all_layers.last.should be(menubar.layer.not_nil!)
     end
   end
 
@@ -358,17 +320,15 @@ describe "Window layer integration" do
 
       popup.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0)), CrymbleUI::Vec2.new(100.0, 50.0))
 
-      layer = popup.layer
-      layer.should_not be_nil
-      layer.not_nil!.z_index.should eq(1000)  # Default z_index for popups
+      popup.layer.should_not be_nil
+      popup.compositing_z_index.should eq(1000) # the default z among the overlays
     end
 
     it "respects custom z_index from initialization" do
       popup = CrymbleUI::Popup.new(width: 200.0, height: 100.0, z_index: 1500)
       popup.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(800.0, 600.0)), CrymbleUI::Vec2.new(100.0, 50.0))
 
-      layer = popup.layer.not_nil!
-      layer.z_index.should eq(1500)
+      popup.compositing_z_index.should eq(1500) # its z among the overlays
     end
 
     it "updates layer bounds during layout" do
@@ -420,10 +380,8 @@ describe "Window layer integration" do
       # Should have root layer + panel layer + popup layer
       layers.size.should eq(3)
 
-      # Should be sorted by z_index (root=0, panel1=5, popup=1200)
-      layers[0].z_index.should eq(0)     # root
-      layers[1].z_index.should eq(5)     # panel1
-      layers[2].z_index.should eq(1200)  # popup
+      # Composite order: root, the panel, then the popup (an overlay, added first in the tree) over it
+      layers.map(&.owner_widget).should eq([window, panel1, popup])
     end
   end
 end

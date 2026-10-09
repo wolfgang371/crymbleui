@@ -13,17 +13,59 @@ The long doc is reference; this file is the contract.
 |---|---|---|
 | CONTENT | the laid-out position, summed up the parent chain | `absolute_bounds` |
 | WINDOW | where the widget is actually PAINTED | `viewport_bounds`, `to_window(point)` |
-| BUFFER | position inside a layer's texture | `slot_axis(abs, layer.bounds, buffer_origin)` |
+| BUFFER | position inside a layer's texture | `slot_axis(abs, layer.content_rect, buffer_origin)` |
 
 - **A widget whose parent scrolls keeps its laid-out bounds; the pixels move instead.** A
   ScrollView composites its layer shifted; a VirtualMatrix paints its cells shifted. The parent
   declares how much it shifts each child by overriding `Widget#paint_shift_for(child)` (default
-  zero; per CHILD, because a ScrollView's scrollbars and a matrix's sticky rows/columns stay put).
+  zero; per CHILD, because a ScrollView's scrollbars stay put and a matrix's sticky cells are moved
+  by the matrix itself - their bounds already hold the scroll).
 - **Anything that meets the CURSOR or leaves the widget tree uses WINDOW space** — drag ghost,
-  drop highlight, drop-target hit test, popup/menu anchors, a layer's own bounds
-  (`compute_bounds_for_layer`), Tab order and arrow navigation.
+  drop highlight, drop-target hit test, popup/menu anchors, a layer's composite position
+  (`Layer#bounds`), Tab order and arrow navigation.
+- **A layer is painted in its owner's CONTENT space and composited in WINDOW space.** The owner
+  states the content rect (`compute_bounds_for_layer` → `absolute_bounds`, never `viewport_bounds`:
+  `Layer#content_rect`, the render origin); the layer derives where it composites
+  (`Layer#bounds = content_rect - owner.enclosing_scroll`). So an ancestor's scroll moves the
+  composite and leaves the buffer alone, and a repaint paints the content where it is laid out.
+  Render sites read `content_rect`, composite sites `bounds`, size-only readers `Layer#size`.
+  Enforced by `spec/rendering/layer_content_space_lint_spec.cr` (textual: no `viewport_bounds` in
+  a `compute_bounds_for_layer`) and `spec/rendering/scrolled_layer_space_spec.cr`.
+- **A layer composites clipped by every scroller around it**: `owner.ancestor_clip`, the
+  intersection of each ancestor's `Widget#clip_for(child)` - declared per child, like the shift (a
+  ScrollView clips its content, not its scrollbars; a VirtualMatrix a cell to the layer painting
+  it, not its chrome; a WindowPanel to its interior). All four sides, every depth; one rule for
+  every composite (`LayerRenderer#composite_region`). The shift and clip walks stop after an
+  overlay: a popup is placed and clipped in window space. Occlusion counts what a layer SHOWS; a
+  layer showing nothing is skipped at its own turn in the render loop, after the flushes before
+  it, so what a flush reveals is painted in that frame (`-Dverify_bounds`: `LayerSpaceError` if a
+  later flush moves it).
+- **A layer composites within the layer it is painted into** (`Layer.composite_order`): directly above it,
+  below that layer's later siblings, at any depth - what covers a widget covers the layers inside it. The layer a
+  widget is painted into is `Widget#painting_layer` (its own render_layer first). z orders only an owner's own
+  layers; owners painted into one layer order by the rank that layer's owner declares, then boundaries by z,
+  then tree order; boundaries are local; overlays come after the tree. Never order by a flat or inherited z: a
+  scroll view's scrollbar once passed its grid's sticky header that way.
+- **A click lands where it is drawn**: hit testing walks the composite order backwards
+  (`Widget#children_in_hit_order`). The two agree because siblings do not overlap; a container whose children
+  overlap would need an "owns a layer" tier in the key.
+- **A drop highlight shows what the user sees of its target.** Its bounds are `visible_bounds` (the part
+  no scroll view, popup or panel clips away), and it composites directly after the last layer painting
+  the target, so a panel, sticky band or popup in front covers it as it covers the target. Never give an
+  overlay that stands for a widget a fixed z: z 1000 put it over every panel's content and every sticky band.
+- **A drop lands where a click would.** `DragManager#find_drop_target` starts from the hit test
+  and walks up to the first DropTarget that takes the payload, so z order, popups, scrollbars and
+  click-through hold for a drop exactly as for a click. Never search the tree for drop targets on
+  its own: a second walk kept "in step" is how a drop once passed through the panel in front.
+- **Culling skips painting, never the state the next input reads.** The frame that lowers the input
+  barrier applies, before the next input, the structural work of every widget that announced it -
+  painted or not (`App#finish_frame`; a VirtualMatrix's rebuilt cells and its proxy editor). A
+  covered grid used to keep an announced rebuild pending while the barrier came down, and the next
+  keystroke found no cell editor. Both renderers end `render_frame` with the render-trigger stamp,
+  then `finish_frame`, and do not idle when it applied work.
 - **Anything a widget is HANDED is already in the widget's own space** — `App` converts once, at
-  its four dispatch sites plus `preferred_cursor`, via `Widget#to_content`. So `point -
+  its four dispatch sites plus `preferred_cursor`, and `DragManager` at the two drop-target hooks
+  (`on_drop`, `on_drag_over`), via `Widget#to_content`. So `point -
   absolute_bounds` is correct in a handler without anyone thinking about scrolling. Never convert
   again inside a widget (VirtualMatrix used to, and converted twice).
 - **Painting uses BUFFER space and `scroll_offset` does NOT appear in it** — the buffer stores
@@ -34,6 +76,21 @@ The long doc is reference; this file is the contract.
   touch `absolute_bounds`) and `spec/rendering/scroll_space_sweep_spec.cr` (the invariant across
   vertical / horizontal / both / unscrolled, for nine consumers).
 - Why: LAYER_RENDERING_ARCHITECTURE.md § "Coordinate Systems".
+
+## The wheel
+
+- **A scroller takes what it can and passes the rest on.** `App#handle_mouse_wheel` hands the delta to
+  the widget under the point and then up the ancestors that handle the wheel (`on_mouse_wheel`), each
+  returning what it did NOT take, until nothing is left. Per axis: an axis a scroller moved on is
+  taken whole - a partial move too (the rest is dropped, as in a browser) - and an axis it cannot move
+  on (no overflow there, or already at its end) goes on. No latching: each event is judged on its
+  own, so a fling that empties an inner list goes on to its container (SFML reports no gesture
+  phases to latch by).
+- **The leftover travels in the INPUT frame.** A handler applies shift to what it READS and swaps the
+  leftover back, so the next handler swaps it once (a VirtualMatrix under shift reads only delta.y,
+  as x, and hands on delta.x untouched).
+- **A grid's chrome ScrollView takes nothing** (`hands_wheel_on?`): the wheel over a grid's
+  scrollbar does what it does over the grid - one scroll, the grid's clamp.
 
 ## Capture invariants
 

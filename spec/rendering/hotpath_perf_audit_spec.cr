@@ -342,8 +342,9 @@ describe "hot-path tree-walk perf audit" do
     audit_row("A4 state sweep", "state_sweep_visits", a4[0], a4[1])
 
     # ============================ A5 — DnD drop-target hit walk ============================
-    # find_drop_target recurses the whole tree per drag-move. Position over empty space so it
-    # visits every node (returns nil). Scale = N filler widgets.
+    # find_drop_target walks up from the hit test per drag-move (and once a frame while a drag is
+    # active): the hit's depth, whatever the tree's size. Measured over the drop target (a point off
+    # every node would visit none and pass at 0/0). Scale = N filler widgets beside it.
     a5 = [] of Int32
     [50, 100].each do |n|
       root = PerfRoot.new
@@ -358,7 +359,7 @@ describe "hot-path tree-walk perf audit" do
       manager.begin_drag_tracking(draggable, CrymbleUI::Vec2.new(5.0, 5.0))
       manager.update_drag(CrymbleUI::Vec2.new(20.0, 20.0), root) # pass threshold -> Active
       CrymbleUI::DragManager.drop_target_visits = 0
-      manager.update_drag(CrymbleUI::Vec2.new(5000.0, 5000.0), root) # measured move (over empty space)
+      manager.update_drag(target.viewport_bounds.center, root) # measured move (over the target)
       a5 << CrymbleUI::DragManager.drop_target_visits
     end
     audit_row("A5 DnD move", "drop_target_visits", a5[0], a5[1])
@@ -399,7 +400,8 @@ describe "hot-path tree-walk perf audit" do
     # pinning the current linear value.
     content_independence_ratio(a3[0], a3[1]).should be <= 3.0, "A3 scroll: collect_widgets_visits went super-linear (#{a3[0]} -> #{a3[1]})"
     content_independence_ratio(a4[0], a4[1]).should be <= 3.0, "A4 state sweep: state_sweep_visits went super-linear (#{a4[0]} -> #{a4[1]})"
-    content_independence_ratio(a5[0], a5[1]).should be <= 3.0, "A5 DnD move: drop_target_visits went super-linear (#{a5[0]} -> #{a5[1]})"
+    a5.all?(&.positive?).should be_true, "A5 DnD move measured no visits (#{a5[0]}, #{a5[1]}) - the point missed the target"
+    a5[1].should eq(a5[0]), "A5 DnD move: drop_target_visits grew with the tree (#{a5[0]} -> #{a5[1]})"
     content_independence_ratio(a6[0], a6[1]).should be <= 3.0, "A6 col resize: row_cache_rebuild_rows went super-linear (#{a6[0]} -> #{a6[1]})"
   end
 end

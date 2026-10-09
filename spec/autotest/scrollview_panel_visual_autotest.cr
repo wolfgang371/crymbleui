@@ -15,7 +15,6 @@ require "../../src/crymble-ui"
 class ScrollViewPanelVisualAutoTest < CrymbleUI::App
   @test_phase = 0
   @test_results = [] of String
-  @scheduled_first = false
 
   # Track pixel samples for comparison
   @initial_content_pixel : String = ""
@@ -38,13 +37,12 @@ class ScrollViewPanelVisualAutoTest < CrymbleUI::App
   DRAG_AMOUNT = 80.0
   RESIZE_GROW = 100.0
 
-  def build : CrymbleUI::Widget
-    # Schedule first test phase after scheduler is ready
-    if @test_phase == 0 && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      schedule_next_phase(500)  # Wait for initial render to complete
-    end
+  # The first phase, once the window is up.
+  def on_start
+    schedule_next_phase(500)  # Wait for initial render to complete
+  end
 
+  def build : CrymbleUI::Widget
     window("ScrollView-in-Panel Visual AutoTest", 600, 400) do
       window_panel(title: "Test Panel", x: PANEL_X, y: PANEL_Y,
                    width: PANEL_WIDTH, height: PANEL_HEIGHT,
@@ -67,17 +65,8 @@ class ScrollViewPanelVisualAutoTest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
   private def schedule_next_phase(delay_ms : Int32)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms * 1_000_000)) do
+    after(delay_ms.milliseconds) do
       run_test_phase
     end
   end

@@ -6,10 +6,10 @@ require "../../src/dsl/builder"
 
 # Layer-discovery invariant guard.
 #
-# The render pass (LayerRenderer#collect_layers) and the compositor
+# The render pass (Layer.composite_order) and the compositor
 # (Layer.active_layers, the @@all_layers registry filtered by in_tree?) must
 # discover the SAME in-tree owned layers. If a widget owns a layer that
-# collect_layers doesn't reach, its widget never renders into a backend and the
+# composite_order doesn't reach, its widget never renders into a backend and the
 # layer is invisible — the exact failure that shipped for drag_overlay_layer.
 #
 # `active_layers` is registry-derived, INDEPENDENT of each_owned_layer, so it is

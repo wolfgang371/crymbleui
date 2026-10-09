@@ -86,32 +86,16 @@ module CrymbleUI
       @current_target = nil
     end
 
-    # Re-find widget references in a new tree after rebuild.
-    # If a referenced widget can't be found, the drag is cancelled (reset).
-    def update_widget_references(root : Widget)
+    # Hand the drag's widgets to what replaced them in a rebuild - `resolve` answers the widget that is this
+    # one now, or nil if it is gone. A lost source is left nil for DragManager#rebind to end the drag; a lost
+    # target is nil (the pointer is over nothing yet); a widget payload keeps its widget if that is gone -
+    # the payload is data.
+    def update_widget_references(& : Widget -> Widget?) : Nil
       return if @phase == DragPhase::Idle
-
-      if sw = @source_widget
-        new_sw = root.find_by_path(sw.path_id)
-        if new_sw
-          @source_widget = new_sw
-        else
-          # Source widget gone — can't continue drag
-          reset
-          return
-        end
-      end
-
-      if ct = @current_target
-        @current_target = root.find_by_path(ct.path_id)
-        # current_target can be nil (cursor moved off target) — not fatal
-      end
-
-      # WidgetDragData also holds a widget ref — update it
-      if wd = @data.as?(WidgetDragData)
-        if new_w = root.find_by_path(wd.widget.path_id)
-          wd.widget = new_w
-        end
+      @source_widget = @source_widget.try { |w| yield w }
+      @current_target = @current_target.try { |w| yield w }
+      if (wd = @data.as?(WidgetDragData)) && (widget = yield wd.widget)
+        wd.widget = widget
       end
     end
   end

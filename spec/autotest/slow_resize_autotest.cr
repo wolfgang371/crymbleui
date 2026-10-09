@@ -20,7 +20,6 @@ require "../../src/crymble-ui"
 
 class SlowResizeAutotest < CrymbleUI::App
   @test_phase = 0
-  @scheduled = false
   @move_count = 0
   @bug_detected = false
 
@@ -45,12 +44,12 @@ class SlowResizeAutotest < CrymbleUI::App
   TOTAL_MOVES = 20     # Do 20 incremental moves
   MOVE_DELTA = 5.0     # 5 pixels per move (slow resize)
 
-  def build : CrymbleUI::Widget
-    if @test_phase == 0 && !@scheduled && scheduler_ready?
-      @scheduled = true
-      schedule_next_phase(500)
-    end
+  # The first phase, once the window is up.
+  def on_start
+    schedule_next_phase(500)
+  end
 
+  def build : CrymbleUI::Widget
     window("Slow Resize Test", 800, 600) do
       # Panel 1 - the one we'll resize
       window_panel(title: "Panel A (resize me)", x: PANEL1_X, y: PANEL1_Y,
@@ -95,17 +94,8 @@ class SlowResizeAutotest < CrymbleUI::App
     end
   end
 
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
   private def schedule_next_phase(delay_ms : Int32)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms * 1_000_000)) do
+    after(delay_ms.milliseconds) do
       run_test_phase
     end
   end

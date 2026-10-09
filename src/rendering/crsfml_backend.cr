@@ -289,10 +289,10 @@ module CrymbleUI
       end
     end
 
-    # Get pixels from rectangular region (for background memorization)
-    # GPU→CPU transfer - slow but only happens once per widget on first render
+    # Read back a rectangle, for diagnostics and specs: one GPU→CPU copy of the whole texture per call.
     def get_pixels(x : Int32, y : Int32, width : Int32, height : Int32) : Array(Color)
       assert_live("get_pixels")
+      assert_inside(x, y, width, height, "get_pixels")
       # Copy texture to image (GPU→CPU)
       image = @texture.texture.copy_to_image
       pixels = [] of Color

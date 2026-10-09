@@ -115,7 +115,7 @@ To declare a widget field you pick **one macro**:
 | macro | gives you | use it for |
 |---|---|---|
 | **`reactive_property name : T`** | a `Source(T)` field + getter (`.get`, auto-captures) + setter (`.set`, notifies) | any reactive value — **the default** |
-| **`reconcile_property name : T`** | a *plain* ivar (no `Source`) carried across a rebuild | a managed `Layer`/`Widget` ref — infrastructure, never painted |
+| **`reconcile_property name : T`** | a *plain* ivar (no `Source`) carried across a rebuild | a managed `Layer`/`Widget` ref — infrastructure, never painted; a widget's own press/drag state (press point, drag anchor): a rebuild between press and release hands the release to a fresh instance (CLAUDE.md, Common Pitfalls) |
 | **`theme_property name, key`** | a getter that resolves the global `Theme` `Source` live | a color that should follow the theme |
 
 So `reactive_property color : Color` *is* "a `Source(Color)` field, plus `color`/`color=` that auto-capture
@@ -207,6 +207,27 @@ The SFML render loop checks `app.needs_rebuild?` on every iteration, not only af
 renderer's `render_frame_if_needed` does the same. A timer callback that mutates app state and calls
 `request_rebuild` therefore fires a frame without waiting for the next mouse move or keypress — making the
 pull model equally reliable for clock displays, polled data, and state-based animations.
+
+An app starts its timers in `on_start`, not in `build`. `build` describes the UI and runs on every rebuild,
+and its first run (which `CrymbleUI.run` makes to read the window's size and title) comes before the
+renderer, and so before the scheduler, exists. `on_start` runs once, with the renderer up and the tree
+built, before the first frame - in the SFML loop and under the test renderer alike:
+
+```crystal
+class ClockApp < CrymbleUI::App
+  state now : String = Time.local.to_s("%H:%M:%S")
+
+  def on_start
+    every(1.second) { self.now = Time.local.to_s("%H:%M:%S") }
+  end
+
+  def build : CrymbleUI::Widget
+    window("Clock", 300, 120) { text(now, font_scale: 5) }
+  end
+end
+```
+
+`every(interval)` and `after(delay)` return a `CrymbleUI::Timer`; `cancel` stops it.
 
 ## Using widgets: the two-mechanism model (the imgui-ease path)
 

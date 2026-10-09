@@ -397,19 +397,11 @@ describe "VirtualMatrix scroll_order without sticky_*_count (Feature Demo scenar
       "Row 0 cells should persist after scroll (scroll_order makes row 0 scroll out last)"
   end
 
-  # TEST: Header cells should render at SCREEN TOP when scroll_order makes them scroll last
-  # This is the KEY difference between scroll_order and sticky_*_count:
-  # - scroll_order: controls WHEN elements scroll out (visibility lifetime)
-  # - sticky_*_count: controls WHERE elements render (fixed screen position)
-  #
-  # Without sticky_*_count, row 0 cells have data position y=0.
-  # When we scroll down, they should EITHER:
-  # a) Scroll off-screen (data position - scroll_offset = negative), OR
-  # b) Stay visible at screen top if adapter wants "sticky" behavior
-  #
-  # If adapter wants row 0 to stay visible AND be at screen top,
-  # it MUST set sticky_row_count = 1 (not just use scroll_order)
-  it "EXPECTED FAILURE: scroll_order alone does NOT pin cells to screen position" do
+  # A scroll order whose TAIL is {0} makes row 0 sticky: the sticky count is derived from the tail
+  # (derive_sticky_count), so row 0 is pinned at the screen top, not scrolled away. (This spec once expected it
+  # to move by the scroll - it read the position through a helper that subtracted the scroll for every cell,
+  # a pinned header included.)
+  it "pins row 0 at the screen top when the scroll order ends with it" do
     renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
     app = TestApp.new
 
@@ -423,8 +415,8 @@ describe "VirtualMatrix scroll_order without sticky_*_count (Feature Demo scenar
     matrix.layout(constraints, CrymbleUI::Vec2.zero)
     renderer.settle_rendering(app)
 
-    # Get the screen position of row 0, col 1 cell before scrolling
-    row0_pos_before = matrix.cell_screen_position(0, 1)
+    # Where row 0, col 1 is painted before scrolling
+    row0_pos_before = matrix.active_cells[{0, 1}].viewport_bounds.position
 
     # Scroll down
     matrix.scroll_offset = CrymbleUI::Vec2.new(0.0, 100.0)
@@ -432,23 +424,11 @@ describe "VirtualMatrix scroll_order without sticky_*_count (Feature Demo scenar
     matrix.layout(constraints, CrymbleUI::Vec2.zero)
     renderer.render_frame(app)
 
-    # Get the screen position after scrolling
-    row0_pos_after = matrix.cell_screen_position(0, 1)
+    # ...and after scrolling
+    row0_pos_after = matrix.active_cells[{0, 1}].viewport_bounds.position
 
-    # With scroll_order but WITHOUT sticky_row_count:
-    # - Row 0 data position is y=0
-    # - After scroll_offset.y = 100, screen position should be y = 0 - 100 = -100
-    # - Cell would be OFF-SCREEN (negative Y)
-    #
-    # If user wants row 0 to stay at screen top (sticky header behavior),
-    # they MUST set sticky_row_count = 1
-
-    # The cell's screen Y position should have moved by scroll_offset amount
-    # (proving it scrolls, not stays pinned)
-    position_delta = row0_pos_after.y - row0_pos_before.y
-    position_delta.should be_close(-100.0, 1.0),
-      "Row 0 cell should scroll with content (delta=#{position_delta}). " \
-      "scroll_order only controls visibility lifetime, NOT screen position. " \
-      "For sticky header behavior, use sticky_row_count instead."
+    matrix.sticky_row_count.should eq(1) # instrument: the tail made row 0 sticky
+    matrix.scroll_offset.y.should be > 0.0 # instrument: scrolled
+    (row0_pos_after.y - row0_pos_before.y).should eq(0.0)
   end
 end

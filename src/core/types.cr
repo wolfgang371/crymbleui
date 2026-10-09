@@ -153,6 +153,23 @@ module CrymbleUI
                 bottom < other.top || top > other.bottom)
         end
 
+        # The overlap of the two rects, or nil when there is none. Unlike `intersects`, rects that only touch
+        # (a shared edge) have no intersection: it would be empty.
+        def intersection(other : Rect) : Rect?
+            l = {left, other.left}.max
+            t = {top, other.top}.max
+            r = {right, other.right}.min
+            b = {bottom, other.bottom}.min
+            Rect.new(l, t, r - l, b - t) if r > l && b > t
+        end
+
+        # The smallest rect covering both.
+        def union(other : Rect) : Rect
+            l = {left, other.left}.min
+            t = {top, other.top}.min
+            Rect.new(l, t, {right, other.right}.max - l, {bottom, other.bottom}.max - t)
+        end
+
         # Is `other` fully contained within this rect (inclusive of edges)?
         def contains?(other : Rect) : Bool
             other.left >= left && other.top >= top &&

@@ -35,7 +35,7 @@ module CrymbleUI
 
     # Override Popup's compute_bounds_for_layer: no border margin expansion
     def compute_bounds_for_layer(layer : Layer) : Rect
-      viewport_bounds
+      absolute_bounds
     end
 
     TEXT_INPUT_PADDING = 4.0
@@ -118,6 +118,11 @@ module CrymbleUI
     # is application knowledge, not widget knowledge.
     property on_custom_requested : Proc(String, Nil)?
     property on_cancel : Proc(Nil)?
+    # Opened by a character typed on the closed box (not by Enter or a click): the arrows then leave the list.
+    property? type_to_filter : Bool = false
+    # Fired on every change of the filter text (typed, deleted, pasted), after the list is
+    # filtered to it.
+    property on_filter : Proc(String, Nil)?
 
     def flash_timer_running? : Bool
       !@flash_timer_id.nil?
@@ -289,6 +294,7 @@ module CrymbleUI
       case event
       when .change?
         filter_items(value)
+        @on_filter.try(&.call(value))
       when .submit?
         select_highlighted
       when .cancel?, .blur?

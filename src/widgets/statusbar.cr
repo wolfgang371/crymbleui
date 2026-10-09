@@ -81,8 +81,6 @@ module CrymbleUI
         BORDER_HEIGHT = 1.0   # Top border thickness
 
         # @internal_layer provided by LayerOwner mixin
-        # StatusBar renders on top with fixed high z_index (like MenuBar)
-        STATUSBAR_Z_INDEX = 1000
 
         # Visual properties (reactive_property: Source-backed, auto-captures in to_primitives)
         reactive_property text : String
@@ -151,7 +149,7 @@ module CrymbleUI
 
             # Create layer only for Window statusbar (needs high z-index above content)
             if @parent.is_a?(Window) && @internal_layer.nil?
-                @internal_layer = Layer.new("statusbar_#{id}", Rect.zero, z_index: STATUSBAR_Z_INDEX, owner_widget: self)
+                @internal_layer = Layer.new("statusbar_#{id}", Rect.zero, owner_widget: self)
             end
 
             # Populate layer.widgets

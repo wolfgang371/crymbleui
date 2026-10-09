@@ -6,7 +6,6 @@ require "../../src/widgets/tree_node"
 require "../../src/widgets/checkbox"
 require "../../src/widgets/combo_box"
 require "../../src/widgets/virtual_matrix"
-require "../../src/widgets/simple_matrix"
 require "../../src/dsl/builder"
 
 # Reproduction of the user-reported embrace bug:
@@ -37,8 +36,10 @@ require "../../src/dsl/builder"
 #       dimensions -> `.to_u32` "Arithmetic overflow" in the SFML backend.
 #
 # This is "something special about the history section": it is the embedded
-# shrink_to_content matrix (the matrix() DSL sugar) inside a width-constraining
-# tree_node — the only place that drives the destructive scale path.
+# shrink_to_content grid inside a width-constraining tree_node — the only place
+# that drives the destructive scale path. (It was built with the since-retired
+# DSL `matrix`; the grid below is the same: shrink_to_content, max_height 200,
+# no rulers, and the column sizes that sugar measured for these rows.)
 #
 # These tests assert the CORRECT behaviour and therefore FAIL until the flaw
 # is fixed (they reproduce the bug; they are not regression-green yet).
@@ -58,9 +59,37 @@ class CrymbleUI::VirtualMatrix
   end
 end
 
+# The changes table: a header row (sticky) over 8 rows of checkbox, four texts and a button, at the sizes the
+# retired DSL `matrix` measured for them (frame units).
+class HistoryChangesAdapter
+  include CrymbleUI::Widgets::VirtualMatrix::MatrixAdapter
+
+  HEADER = ["", "Table", "Records", "Fields", "Cells", ""]
+
+  def get_scrollorder : {Array(Int32), Array(Int32)}
+    {(1..8).to_a + [0], (0..5).to_a}
+  end
+
+  def get_sizes : {Array(Float64), Array(Float64)}
+    {[0.8] + Array.new(8, 1.105), [2.005, 6.68, 3.74, 3.32, 2.9, 4.04]}
+  end
+
+  def cell_paint(row : Int32, col : Int32) : CrymbleUI::Widget
+    return CrymbleUI::Text.new(HEADER[col]) if row == 0
+    i = row - 1
+    case col
+    when 0 then CrymbleUI::Checkbox.new(text: "", checked: true, id: "chk_#{i}")
+    when 1 then CrymbleUI::Text.new("Table number #{i}")
+    when 2, 3 then CrymbleUI::Text.new("+#{i}")
+    when 4 then CrymbleUI::Text.new("#{i * 3}")
+    else CrymbleUI::Button.new("→ Shape", padding: 3.0, id: "to_shape_#{i}")
+    end
+  end
+end
+
 # Mirrors core/src/gui/embrace.cr build_history_section: a tree_node (expanded —
 # per the user's note that the bug shows when History Selection is open)
-# containing the Branch hstack and a shrink_to_content matrix(max_height: 200).
+# containing the Branch hstack and a shrink_to_content grid (max_height: 200).
 class HistoryReproApp < CrymbleUI::App
   def build : CrymbleUI::Widget
     window("Test", 1200, 800) do
@@ -78,21 +107,11 @@ class HistoryReproApp < CrymbleUI::App
               button("Commit!", padding: 3.0) { }
               button("Show changes", padding: 3.0) { }
             end
-            matrix(id: "changes", max_height: 200.0) do |m|
-              m.header "", "Table", "Records", "Fields", "Cells", ""
-              8.times do |i|
-                m.row do |r|
-                  r << CrymbleUI::Checkbox.new(text: "", checked: true,
-                    id: "chk_#{i}").as(CrymbleUI::Widget)
-                  r.text("Table number #{i}")
-                  r.text("+#{i}")
-                  r.text("+#{i}")
-                  r.text("#{i * 3}")
-                  r << CrymbleUI::Button.new("→ Shape", padding: 3.0,
-                    id: "to_shape_#{i}").as(CrymbleUI::Widget)
-                end
-              end
-            end
+            widget(CrymbleUI::VirtualMatrix.new(adapter: HistoryChangesAdapter.new, id: "changes").tap do |vm|
+              vm.shrink_to_content = true
+              vm.show_rulers = false
+              vm.max_height = 200.0
+            end)
           end
         end
       end

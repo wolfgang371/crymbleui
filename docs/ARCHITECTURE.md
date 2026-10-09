@@ -323,17 +323,28 @@ end
 One rule governs every label, number and value the library places vertically, and it is stated
 here because it is the thing three separate mechanisms used to answer differently:
 
-> **Content is CENTRED in the part of its region you can SEE, then confined to its own box.**
+> **Content is CENTRED in what the band leaves of its region - and the band takes no more of a
+> region than the region exceeds ONE LINE - then confined to its own box.**
 
 A region is the cell's own row for an ordinary cell and for a ruler number; the whole SPAN for a
 compound. That is the entire rule — no conditions, no thresholds, and no distinction between a row
 and a span:
 
 ```
-lo      = max(region.lo, band.lo)
-hi      = min(region.hi, band.hi)
+give    = max(0, region.size - hold)                     # hold: one default line's box
+lo      = band.lo clamped into [region.lo, region.lo + give]
+hi      = band.hi clamped into [region.hi - give, region.hi]
 natural = lo + (hi - lo - content) / 2       # a MULTI-LINE block anchors at lo instead
 ```
+
+`hold` is one default line's placed box (`VirtualMatrix#line_extent`, `#column_extent` for the
+column ruler on X), so it scales with zoom. A one-line row gives the band nothing: an edge - the
+panel's bottom as it shrinks, the sticky header as the rows scroll - cuts it where it sits, like its
+background (UC-5, reported 2026-09-30: the row's label used to ride its padding up as the edge cut
+it). A taller region gives exactly its excess, so its label slides until one line of it is left and
+then leaves with that line. The matrix gives a non-compound region no taller than `hold` no ink
+region at all (nothing can move it), which also keeps a multi-line value that overflows a one-line
+row where it sits at rest.
 
 It reached this form on 2026-09-11, after two days of branches that each served one field report and
 broke another. What made them look necessary was a WRONG READING of the oldest of them: "sticky"
@@ -348,9 +359,11 @@ Everything else the reports asked for falls out of the one line, rather than bei
 | behaviour | why it happens |
 |---|---|
 | a fully visible region centres plainly | the slice IS the region |
+| a one-line row cut by an edge keeps its label where it sits | it gives the band nothing (UC-5) |
 | a region taller than the band centres in the BAND | the slice is the band; it stays there however the row grows |
 | a group leaving takes its label with it, never stalling | the slice shrinks continuously; no position is ever pinned |
-| ...and the label lands on the group's last visible row | with one row left, the slice IS that row (#93-#96) |
+| ...and the label leaves with the group's last visible line | with one line left, the region gives no more (#93-#96, UC-26) |
+| resizing a cut row across one line moves its label continuously | the give grows from 0 with the excess; there is no threshold |
 | a group arriving shows its label at once | the slice grows from the far edge, the mirror of leaving (#45/#50) |
 | both edges move a label at the same rate | one moving end, so half the scroll, whichever end (#105-#108) |
 | a ruler number and its cell never part | they share a region, so they share a slice, so they share a centre |
@@ -365,13 +378,13 @@ In one expression:
 ```
 THREE STEPS, three jobs, in this order:
 
-  centred_in       where it WANTS to be   — centred in `region ∩ band`, except that a compound's
-                                            leading end yields only by its overflow past the band
+  centred_in       where it WANTS to be   — centred in what the band leaves of the region, which
+                                            keeps at least one line (`hold`) of it
   held_in_region   keep it in its REGION  — plus a floor at the band for a PINNED clone, a fact the
                                             matrix TELLS the rule (its Y box comes from
                                             StickyMath.compound_axis, so it is held while the span
-                                            scrolls); inferred from the geometry until 2026-09-11,
-                                            which misjudged 5861 samples and was right anyway
+                                            scrolls); the floor yields as the span leaves, by the
+                                            same `hold`, or the label would stall at the edge
   confine          keep it in its BOX     — the box as it is NOW, which the region's copy may not
                                             be: auto-size can re-fit a row in the same frame
 
@@ -399,8 +412,8 @@ edge 1:1 while the panel resized (#74/#75), reversed direction when a second cla
 (#69-#73), and needed a taper to hand back continuously — a taper that went slack exactly when the
 panel collapsed and dropped a label out through the bottom border (#80/#81). Clamped to a SLICE of
 its own region, content can never travel further than that region does: it moves at half the input's
-rate at most, stops when the slice stops shrinking, and leaves with its own line when the slice can
-no longer hold it. Nothing left to track, reverse, or taper. Wolfgang stated the bound himself:
+rate at most, stops when the slice is down to one line of its region, and leaves with that line.
+Nothing left to track, reverse, or taper. Wolfgang stated the bound himself:
 *"every cell should be visible as long as possible, but not scrolled more to the top or left than
 normal top/left aligned; except compound cells"* — and `slice.lo >= region.lo` is exactly that.
 
@@ -411,11 +424,11 @@ replaced a three-term formula, an arrival clause and a separate box-clipping mec
 |---|---|
 | a fully visible region centres plainly | the slice IS the region; every clamp is inert |
 | a region taller than the band centres in the BAND | the slice is the band, so its centre is the band's centre — and it stays there however the row grows, because both ends are clamped |
-| a region on its way out takes its content with it | the slice shrinks from the leading edge; when it can no longer hold the content, the content leaves with the line |
-| a region arriving from below shows its content at once | the slice shrinks from the far edge instead, the mirror of the same clause |
+| a region on its way out takes its content with it | the slice shrinks from the leading edge down to one line of the region, and the content leaves with that line |
+| a region arriving from below shows its content as its first line arrives | the slice shrinks from the far edge instead, down to that first line - the mirror of the same clause |
 | a ruler number and its cell never part | they share a region, so they share a slice, so they share a centre — whatever their glyph sizes |
 | adjacent labels never converge and stack | each is clamped into its OWN region, never into a shared band |
-| a group you can see all of leaves with its group | its slice is the whole span at the leading edge: a compound is held there only by its overflow past the band, and there is none |
+| a group you can see all of leaves with its group | its slice keeps one line of the span, so the label lands on the last line and leaves with it |
 | a group hanging off the bottom keeps moving as the panel grows | its slice grows with the panel, so its centre moves at HALF the panel's rate and settles when the whole span is on screen — never riding the edge 1:1 (#103/#104) |
 
 **Continuity is the property, not a nicety.** Swept across `region_size == band` the anchor holds a
@@ -454,17 +467,22 @@ shifted (caught by I2 on `cell:r2c`, 2026-09-08).
 **Composition with the block regimes.** When the content does not fit, the fallback is
 `vcentered_block_y`'s own answer, which top-aligns an overflowing block so line 1 — what you read
 first — is never the cut one. The holding rule therefore never overrides that property; it only ever
-applies to content small enough to be shown whole.
+applies to content small enough to be shown whole. A ROW's block is never moved above that anchor:
+the ceilings (its region's end, its box's) yield to it and it overflows at the bottom, which is the
+answer with no region at all - so a row's block does not step when an edge gives it one. A SPAN's
+block, placed by its region at rest too, stays contained (`PrimitiveBuilder#place_ink`).
 
-**What a single line does (2026-09-08).** It sits on its row's line and moves only downward, when
-that line has gone above the band. It is never pulled up off the viewport's bottom edge: a row
-leaving at the bottom clips its labels exactly as it clips its backgrounds (#74/#75, UC-5).
+**What a single line does.** In a row no taller than one line it stays where it sits and either edge
+cuts it, exactly as it cuts the row's background (UC-5): it is never pulled up off the viewport's
+bottom edge (#74/#75, and again 2026-09-30), and never pushed down into what is left of its row under
+the header (it was until 2026-10-01; #82 reversed). In a taller row it slides into view by no more
+than the row exceeds one line, then leaves with that line.
 
-**What a COMPOUND does, and why it differs.** Its label names a span that can be many times the
-viewport's height, so the middle of that span — where the label naturally sits — is routinely below
-the fold. It alone may be pulled up, as far as its span's top. Without that it simply vanishes while
-its group is plainly on screen (#80/#81: `a` dropping out through the bottom border; and I2 caught
-the same thing at y=648 against a band ending at 600).
+**What a COMPOUND does.** The same, against its SPAN — which can be many times the viewport's height,
+so the middle of that span, where the label naturally sits, is routinely below the fold. The band may
+take all of the span but one line, so the label is pulled up into view, at most to its span's top.
+Without that it simply vanishes while its group is plainly on screen (#80/#81: `a` dropping out
+through the bottom border; and I2 caught the same thing at y=648 against a band ending at 600).
 
 **The paragraph that used to be here was wrong**, and it is worth recording why: it claimed a short
 value in a tall row is held, and that this is what makes a ruler number, a row header and the value
@@ -894,8 +912,8 @@ non_white_count.should be > 0
      )
 
      # Render widgets to backend (with layer coordinate translation)
-     layer_offset_x = layer.bounds.x
-     layer_offset_y = layer.bounds.y
+     layer_offset_x = layer.content_rect.x # the render origin: the owner's content-space rect
+     layer_offset_y = layer.content_rect.y
 
      layer.widgets.each do |widget|
        widget_abs = widget.absolute_bounds
@@ -951,12 +969,12 @@ non_white_count.should be > 0
      # With parent-relative bounds:
      # - button.bounds is relative to panel (e.g., x=0, y=30)
      # - button.absolute_bounds is in window coords (e.g., x=100, y=130)
-     # - layer.bounds is absolute (panel position, e.g., x=98, y=98)
+     # - layer.content_rect is absolute (panel position, e.g., x=98, y=98) - its render origin
 
      # Calculate layer-local coordinates for rendering
      button_abs = button.absolute_bounds
-     layer_offset_x = layer.bounds.x
-     layer_offset_y = layer.bounds.y
+     layer_offset_x = layer.content_rect.x # the render origin: the owner's content-space rect
+     layer_offset_y = layer.content_rect.y
 
      button_local_x = button_abs.x - layer_offset_x
      button_local_y = button_abs.y - layer_offset_y
@@ -1167,7 +1185,6 @@ guarded by `spec/rendering/pixel_snap_spec.cr`.
 This applies to ALL `SF::Text` position assignments across the codebase:
 - `CrSFMLBackend.draw_text` — per-widget texture rendering
 - `SFMLRenderer` DrawText execution — direct-to-window primitives
-- `SFMLPaintContext.draw_text` — paint context text drawing
 
 Similarly, sprite positions for layer compositing snap via PixelSnap (sub-pixel sprite
 positioning caused ghosted text in viewport_cache layers; both the SFML and headless

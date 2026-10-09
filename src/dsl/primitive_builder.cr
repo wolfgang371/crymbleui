@@ -185,11 +185,19 @@ module CrymbleUI
     # cost of a second copy here is not a wrong pixel, it is a cell reported as NOT MOVED whose
     # cache is then never rebuilt -- the disagreement is invisible until it shows as a stale
     # rendering on screen, which is the most expensive way to learn of it.
+    #
+    # A ROW's multi-line block sits at its anchor: the ceilings (its region's end, its box's) yield to it - a block
+    # that does not fit below its anchor overflows at the BOTTOM, line 1 uncut and the padding above it kept (UC-4);
+    # no floor can bind for it (a row's region starts at its box, and only spans are pinned). That is the plain
+    # path's answer, and a row cell holds a region only at an edge, so the two must agree or the block jumps into
+    # its padding the frame an edge touches the row. Floors and ceilings are a SPAN's: a compound is placed by its
+    # region at rest too, contained.
     private def place_ink(region, content : Float64, line : Float64, top_anchored : Bool,
                           band_top : Float64) : Float64
       start = top_anchored ? region.pos + band_top : natural_in(region, content)
-      confine(held_in_region(start, region.pos, region.size, content, region.band_lo,
-        region.band_hi, line, region.pinned), content)
+      placed = confine(held_in_region(start, region.pos, region.size, content, region.band_lo,
+        region.band_hi, region.hold, line, region.pinned), content)
+      top_anchored && !region.compound ? Math.max(placed, start) : placed
     end
 
     private def remember_ink(content : Float64, line : Float64, top_anchored : Bool,
@@ -222,8 +230,9 @@ module CrymbleUI
     # `InkRegion#box` records the box as it was when the region was derived, and that can already
     # be stale: pre_render_flush derives regions, then auto-size re-fits the row SMALLER in the
     # same frame. The region's own copy then permits a position the box no longer has, which is how
-    # a label ended up 37.5px into a 36px box and clipped away (embrace I3, `0,0:a`, constant at
-    # y=425.9 while its box shrank beneath it). Ink outside the box is not drawn at all
+    # a label ended up 37.5px into a 36px box and clipped away (embrace's
+    # perspective_placement_invariants_spec, `0,0:a`, constant at y=425.9 while its box shrank
+    # beneath it; it fails again with this a no-op). Ink outside the box is not drawn at all
     # (layer_renderer.cr:1667), so this is where placement has to stop.
     private def confine(y : Float64, content : Float64) : Float64
       me = self
@@ -233,7 +242,7 @@ module CrymbleUI
       y.clamp(0.0, Math.max(0.0, h - content))
     end
 
-    # WHERE CONTENT SITS: centred in the PART OF ITS REGION YOU CAN SEE (`centred_in`).
+    # WHERE CONTENT SITS: centred in what the band leaves of its region (`centred_in`).
     #
     # A region is the cell's own row for an ordinary cell and for a ruler number, and the whole
     # SPAN for a compound, because a compound's label names a group of lines and belongs in the
@@ -241,25 +250,30 @@ module CrymbleUI
     # share a region and a content height — which is what Wolfgang asked for on 2026-09-10 after
     # two days of first-line alignment: "seems level, now, finally, but I see no vcentering at all".
     private def natural_in(r, content : Float64) : Float64
-      centred_in(r.pos, r.size, content, r.band_lo, r.band_hi)
+      centred_in(r.pos, r.size, content, r.band_lo, r.band_hi, r.hold)
     end
 
-    # WHERE CONTENT SITS, before the box has its say: CENTRED IN THE PART OF ITS REGION YOU CAN
-    # SEE. A region is the cell's own row for an ordinary cell and for a ruler number; the whole
+    # WHERE CONTENT SITS, before the box has its say: CENTRED IN WHAT THE BAND LEAVES OF ITS
+    # REGION. A region is the cell's own row for an ordinary cell and for a ruler number; the whole
     # SPAN for a compound, because a compound's label names a GROUP of lines and belongs in the
     # middle of the group. Centring in the region is what this library has always done.
     #
-    # ONE EXPRESSION, NO CASES. The region is clamped into the band at both ends and the content
-    # centred in what is left — the same arithmetic for a row and for a span, for either edge, at
-    # any size. Everything the field reports asked for is a CONSEQUENCE of it:
+    # ONE EXPRESSION, NO CASES. Each end of the region is clamped into the band, but moves in by no
+    # more than the region exceeds ONE LINE (`hold`, one default line's box: `give = size - hold`),
+    # and the content is centred in what is left — the same arithmetic for a row and for a span, for
+    # either edge, at any size. Everything the field reports asked for is a CONSEQUENCE of it:
     #
+    #   one line or less      gives nothing: content stays where it sits and the edge cuts it,
+    #                         like the cell's background (UC-5, reported 2026-09-30: a shrinking
+    #                         panel walked the last row's label up its padding)
     #   fully visible         the slice IS the region, so content sits at the region's centre
     #   taller than the band  the slice IS the band, so content sits at the band's centre and
     #                         stays there however the row grows (#97/#98)
-    #   leaving               the slice shrinks; content moves at half the scroll and never stops,
-    #                         landing on the group's last visible row (#93-#96, both halves)
+    #   leaving               the slice shrinks to one line of the region; content moves at half
+    #                         the scroll, then leaves with that line (#93-#96, both halves)
     #   arriving              the mirror of leaving, from the far edge (#45/#50)
     #   either edge           one moving end either way, so the same half-scroll rate (#105-#108)
+    #   resized across a line the give grows from 0 with the excess: no step at one line (UC-29)
     #
     # It had three branches between 2026-09-08 and 2026-09-11 — a floor at one edge only, then a
     # threshold on the span's size, then an allowance proportional to the overflow — and every one
@@ -276,12 +290,19 @@ module CrymbleUI
     # Takes RAW NUMBERS so the RULER can call it too. The ruler had its own copy of this formula
     # until 2026-09-10, and the copy is what let the two drift apart the moment the rule changed.
     protected def centred_in(pos : Float64, size : Float64, content : Float64,
-                             band_lo : Float64, band_hi : Float64) : Float64
-      hi = Math.min(pos + size, band_hi)
-      lo = Math.max(pos, band_lo)
+                             band_lo : Float64, band_hi : Float64, hold : Float64) : Float64
+      give = give_of(size, hold)
+      lo = band_lo.clamp(pos, pos + give)
+      hi = band_hi.clamp(pos + size - give, pos + size)
       lo + Math.max(0.0, (hi - lo - content) / 2.0)
     end
 
+
+    # How far an end of a region may move in for the band: by as much as the region exceeds one
+    # line. One function, because centred_in and the pinned floor below must agree on it.
+    private def give_of(size : Float64, hold : Float64) : Float64
+      Math.max(0.0, size - hold)
+    end
 
     # WHERE THE INK MAY ACTUALLY GO: `natural` (above), kept inside its own REGION.
     #
@@ -304,7 +325,7 @@ module CrymbleUI
     # exactly where the band passes one line's height (a compound's label jumped 198.5px for 1px of
     # resize at the frame the band became 14px tall, found by the sweep and by nobody looking).
     def held_in_region(natural : Float64, region_pos : Float64, region_size : Float64,
-                       content : Float64, band_lo : Float64, band_hi : Float64,
+                       content : Float64, band_lo : Float64, band_hi : Float64, hold : Float64,
                        line : Float64 = 0.0, pinned : Bool = false) : Float64
       return natural if content > band_hi - band_lo && content > line + 0.5
       # Inside its own REGION, and that is all. The BOX is `confine`'s job, which runs after this
@@ -326,7 +347,11 @@ module CrymbleUI
       # box unpinned when its span happened to fit. It produced the right placement in every one of
       # them, because the floor is inert exactly where it misclassified, which is the definition of
       # accidentally right.
-      floor = pinned ? Math.max(lo, band_lo) : lo
+      #
+      # The floor yields as the span leaves, by the same `hold` as `centred_in` - the band may take
+      # no more of the span than it exceeds one line - or a leaving label stalls at the edge while
+      # its last row goes on out (UC-26).
+      floor = pinned ? band_lo.clamp(lo, lo + give_of(region_size, hold)) : lo
       Math.min(Math.max(natural, floor), Math.max(floor, hi - content))
     end
 

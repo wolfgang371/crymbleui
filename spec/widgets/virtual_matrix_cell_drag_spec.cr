@@ -143,7 +143,7 @@ describe "VirtualMatrix cell drag-and-drop" do
         renderer.render_frame(app)
 
         # A drop whose payload originates from a DIFFERENT owner.
-        foreign = CrymbleUI::CellDragData.new(0, 0, "R0C0", owner_key: "shape-B")
+        foreign = CrymbleUI::CellDragData.new(0, 0, "R0C0", source_path: "elsewhere", owner_key: "shape-B")
         matrix.on_drop(foreign, CrymbleUI::Vec2.new(80.0, 150.0))
 
         captured.should_not be_nil
@@ -170,10 +170,31 @@ describe "VirtualMatrix cell drag-and-drop" do
         matrix.layout(constraints, CrymbleUI::Vec2.zero)
         renderer.render_frame(app)
 
-        same = CrymbleUI::CellDragData.new(0, 0, "R0C0", owner_key: "shape-A")
+        same = CrymbleUI::CellDragData.new(0, 0, "R0C0", source_path: "elsewhere", owner_key: "shape-A")
         matrix.on_drop(same, CrymbleUI::Vec2.new(80.0, 150.0))
 
         handler_called.should be_false
         adapter.move_calls.size.should eq(1)
+    end
+
+    # on_drop gates itself as accepts_drop? does - a direct call cannot hand a cross handler what a drag would
+    # be refused: an untagged cell has no owner to route to. Mutation: on_drop without the accepts_drop? gate.
+    it "hands a direct drop of an untagged cell to no cross handler" do
+        renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+        app = TestApp.new
+        adapter = CellDragTestAdapter.new
+        matrix = CrymbleUI::VirtualMatrix.new(adapter: adapter, id: "direct_foreign_test")
+        matrix.drag_owner_key = "shape-A"
+        handled = false
+        matrix.cross_drop_handler = ->(_d : CrymbleUI::CellDragData, _r : Int32, _c : Int32) { handled = true; nil }
+        app.root_widget = matrix
+        app.build_tree
+        matrix.layout(CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0)), CrymbleUI::Vec2.zero)
+        renderer.render_frame(app)
+
+        untagged = CrymbleUI::CellDragData.new(0, 0, "R0C0", source_path: "another/grid")
+        matrix.on_drop(untagged, CrymbleUI::Vec2.new(80.0, 150.0))
+        handled.should be_false
+        adapter.move_calls.should be_empty
     end
 end

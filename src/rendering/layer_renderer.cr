@@ -1,5 +1,6 @@
 require "../core/types"
 require "../core/layer"
+require "../core/composite_order"
 require "../core/widget"
 require "../core/assert"
 require "./draw_primitive"
@@ -12,6 +13,14 @@ module CrymbleUI
   # Contains ALL layer handling: collection, rendering, compositing
   # Renderers just implement backend creation and compositing specifics
   module LayerRenderer
+    # A window-direct draw has no clip stack: checked over the whole list BEFORE anything is drawn, so
+    # a rejected list leaves no partial frame. Shared, so the headless renderer refuses what SFML does.
+    protected def reject_window_direct_clips(primitives : Array(DrawPrimitive)) : Nil
+      if clip = primitives.find { |p| p.is_a?(PushClip | PopClip) }
+        raise WindowDirectClipError.new(clip)
+      end
+    end
+
     # Profile data collection - use module-level storage accessible from both instance and class methods
     # Crystal class variables in modules have different scopes for instance vs class methods!
     # Solution: use class methods for all access to ensure single storage location
@@ -37,11 +46,13 @@ module CrymbleUI
     class_property frame_empty_leaf_primitives : Int32 = 0         # leaf widgets with empty primitives (potential bug)
     class_property frame_blit_plan_count : Int32 = 0              # sticky layers rendered via blit-plan fast path
     class_property frame_boundary_cells_invalidated : Int32 = 0   # cells at buffer boundary invalidated after blit-shift
-    class_property frame_layer_recollect_count : Int32 = 0       # times collect_layers was called (expensive O(n) tree walk)
+    class_property frame_layer_recollect_count : Int32 = 0       # times the composite order was walked (an O(widgets) tree walk)
+    class_property frame_in_loop_recollect_count : Int32 = 0     # of those, re-collects after an owner's flush changed the composite set
     # viewport-cache recenter instrumentation (comparative perf gate — measure the delta, not an absolute):
     class_property frame_full_recenter_count : Int32 = 0          # viewport_cache recenters with NO overlap (clear + full re-render)
     class_property frame_blit_shift_count : Int32 = 0             # viewport_cache recenters via blit-shift (overlap kept, edges re-rendered)
     class_property frame_realloc_count : Int32 = 0               # layer backends reallocated (buffer grow — the storm we killed)
+    class_property frame_realloc_kept_count : Int32 = 0          # of those, reallocs that carried an old surface's pixels over
     class_property collect_widgets_visits : Int32 = 0            # perf-audit: nodes visited by collect_all_widgets_recursive (O(total widgets) per rendered layer)
     class_property rendered_widgets : Array(String) = [] of String # Widget names rendered this frame
     class_property rendered_layer_ids : Array(String) = [] of String # Layer IDs rendered this frame
@@ -68,9 +79,11 @@ module CrymbleUI
       @@frame_blit_plan_count = 0
       @@frame_boundary_cells_invalidated = 0
       @@frame_layer_recollect_count = 0
+      @@frame_in_loop_recollect_count = 0
       @@frame_full_recenter_count = 0
       @@frame_blit_shift_count = 0
       @@frame_realloc_count = 0
+      @@frame_realloc_kept_count = 0
       @@rendered_widgets.clear
       @@rendered_layer_ids.clear
       @@phase_layout_ms = 0.0
@@ -84,6 +97,10 @@ module CrymbleUI
     # rendering it is invisible work. With ten cascaded panels open, nine of them are covered and the
     # frame spends most of its time drawing pixels nobody will ever look at: measured 171 -> 71 ms
     # per interaction on a ten-Shape demo, with 9 of 93 layers rendering instead of 81.
+    #
+    # It skips PAINTING only. State the next input reads - a grid's rebuilt cells and editor - is not
+    # postponed with it: App#finish_frame applies that for every widget that announced it, painted or
+    # not (a covered grid once kept it pending past the input barrier, and lost the next keystroke).
     #
     # Safe by construction, and unlike a "defer the non-topmost panels" scheme it never postpones
     # anything VISIBLE:
@@ -125,26 +142,144 @@ module CrymbleUI
         (target.x + target.width) <= (ox + ow) && (target.y + target.height) <= (oy + oh)
     end
 
-    # `layers` arrives in composite order (sort_layers_for_compositing), so a HIGHER index draws on
+    # `layers` arrives in composite order (Layer.composite_order), so a HIGHER index draws on
     # top of a lower one. O(layers^2) rectangle tests — a few thousand at ten Shapes, microseconds
-    # against a frame measured in tens of milliseconds.
+    # against a frame measured in tens of milliseconds. Each layer counts as what it SHOWS (shown_rect: its
+    # bounds cut by its clip) - a rect credited with covering what its clip cut away would freeze the layer
+    # behind it; a layer that shows nothing is hidden too (the one skip path).
     private def occluded_layers(layers : Array(Layer)) : Set(Layer)
+      memo = Hash(Widget, Rect?).new.compare_by_identity
+      shown = layers.map { |layer| shown_rect(layer, memo) }
       hidden = Set(Layer).new
       layers.each_with_index do |layer, i|
-        next if layer.bounds.width <= 0 || layer.bounds.height <= 0
+        # showing nothing is not being covered: the render loop asks that at the layer's turn, after the flushes
+        # before it may have revealed it
+        next unless rect = shown[i]
         ((i + 1)...layers.size).each do |j|
           above = layers[j]
           # Only a fully opaque background hides what is behind it; anything translucent composites
           # the lower layer through itself.
           next unless above.background_color.a == 255_u8
-          next if above.bounds.width <= 0 || above.bounds.height <= 0
-          if covers?(above.bounds, layer.bounds)
+          next unless above_rect = shown[j]
+          if covers?(above_rect, rect)
             hidden << layer
             break
           end
         end
       end
       hidden
+    end
+
+    # Whether a layer above the one at `index` in `layers` covers it NOW (the rects after the flushes so far).
+    private def covered?(layers : Array(Layer), index : Int32) : Bool
+      memo = Hash(Widget, Rect?).new.compare_by_identity
+      return false unless rect = shown_rect(layers[index], memo)
+      ((index + 1)...layers.size).any? do |j|
+        above = layers[j]
+        above.background_color.a == 255_u8 && (above_rect = shown_rect(above, memo)) && covers?(above_rect, rect)
+      end
+    end
+
+    # The frame's layer list, collected: the composite order, the drag ghost above everything, and the drop
+    # highlight in its target's place. Cached for the frames that follow; the generation lets the highlight's
+    # painting-layer set know it is stale.
+    private def collect_frame_layers(root : Widget, ghost : Layer?, highlight : Layer?) : Array(Layer)
+      LayerRenderer.frame_layer_recollect_count += 1
+      @collect_generation &+= 1
+      collected = profile("composite_order") { Layer.composite_order(root) }
+      ghost.try { |layer| collected << layer }
+      @cached_layers = collected
+      @layers_need_recollect = false
+      @last_order_version = Layer.order_version
+      with_drop_highlight(collected, highlight)
+    end
+
+    # Gives each of `layers` a backend if it has none, and acts on its size changes from the pull-based bounds.
+    private def prepare_layers(layers : Array(Layer)) : Nil
+      layers.each do |layer|
+        if layer.backend.nil?
+          # Viewport_cache layers need larger buffer (viewport + cache extent)
+          width, height = if layer.viewport_cache
+                            layer.calculate_buffer_size_with_cache
+                          else
+                            layer.calculate_backend_size(layer.size.width, layer.size.height)
+                          end
+          ensure_layer_backend(layer, width, height)
+        end
+      end
+
+      # Auto-detect size changes from pull-based bounds
+      layers.each do |layer|
+        if layer.size_changed?
+          if layer.viewport_cache
+            # A viewport_cache buffer is over-allocated to viewport + 2×cache_extent. A grow that still
+            # fits the buffer keeps its backend: the margin cells are already rendered, and the per-frame
+            # recenter (handle_viewport_cache_scroll, which re-positions buffer_origin so the viewport fits)
+            # + per-slot skip fill any newly-visible cells selectively. Nil-ing on EVERY size change (the
+            # old behaviour) re-allocated the buffer and re-blit every visible cell each grow-frame — the
+            # ScrollView resize storm. Only a viewport too BIG for the buffer needs a new one; mere
+            # repositioning is the recenter's job.
+            unless layer.backend_fits_bounds?
+              layer.backend = nil # viewport outgrew the buffer → a bigger backend is genuinely needed
+              layer.mark_needs_clear_and_render
+            end
+          elsif !layer.backend_fits_bounds?
+            # Backend too small for new bounds — need clear after backend recreation
+            layer.mark_needs_clear_and_render
+          elsif layer.clear_on_grow && layer.grew?
+            # A CachePolicy::Never partial-painter (declared via clear_on_grow, e.g. a cursor
+            # highlight band) leaves stale pixels in the newly-exposed area on a grow even when the
+            # backend still fits. Clear so it repaints clean. Generic replacement for the former
+            # per-widget guard in VirtualMatrix#setup_cursor_overlay_layer.
+            layer.mark_needs_clear_and_render
+          elsif layer.grew? && layer.state != WidgetState::NeedsLayout
+            # a within-buffer grow uncovers cache-MISS content — a control the grow exposed is
+            # stationary (not dirty) and the ELSE used to do nothing, so it stayed blank until mouse-up.
+            # Service the miss SELECTIVELY (clip the cache-HIT region as before). Skipped on NeedsLayout
+            # (a full relayout/render already repaints everything — the strip included).
+            repaint_exposed_on_grow(layer)
+          end
+          # Non-viewport-cache within buffer, no growth: no action needed. Already-dirty widgets
+          # handle the visual update via selective rendering.
+        end
+      end
+    end
+
+    # What of `layer` shows, in window space: its bounds cut by its owner's ancestor_clip - or nil when
+    # nothing does (empty, clipped away).
+    protected def shown_rect(layer : Layer, memo : Hash(Widget, Rect?)? = nil) : Rect?
+      bounds = layer.bounds
+      return nil if bounds.width <= 0 || bounds.height <= 0
+      clip = layer.owner_widget.try(&.ancestor_clip(memo))
+      clip ? bounds.intersection(clip) : bounds
+    end
+
+    # Where a layer is composited, in whole device pixels: `width` x `height` from (`src_x`, `src_y`) in its
+    # buffer to (`dest_x`, `dest_y`) on the window - or nil when its clip leaves nothing. An edge its clip does
+    # not reach keeps the unclipped arithmetic (dest = snap(bounds), size = cover(extent)); a clipped left/top
+    # edge moves both the destination and the sample; a clipped right/bottom edge shortens the extent. The one
+    # rule for the SFML composite, the headless composite and capture_composited_frame. The viewport-cache
+    # sample is asserted unclipped, before any offset.
+    record CompositeRegion, dest_x : Int32, dest_y : Int32, src_x : Int32, src_y : Int32, width : Int32, height : Int32
+
+    protected def composite_region(layer : Layer, clip : Rect?, buffer_width : Int32, buffer_height : Int32) : CompositeRegion?
+      bounds = layer.bounds
+      x0 = PixelSnap.snap(bounds.x).to_i
+      y0 = PixelSnap.snap(bounds.y).to_i
+      w0 = PixelSnap.cover(bounds.width)
+      h0 = PixelSnap.cover(bounds.height)
+      src_x, src_y = layer.viewport_cache ? layer.viewport_sample_origin(buffer_width, buffer_height, w0, h0) : {0, 0}
+      layer.assert_composite_fits!(src_x, src_y) if layer.viewport_cache
+      left, top, right, bottom = x0, y0, x0 + w0, y0 + h0
+      if c = clip
+        return nil if c.width <= 0 || c.height <= 0 # an empty clip shows nothing (its corner may lie inside)
+        left = {left, PixelSnap.snap(c.x).to_i}.max
+        top = {top, PixelSnap.snap(c.y).to_i}.max
+        right = {right, x0 + Math.max(0, PixelSnap.cover(c.right - bounds.x))}.min if bounds.x + w0 > c.right
+        bottom = {bottom, y0 + Math.max(0, PixelSnap.cover(c.bottom - bounds.y))}.min if bounds.y + h0 > c.bottom
+      end
+      return nil if right <= left || bottom <= top
+      CompositeRegion.new(left, top, src_x + left - x0, src_y + top - y0, right - left, bottom - top)
     end
 
     # Simple profiling helper - wraps a block with timing
@@ -175,21 +310,60 @@ module CrymbleUI
       File.write("/tmp/crymble_profile.txt", profile_data.join("\n"))
     end
 
+    # THE FAILURE RUN - consecutive frames that raised and were recovered from, counted the same way by both
+    # renderers. The user is told at its first frame and once more at its FRAME_FAILURES_TO_REPEAT-th (never every
+    # frame), and the window title says so while it lasts; a frame that completes ends it. A failing frame does not
+    # trigger the next one - it recurs only at input or timer rate - so nothing here throttles.
+    FRAME_FAILURES_TO_REPEAT = 10
+    DISPLAY_ERROR_TITLE      = " - display error"
+
+    @frame_failures = 0
+    @failure_to_report : String? = nil
+
+    # A frame raised `ex` and was recovered from.
+    private def note_frame_failure(ex : Exception) : Nil
+      @frame_failures += 1
+      @failure_to_report = case @frame_failures
+                           when 1                        then "Display error: #{ex.message}"
+                           when FRAME_FAILURES_TO_REPEAT then "Display error keeps recurring: #{ex.message} - please save your work"
+                           end
+    end
+
+    private def note_frame_completed : Nil
+      @frame_failures = 0
+    end
+
+    # At the frame's tail, after its stamp: what the run has to tell goes to the app now, so the marks its handler
+    # makes (embrace: the status bar text) trigger the frame that paints them.
+    private def report_frame_failure(app : App) : Nil
+      if message = @failure_to_report
+        @failure_to_report = nil
+        app.report_display_error(message)
+      end
+    end
+
+    # The title the window shows: the root window's, marked while a failure run lasts - the title is drawn outside
+    # the frame, so it shows when the frame that fails is the one that would paint the status bar.
+    private def title_to_apply(app : App) : String?
+      title = app.root.as?(Window).try(&.title) || return nil
+      @frame_failures > 0 ? title + DISPLAY_ERROR_TITLE : title
+    end
+
     # Abstract methods that renderers must implement
-    abstract def ensure_layer_backend(layer : Layer, width : Int32, height : Int32)
-    abstract def composite_layer_to_window(layer : Layer)
+    # A fresh surface for a layer (the renderer's own kind); assigning it is the caller's.
+    abstract def create_layer_backend(width : Int32, height : Int32) : RenderBackend
+
+    # Give `layer` a fresh surface (releasing any it had) and render it in full next.
+    def ensure_layer_backend(layer : Layer, width : Int32, height : Int32) : Nil
+      layer.backend = create_layer_backend(width, height)
+      layer.reset_first_render
+    end
+    # `clip`: the window rect the layer shows within (its owner's ancestor_clip), nil for none - see composite_region
+    abstract def composite_layer_to_window(layer : Layer, clip : Rect?)
     abstract def create_widget_backend(width : Int32, height : Int32) : RenderBackend
 
     # Instrumentation hooks (optional - TestRenderer implements these)
     def increment_compositor_call_count
-      # Default: no-op (only TestRenderer tracks this)
-    end
-
-    def increment_compositor_skip_count
-      # Default: no-op (only TestRenderer tracks this)
-    end
-
-    def increment_render_layer_count
       # Default: no-op (only TestRenderer tracks this)
     end
 
@@ -201,8 +375,8 @@ module CrymbleUI
     # parent chain from the owner widget; if any ancestor has zero bounds, the
     # layer is hidden and should not be composited.
     private def valid_layer_dimensions?(layer : Layer) : Bool
-      return false unless layer.bounds.width > 0 && layer.bounds.height > 0 &&
-        layer.bounds.width.finite? && layer.bounds.height.finite?
+      size = layer.size
+      return false unless size.width > 0 && size.height > 0 && size.width.finite? && size.height.finite?
       if owner = layer.owner_widget
         return owner.ancestry_bounds_valid?
       end
@@ -254,12 +428,18 @@ module CrymbleUI
     # Layer collection cache: avoids O(widget_tree) traversal on every frame.
     # Invalidated when layout runs (which may add/remove layers).
     # Exposed for the layer-discovery invariant guard (spec/rendering/layer_discovery_spec):
-    # the post-collect/post-sort list actually iterated by the render + composite loops.
+    # the post-collect/post-sort list the render + composite loops iterate - with, during a drag,
+    # the drop highlight inserted into a per-frame copy (with_drop_highlight).
     getter cached_layers : Array(Layer)? = nil
     @layers_need_recollect : Bool = true
     @cached_ghost_layer : Layer? = nil
-    @cached_highlight_layer : Layer? = nil
     @last_overlay_version : Int32 = 0
+    @last_order_version : Int32 = 0
+    @collect_generation : Int32 = 0 # bumped per re-collect: the layer set may have changed
+    # The layers painting the drop highlight's anchor, for {anchor, collect generation}
+    @painting_anchor : Widget? = nil
+    @painting_generation : Int32 = -1
+    @painting_layers = Set(Layer).new
 
     # Invalidate the collected-layers cache. Call after layout or when the
     # layer set may have changed (zoom, panel add/remove, etc.).
@@ -319,18 +499,18 @@ module CrymbleUI
     end
 
     # Render all layers for a widget tree (called by render_frame)
-    # ghost_layer: optional drag ghost layer to include in rendering
-    # highlight_layer: optional drop zone highlight layer
+    # ghost_layer: optional drag ghost layer, composited above everything
+    # highlight_layer: optional drop zone highlight layer, composited in its anchor's place or not at all
+    #   (with_drop_highlight)
     def render_all_layers(root_widget : Widget, ghost_layer : Layer? = nil, highlight_layer : Layer? = nil)
       {% if flag?(:cache_validation) %}
         CacheValidation.increment_frame!
       {% end %}
 
-      # Invalidate cache if ghost/highlight layer presence changed
-      if ghost_layer != @cached_ghost_layer || highlight_layer != @cached_highlight_layer
+      # Invalidate cache if ghost layer presence changed
+      if ghost_layer != @cached_ghost_layer
         @layers_need_recollect = true
         @cached_ghost_layer = ghost_layer
-        @cached_highlight_layer = highlight_layer
       end
 
       # Invalidate cache if overlay set changed (popup added/removed)
@@ -342,40 +522,17 @@ module CrymbleUI
         end
       end
 
-      # Collect layers (cached unless invalidated)
+      # A boundary re-z'd (a panel raised) re-orders without a layout
+      @layers_need_recollect = true if Layer.order_version != @last_order_version # collect_frame_layers notes it
+
+      # Collect layers (cached unless invalidated), in composite order; the drag ghost above everything
       layers = if @layers_need_recollect
-        LayerRenderer.frame_layer_recollect_count += 1
-        collected = profile("collect_layers") { collect_layers(root_widget) }
-
-        # Add highlight layer if present (for drop zone feedback)
-        if highlight = highlight_layer
-          collected << highlight
-        end
-
-        # Add ghost layer if present (for drag-and-drop preview)
-        if ghost = ghost_layer
-          collected << ghost
-        end
-
-        # Layers are distinct by construction: each_owned_layer yields auxiliaries
-        # only (disjoint from the primary `layer`), overlays live on Window's separate
-        # list (not `children`), and every layer is a unique registry object. The
-        # layer_discovery_spec asserts it (no-dup + aux ∩ primary = ∅) — so a
-        # double-publish fails loudly rather than being silently absorbed here.
-
-        # Sort layers: group by parent panel z-index, then by layer z-index within panel
-        # This prevents cross-panel layer interleaving (e.g., ScrollView from panel_1
-        # appearing above panel_2's content)
-        sort_layers_for_compositing(collected)
-
-        @cached_layers = collected
-        @layers_need_recollect = false
-        collected
-      else
-        @cached_layers.not_nil!
-      end
-
-      # Instrumentation: track total layers (use explicit module access for correct scoping)
+                 collect_frame_layers(root_widget, ghost_layer, highlight_layer)
+               else
+                 # The frame's list - every loop below iterates it, so the highlight gets a backend, is
+                 # size-checked, rendered (its clear-and-render mark consumed) and composited like any layer
+                 with_drop_highlight(@cached_layers.not_nil!, highlight_layer)
+               end
       LayerRenderer.frame_layers_total = layers.size
 
       {% if flag?(:DEBUG_RENDER) %}
@@ -389,95 +546,93 @@ module CrymbleUI
         end
       {% end %}
 
-      # Ensure all collected layers have backends (even if they don't need rendering yet)
-      # Tests expect to access layer.backend after render_frame
-      layers.each do |layer|
-        if layer.backend.nil?
-          # Viewport_cache layers need larger buffer (viewport + cache extent)
-          width, height = if layer.viewport_cache
-                            layer.calculate_buffer_size_with_cache
-                          else
-                            layer.calculate_backend_size(layer.bounds.width, layer.bounds.height)
-                          end
-          ensure_layer_backend(layer, width, height)
-        end
-      end
 
-      # Auto-detect size changes from pull-based bounds
-      layers.each do |layer|
-        if layer.size_changed?
-          if layer.viewport_cache
-            # A viewport_cache buffer is over-allocated to viewport + 2×cache_extent. A grow that still
-            # fits the buffer keeps its backend: the margin cells are already rendered, and the per-frame
-            # recenter (handle_viewport_cache_scroll, which re-positions buffer_origin so the viewport fits)
-            # + per-slot skip fill any newly-visible cells selectively. Nil-ing on EVERY size change (the
-            # old behaviour) re-allocated the buffer and re-blit every visible cell each grow-frame — the
-            # ScrollView resize storm. Only a viewport too BIG for the buffer needs a new one; mere
-            # repositioning is the recenter's job.
-            unless layer.backend_fits_bounds?
-              layer.backend = nil # viewport outgrew the buffer → a bigger backend is genuinely needed
-              layer.mark_needs_clear_and_render
-            end
-          elsif !layer.backend_fits_bounds?
-            # Backend too small for new bounds — need clear after backend recreation
-            layer.mark_needs_clear_and_render
-          elsif layer.clear_on_grow && layer.grew?
-            # A CachePolicy::Never partial-painter (declared via clear_on_grow, e.g. a cursor
-            # highlight band) leaves stale pixels in the newly-exposed area on a grow even when the
-            # backend still fits. Clear so it repaints clean. Generic replacement for the former
-            # per-widget guard in VirtualMatrix#setup_cursor_overlay_layer.
-            layer.mark_needs_clear_and_render
-          elsif layer.grew? && layer.state != WidgetState::NeedsLayout
-            # a within-buffer grow uncovers cache-MISS content — a control the grow exposed is
-            # stationary (not dirty) and the ELSE used to do nothing, so it stayed blank until mouse-up.
-            # Service the miss SELECTIVELY (clip the cache-HIT region as before). Skipped on NeedsLayout
-            # (a full relayout/render already repaints everything — the strip included).
-            repaint_exposed_on_grow(layer)
-          end
-          # Non-viewport-cache within buffer, no growth: no action needed. Already-dirty widgets
-          # handle the visual update via selective rendering.
-        end
-      end
+      # Ensure all collected layers have backends (even if they don't need rendering yet) - tests expect to
+      # access layer.backend after render_frame - and act on size changes from the pull-based bounds
+      prepare_layers(layers)
 
-      # Render each layer that needs it
+      # Render each layer that needs it - each layer is TURNED once, in composite order. An owner's flush (in
+      # its render_layer) may change the composite set: a grid attaching cells whose subtrees own layers bumps
+      # Layer.order_version. The list is then re-collected and the walk goes on over every layer not yet
+      # visited, WHEREVER it sorts - an owner with several layers (a grid: content, cursor and drag overlays)
+      # can flush at a later layer's turn - with the new layers prepared and occlusion re-decided.
       rendered_count = 0
       perf_layers = ENV["CRYMBLE_PERF"]? == "1" # per-layer render-time breakdown (diagnostic; same flag as the [PERF] line)
       hidden_layers = occluded_layers(layers)
       LayerRenderer.frame_layers_occluded = hidden_layers.size
+      # -Dverify_bounds: where each rendered layer showed after its turn - a later flush moving it would composite
+      # it where its render did not look (the order argument: an owner's flush moves only what comes after it)
+      {% if flag?(:verify_bounds) %} turn_regions = Hash(Layer, Rect?).new.compare_by_identity {% end %}
+      visited = Set(Layer).new
+      skipped = [] of Layer # hidden at their turn while needing a render: re-asked once the flushes are done
+      retried = Set(Layer).new
+      flushed_after_skip = false # a render (and so a flush) ran after a skip: only then can a skip be stale
 
       profile("render_layers") do
-        layers.each do |layer|
-          # A viewport_cache layer is version-keyed: it re-renders its O(visible) body only when its
-          # CONTENT changed (scroll / cell content / reflow / resize) — NOT when only its composite
-          # POSITION moved. A WindowPanel drag bumps position_rev alone, and the unconditional composite
-          # below re-blits the cached buffer at the pulled bounds, so re-running the body on a move is
-          # pure waste (it was the maximized-drag CPU spike). viewport_body_stale? KEEPS the push gate
-          # (needs_render?/needs_clear/size/resize_shift) so the resize blit-shift + recenter paths —
-          # which signal before render_layer runs them — are never skipped. Non-viewport_cache layers
-          # keep the plain push gate (their pull migration is a later stage).
-          should_render = layer.viewport_cache ? layer.viewport_body_stale? : layer.needs_render?
-          if should_render && hidden_layers.includes?(layer)
-            # The mark survives for whenever this layer is revealed — but its per-widget dirty SET
-            # must not. @dirty_widgets is only emptied by clear_render_state, which lives inside
-            # render_layer, so a layer that never renders accumulates every widget ever marked on it
-            # and pins whole discarded generations: measured 28 -> 90 MB of heap over a few hundred
-            # rebuilds, while GPU memory fell. Emptying it is also the semantically right answer,
-            # since an empty set means "all dirty" (Layer#widget_dirty?) and a layer that has been
-            # invisible for a while should repaint wholesale when it comes back. Done WITHOUT the
-            # mark_needs_* helpers on purpose: those bump the revs, which would move the render
-            # trigger every frame and undo the saving.
-            layer.dirty_widgets.clear
-            next
-          end
-          if should_render
+        loop do
+          index = 0
+          while index < layers.size
+            layer = layers[index]
+            index += 1
+            next if visited.includes?(layer)
+            visited << layer
+            # A viewport_cache layer is version-keyed: it re-renders its O(visible) body only when its
+            # CONTENT changed (scroll / cell content / reflow / resize) — NOT when only its composite
+            # POSITION moved. A WindowPanel drag bumps position_rev alone, and the unconditional composite
+            # below re-blits the cached buffer at the pulled bounds, so re-running the body on a move is
+            # pure waste (it was the maximized-drag CPU spike). viewport_body_stale? KEEPS the push gate
+            # (needs_render?/needs_clear/size/resize_shift) so the resize blit-shift + recenter paths —
+            # which signal before render_layer runs them — are never skipped. Non-viewport_cache layers
+            # keep the plain push gate (their pull migration is a later stage).
+            should_render = layer.viewport_cache ? layer.viewport_body_stale? : layer.needs_render?
+            # Hidden: covered (decided before the loop, and RE-ASKED here, after the flushes of the layers before
+            # it), or showing nothing NOW - so a layer a flush reveals is painted in the frame it appears
+            if should_render && ((hidden_layers.includes?(layer) && covered?(layers, index - 1)) || shown_rect(layer).nil?)
+              # The mark survives for whenever this layer is revealed — but its per-widget dirty SET
+              # must not. @dirty_widgets is only emptied by clear_render_state, which lives inside
+              # render_layer, so a layer that never renders accumulates every widget ever marked on it
+              # and pins whole discarded generations: measured 28 -> 90 MB of heap over a few hundred
+              # rebuilds, while GPU memory fell. Emptying it is also the semantically right answer,
+              # since an empty set means "all dirty" (Layer#widget_dirty?) and a layer that has been
+              # invisible for a while should repaint wholesale when it comes back. Done WITHOUT the
+              # mark_needs_* helpers on purpose: those bump the revs, which would move the render
+              # trigger every frame and undo the saving.
+              layer.dirty_widgets.clear
+              skipped << layer
+              next
+            end
+            next unless should_render
             LayerRenderer.frame_layers_needing_render += 1 # Instrumentation
             LayerRenderer.rendered_layer_ids << layer.id
             layer_start = Time.instant
+            version = Layer.order_version
+            flushed_after_skip = true unless skipped.empty?
             render_layer(layer)
+            {% if flag?(:verify_bounds) %} turn_regions[layer] = shown_rect(layer) {% end %}
             layer_ms = (Time.instant - layer_start).total_milliseconds
             STDERR.puts "  [LAYER] #{layer_ms.round(1)}ms #{layer.id}" if perf_layers && layer_ms > 0.3
             rendered_count += 1
+            next if Layer.order_version == version
+            LayerRenderer.frame_in_loop_recollect_count += 1
+            before = layers.to_set
+            layers = collect_frame_layers(root_widget, ghost_layer, highlight_layer)
+            prepare_layers(layers.reject { |collected| before.includes?(collected) })
+            hidden_layers = occluded_layers(layers)
+            index = 0 # every layer not yet visited gets its turn, wherever it sorts
           end
+          # A layer skipped as covered may have been uncovered by a flush that ran AFTER its turn (an occluder
+          # sorts after what it covers): re-asked against the final rects, it gets a turn now - once.
+          break unless flushed_after_skip
+          flushed_after_skip = false
+          late = skipped.select do |layer|
+            layers.includes?(layer) && !retried.includes?(layer) && shown_rect(layer) && !covered?(layers, layers.index!(layer))
+          end
+          break if late.empty?
+          late.each do |layer|
+            retried << layer
+            visited.delete(layer)
+          end
+          skipped.clear
         end
       end
 
@@ -491,10 +646,18 @@ module CrymbleUI
       profile("composite") do
         increment_compositor_call_count # Instrumentation
         clear_window_background
+        clips = Hash(Widget, Rect?).new.compare_by_identity # the composite phase's clip walk, shared
         layers.each do |layer|
           # Skip layers whose owner widget is hidden (e.g., closed WindowPanel)
           next if layer.owner_widget.try(&.skip_render?)
-          composite_layer_to_window(layer) if valid_layer_dimensions?(layer)
+          next unless valid_layer_dimensions?(layer)
+          clip = layer.owner_widget.try(&.ancestor_clip(clips))
+          {% if flag?(:verify_bounds) %}
+            if turn_regions.has_key?(layer) && (now = shown_rect(layer, clips)) != (then = turn_regions[layer])
+              raise LayerSpaceError.new("layer #{layer.id} moved after its turn: rendered showing #{then}, composited showing #{now}")
+            end
+          {% end %}
+          composite_layer_to_window(layer, clip)
         end
       end
       LayerRenderer.phase_composite_ms = (Time.instant - composite_start).total_milliseconds
@@ -503,35 +666,69 @@ module CrymbleUI
     # Clear window to background color (renderer-specific)
     abstract def clear_window_background
 
+    # `layers` with the drop highlight in its target's place: directly after the LAST layer that paints the
+    # target (Layer#composite_anchor), so whatever is composited over the target - a panel in front, a
+    # sticky band, a popup - is over the wash too, and the target's own layers are under it. A copy, per
+    # frame: the cached list never holds the highlight, so a new target re-collects and re-sorts nothing.
+    # While no layer of the frame paints the target (it left the tree, or was not collected) the highlight
+    # is composited nowhere - appended on top, it would wash over what covers the target.
+    private def with_drop_highlight(layers : Array(Layer), highlight : Layer?) : Array(Layer)
+      unless highlight && (anchor = highlight.composite_anchor)
+        forget_painting_layers if @painting_anchor # let go of the last target's widgets and layers
+        return layers
+      end
+      painting = painting_layers(anchor)
+      last = layers.rindex { |layer| painting.includes?(layer) } || return layers
+      layers.dup.insert(last + 1, highlight)
+    end
+
+    # The layers that paint `anchor`: the one it is painted into (Widget#painting_layer - a sticky band for an
+    # anchor in a header cell) and every layer its subtree owns, primary and auxiliary. Walked once per anchor
+    # and layer set (a re-collect), not per frame. Window overlays are not part of a subtree: a target in a
+    # popup is painted into the popup's layer.
+    private def painting_layers(anchor : Widget) : Set(Layer)
+      unless anchor.same?(@painting_anchor) && @painting_generation == @collect_generation
+        forget_painting_layers
+        anchor.painting_layer.try { |layer| @painting_layers << layer }
+        anchor.each_layer_in_subtree { |layer| @painting_layers << layer }
+        @painting_anchor = anchor
+        @painting_generation = @collect_generation
+      end
+      @painting_layers
+    end
+
+    private def forget_painting_layers : Nil
+      @painting_anchor = nil
+      @painting_layers.clear
+    end
+
     # Render a layer to its backend buffer
     private def render_layer(layer : Layer)
       LayerRenderer.frame_layer_count += 1 # Instrumentation
 
       # Validation (Option C): Skip layers with invalid dimensions
       return unless valid_layer_dimensions?(layer)
+      size = layer.size
 
       # Ensure layer has backend of correct size
       # Viewport_cache layers need larger buffer (viewport + cache extent)
       width, height = if layer.viewport_cache
                         layer.calculate_buffer_size_with_cache
                       else
-                        layer.calculate_backend_size(layer.bounds.width, layer.bounds.height)
+                        layer.calculate_backend_size(size.width, size.height)
                       end
 
-      if layer.backend_needs_resize?(layer.bounds.width, layer.bounds.height)
+      if layer.backend_needs_resize?(size.width, size.height)
         LayerRenderer.frame_realloc_count += 1 # buffer realloc (kept-buffer resize should keep this ~0)
-        # Save old backend before resizing to preserve cached content
-        old_backend = layer.backend
-        ensure_layer_backend(layer, width, height)
-
-        # Copy old cached pixels to new backend (GPU→GPU blit, very fast)
-        # This preserves all cached widget content, avoiding mass re-render
-        if old_backend && (new_backend = layer.backend)
+        # Create, carry the old pixels over (GPU→GPU blit), THEN assign - which releases the old surface, so it
+        # is read before it is gone. first_render is reset as for any new surface: the next render is a full one.
+        new_backend = create_layer_backend(width, height)
+        if old_backend = layer.backend
           new_backend.blit(old_backend, 0, 0)
+          LayerRenderer.frame_realloc_kept_count += 1
         end
-
-        # DON'T reset first_render - old content is preserved
-        # Selective rendering will handle only newly visible areas
+        layer.backend = new_backend
+        layer.reset_first_render
       end
 
       return unless backend = layer.backend # Skip if no backend assigned
@@ -542,10 +739,15 @@ module CrymbleUI
       # after the blit (e.g., CachePolicy::Never ruler widgets that need fresh content).
       if plan = layer.blit_plan
         backend.clear(layer.background_color)
-        clip_rect = Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
+        clip_rect = Rect.new(0.0, 0.0, size.width, size.height)
         backend.push_clip(clip_rect)
         plan.each do |entry|
-          backend.blit(entry.source, entry.dest_x, entry.dest_y)
+          # A plan is built when the grid scrolls and run here. Nothing between may replace a texture it names -
+          # a recenter spares the sticky cells, a detach voids the plan - so the generation it saw
+          # is the one it gets (a nil assign moves it too).
+          assert(entry.widget.backend_generation == entry.generation,
+            "blit plan of #{layer.id} names a texture of #{entry.widget.path_id} that was replaced since")
+          backend.blit(entry.widget.widget_backend.not_nil!, entry.dest_x, entry.dest_y)
         end
         backend.pop_clip
 
@@ -553,11 +755,12 @@ module CrymbleUI
         render_widgets_count = 0
         if render_widgets = layer.blit_plan_render_widgets
           render_widgets_count = render_widgets.size
-          layer_offset_x = layer.bounds.x
-          layer_offset_y = layer.bounds.y
+          origin = layer.content_rect
+          layer_offset_x = origin.x
+          layer_offset_y = origin.y
           drag_offset = Vec2.new(0.0, 0.0)
           render_widgets.each do |widget|
-            render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
+            render_single_widget(widget, backend, origin, layer, drag_offset)
           end
           layer.blit_plan_render_widgets = nil
         end
@@ -574,7 +777,7 @@ module CrymbleUI
           # false-positive source until the immediate path replicates sticky positioning.
           is_matrix_layer = (layer.viewport_cache && !layer.id.starts_with?("sticky_")) || layer.cv_validate
           if CacheValidation.enabled?(:immediate_mode) && is_matrix_layer && backend.responds_to?(:capture_region_pixels)
-            validate_immediate_mode(layer, backend, layer.bounds.x, layer.bounds.y)
+            validate_immediate_mode(layer, backend, layer.content_rect.x, layer.content_rect.y)
           end
 
           # Diagnostic: mark where blit-plan fast path actually executes.
@@ -639,15 +842,17 @@ module CrymbleUI
         end
       end
 
-      # Translate primitives to layer-local coordinates
-      layer_offset_x = layer.bounds.x
-      layer_offset_y = layer.bounds.y
-
       # Flush deferred state before collecting widgets (e.g., VirtualMatrix defers
       # update_visible_cells during scrollbar drag to avoid running on every mouse event)
       if owner = layer.owner_widget
         owner.pre_render_flush
       end
+
+      # Widgets are painted into the buffer relative to the layer's CONTENT-space origin (the owner's space - an
+      # ancestor's scroll moves the layer, not what is in it), read after the flush that may lay the owner out
+      origin = layer.content_rect
+      layer_offset_x = origin.x
+      layer_offset_y = origin.y
 
       # Re-ask, because the flush is where a coalesced re-layout actually happens: WindowPanel defers its
       # resize layout to pre_render_flush, and VirtualMatrix defers cell updates there. A clear those
@@ -680,8 +885,8 @@ module CrymbleUI
       {% if flag?(:immediate_mode_only) %}
         # IMMEDIATE-MODE ONLY: bypass all per-widget caching, re-render from scratch every frame
         # using painter's algorithm via to_primitives(). Slow but correct ground truth.
-        viewport_w = PixelSnap.cover(layer.bounds.width)
-        viewport_h = PixelSnap.cover(layer.bounds.height)
+        viewport_w = PixelSnap.cover(layer.size.width)
+        viewport_h = PixelSnap.cover(layer.size.height)
         if viewport_w > 0 && viewport_h > 0
           fresh = render_layer_immediate(layer, layer_offset_x, layer_offset_y, viewport_w, viewport_h)
           if layer.viewport_cache
@@ -723,7 +928,7 @@ module CrymbleUI
               f.puts "  widgets_to_render.size=#{widgets_to_render.size}"
               # Log widgets with Y near the buffer boundary (content_y 830-900)
               # Find buffer overlap boundary (buffer_origin_y + buffer extent where blit-shift clears)
-              lo_y = layer.bounds.y.to_i # snap-exempt: diagnostic dump
+              lo_y = layer.content_rect.y.to_i # snap-exempt: diagnostic dump
               f.puts "--- Widgets near buffer boundary (buf_y 815..845) ---"
               widgets_to_render.each do |w|
                 ab = w.absolute_bounds
@@ -785,7 +990,7 @@ module CrymbleUI
                             Rect.new(0.0, 0.0, backend.width.to_f64, backend.height.to_f64)
                           else
                             # Normal: clip to viewport (layer bounds)
-                            Rect.new(0.0, 0.0, layer.bounds.width, layer.bounds.height)
+                            Rect.new(0.0, 0.0, layer.size.width, layer.size.height)
                           end
         # BALANCE IS LOAD-BEARING. The clip now lives on the target's view, so it survives
         # every render-target re-activation for the life of the backend — a push left
@@ -799,7 +1004,7 @@ module CrymbleUI
         begin
           # Render each widget using per-widget texture approach
           widgets_to_render.each do |widget|
-            render_single_widget(widget, backend, layer_offset_x, layer_offset_y, layer, drag_offset)
+            render_single_widget(widget, backend, origin, layer, drag_offset)
           end
 
           # Second pass: render foreground primitives for DecoratedContainers
@@ -872,8 +1077,8 @@ module CrymbleUI
                                            layer_offset_x : Float64, layer_offset_y : Float64)
         # 1. Capture cached viewport region from the buffer — via the one reader (aligns the cv sampler
         #    with what SFML actually composites; no hand-mirrored copy in the gating instrument).
-        viewport_w = PixelSnap.cover(layer.bounds.width)
-        viewport_h = PixelSnap.cover(layer.bounds.height)
+        viewport_w = PixelSnap.cover(layer.size.width)
+        viewport_h = PixelSnap.cover(layer.size.height)
         viewport_x, viewport_y = layer.viewport_sample_origin(backend.width, backend.height, viewport_w, viewport_h)
 
         return if viewport_w <= 0 || viewport_h <= 0
@@ -912,13 +1117,13 @@ module CrymbleUI
           fm_buffer_x = fm_vx + viewport_x
           fm_buffer_y = fm_vy + viewport_y
           # Correct absolute Y: buffer_y + buffer_origin_y + layer_offset_y
-          fm_abs_y = fm_buffer_y + layer.buffer_origin.y.to_i + layer.bounds.y.to_i # snap-exempt: diagnostic dump
-          layer_off_y = layer.bounds.y.to_i # snap-exempt: diagnostic dump
+          fm_abs_y = fm_buffer_y + layer.buffer_origin.y.to_i + layer_offset_y.to_i # snap-exempt: diagnostic dump
+          layer_off_y = layer_offset_y.to_i # snap-exempt: diagnostic dump
           File.open("/tmp/cv_diag_#{layer.id}_f#{frame}.log", "w") do |f|
             f.puts "=== CV DIAGNOSTIC: #{layer.id} frame=#{frame} ==="
             f.puts "  mismatch_count=#{mismatch_count}/#{total}"
             f.puts "  first_mismatch: viewport=(#{fm_vx},#{fm_vy}) buffer=(#{fm_buffer_x},#{fm_buffer_y}) abs_y=#{fm_abs_y}"
-            f.puts "  scroll_offset=#{layer.scroll_offset} buffer_origin=#{layer.buffer_origin} layer_offset=(#{layer.bounds.x.to_i},#{layer_off_y})"
+            f.puts "  scroll_offset=#{layer.scroll_offset} buffer_origin=#{layer.buffer_origin} layer_offset=(#{layer_offset_x.to_i},#{layer_off_y})"
             f.puts "  viewport_in_buffer=(#{viewport_x},#{viewport_y}) #{viewport_w}x#{viewport_h}"
             f.puts "  buffer_just_cleared=#{layer.buffer_just_cleared}"
             f.puts "  layer.state=#{layer.state}"
@@ -1156,7 +1361,10 @@ module CrymbleUI
     # Render a single dirty widget (selective rendering optimization)
     # Uses per-widget texture: widget renders to own backend, then blits to layer
     # Directly renders the widget without tree traversal - O(1) instead of O(n)
-    private def render_single_widget(widget : Widget, backend : RenderBackend, offset_x : Float64, offset_y : Float64, layer : Layer, drag_offset : Vec2) : Nil
+    # `origin`: the layer's content rect, read once per layer by the caller (its position is the render origin).
+    private def render_single_widget(widget : Widget, backend : RenderBackend, origin : Rect, layer : Layer, drag_offset : Vec2) : Nil
+      offset_x = origin.x
+      offset_y = origin.y
       # Instrumentation: count all widgets passed to this method (before any early exits)
       LayerRenderer.frame_widgets_iterated += 1
 
@@ -1197,8 +1405,8 @@ module CrymbleUI
       # Round absolute coords relative to root BEFORE subtracting layer offset
       # This prevents accumulating rounding errors through nested widgets
       layer_local_x, layer_local_y = round_to_layer_pixels(adjusted_x, adjusted_y, offset_x, offset_y)
-      layer_width = PixelSnap.cover(layer.bounds.width)
-      layer_height = PixelSnap.cover(layer.bounds.height)
+      layer_width = PixelSnap.cover(origin.width)
+      layer_height = PixelSnap.cover(origin.height)
 
       # Viewport_cache layers: use buffer-relative positioning
       # Widget position in buffer = content position - buffer_origin
@@ -1449,14 +1657,9 @@ module CrymbleUI
       end
 
       if (layer.viewport_cache && layer.tiled_cells && layer.buffer_just_cleared) || capture_would_be_blind
-        if wb = widget.widget_backend
-          wb.dispose
-          widget.widget_backend = nil # setter also nils last_rendered_layer_position
-        end
-        if bg = widget.background_backend
-          bg.dispose
-          widget.background_backend = nil # setter also resets rendered_to_layer_at_current_bounds
-        end
+        widget.widget_backend = nil # released; the setter also nils last_rendered_layer_position
+        # released, and the setter resets rendered_to_layer_at_current_bounds - only when one was held, as before
+        widget.background_backend = nil if widget.background_backend
         # Clip to the cell's device-pixel span so text can't overflow into a sibling (mirrors the
         # texture path's widget_backend clip); the whole-buffer layer clip is restored on pop.
         cell_clip = Rect.new(layer_local_x.to_f64, layer_local_y.to_f64, widget_width.to_f64, widget_height.to_f64)
@@ -1491,18 +1694,11 @@ module CrymbleUI
             puts "        Layer: #{layer.id}"
           {% end %}
 
-          # CRITICAL: Dispose old backend before replacement to release GPU memory immediately
-          # Without this, rapid size changes cause GPU memory accumulation waiting for GC
-          widget_backend.dispose
-
-          widget.widget_backend = create_widget_backend(widget_width, widget_height)
+          widget.widget_backend = create_widget_backend(widget_width, widget_height) # releases the old one
 
           # CRITICAL: Invalidate background_backend when widget size changes!
           # Old background is wrong size → restoring it causes artifacts
           # Must re-capture from layer at new size
-          if old_bg = widget.background_backend
-            old_bg.dispose # Release GPU memory for old background
-          end
           widget.background_backend = nil
         end
       else
@@ -1511,10 +1707,7 @@ module CrymbleUI
         # Also invalidate background_backend if it has wrong size (from reconcile)
         # Without this, mismatched background_backend prevents re-capture from layer
         if bg = widget.background_backend
-          if bg.width != widget_width || bg.height != widget_height
-            bg.dispose # Release GPU memory for mismatched background
-            widget.background_backend = nil
-          end
+          widget.background_backend = nil if bg.width != widget_width || bg.height != widget_height
         end
       end
 
@@ -1542,13 +1735,8 @@ module CrymbleUI
 
       # When buffer was just cleared (full render after rebuild/recenter),
       # cached backgrounds are stale — they contain pre-clear content (e.g. old theme colors).
-      # Dispose and force recapture from the freshly-cleared layer.
-      if layer.buffer_just_cleared
-        if stale_bg = widget.background_backend
-          stale_bg.dispose
-          widget.background_backend = nil
-        end
-      end
+      # Release them and force recapture from the freshly-cleared layer.
+      widget.background_backend = nil if layer.buffer_just_cleared && widget.background_backend
 
       if background_backend = widget.background_backend
         # Subsequent render: restore background from saved backend (GPU→GPU blit)
@@ -1571,8 +1759,7 @@ module CrymbleUI
             puts "      Filling with layer background: #{layer.background_color}"
           {% end %}
           widget_backend.clear(layer.background_color)
-          # Dispose old background and create new one at correct size
-          background_backend.dispose # Release GPU memory for old background
+          # A new background at the correct size (assigning it releases the old one)
           new_background = create_widget_backend(widget_width, widget_height)
           new_background.clear(layer.background_color)
           widget.background_backend = new_background
@@ -1985,14 +2172,15 @@ module CrymbleUI
       # but grandchildren retain old bounds from previous layout.
       # Without this check, grandchildren render as "ghost" content at stale positions.
       return if widget.bounds.width <= 0.0 || widget.bounds.height <= 0.0
+      return if stands_on_foreign_layer?(widget, target_layer)
 
       result << widget
       {% if flag?(:DEBUG_COLLECT) %}
         puts "  [COLLECT] #{widget.class.name.split("::").last}##{widget.path_id} to layer '#{target_layer.id}'"
       {% end %}
 
-      # If THIS widget has its own layer that's DIFFERENT from target_layer,
-      # don't recurse into its children - they belong to the widget's own layer
+      # Painted here on a layer it owns besides its own (a ScrollView's scrollbars): its children belong to
+      # its own layer, not this one
       if widget.responds_to?(:layer)
         if widget_layer = widget.layer
           if widget_layer != target_layer
@@ -2032,14 +2220,27 @@ module CrymbleUI
       last = layer.last_rendered_bounds
       return unless last
       return unless backend = layer.backend
-      new_bounds = layer.bounds
+      size = layer.size
       bg = layer.background_color
-      if new_bounds.width > last.width
-        backend.fill_rect(Rect.new(last.width, 0.0, new_bounds.width - last.width, new_bounds.height), bg)
+      if size.width > last.width
+        backend.fill_rect(Rect.new(last.width, 0.0, size.width - last.width, size.height), bg)
       end
-      if new_bounds.height > last.height
-        backend.fill_rect(Rect.new(0.0, last.height, new_bounds.width, new_bounds.height - last.height), bg)
+      if size.height > last.height
+        backend.fill_rect(Rect.new(0.0, last.height, size.width, size.height - last.height), bg)
       end
+    end
+
+    # A widget that owns layers is painted in THOSE - never into a layer it merely stands on: a grid cell that
+    # is a ScrollView stands on the grid's content layer, and its own layers composite it (and its scrollbars, on
+    # the scrollbar layer it owns). Painting it there too put its scrollbar track into the grid's buffer as well,
+    # where the cache-validation ground truth found it 1680px a frame.
+    private def stands_on_foreign_layer?(widget : Widget, target : Layer) : Bool
+      return false unless own = widget.layer
+      return false if own.same?(target)
+      if widget.responds_to?(:each_owned_layer)
+        widget.each_owned_layer { |owned| return false if owned.same?(target) }
+      end
+      true
     end
 
     # Collect VISIBLE widgets recursively for viewport_cache layers
@@ -2061,11 +2262,12 @@ module CrymbleUI
       unless viewport_intersects?(viewport, widget_bounds) || target_layer.dirty_widgets.includes?(widget)
         return
       end
+      return if stands_on_foreign_layer?(widget, target_layer)
 
       result << widget
 
-      # If THIS widget has its own layer that's DIFFERENT from target_layer,
-      # don't recurse into its children - they belong to the widget's own layer
+      # Painted here on a layer it owns besides its own (a ScrollView's scrollbars): its children belong to
+      # its own layer, not this one
       if widget.responds_to?(:layer)
         if widget_layer = widget.layer
           if widget_layer != target_layer
@@ -2097,98 +2299,6 @@ module CrymbleUI
         bounds.top >= viewport.bottom)   # completely below viewport
     end
 
-    # Collect all layers from widget tree
-    private def collect_layers(widget : Widget) : Array(Layer)
-      layers = [] of Layer
-
-      # This widget's PRIMARY layer (LayerOwner @internal_layer, Window @root_layer,
-      # VirtualMatrix @content_layer, ...). Base Widget#layer returns nil.
-      if widget.responds_to?(:layer)
-        if layer = widget.layer
-          layers << layer
-        end
-      end
-
-      # AUXILIARY layers the widget owns beyond its primary — published through ONE
-      # protocol so adding a layer can't silently miss the render pass (the class of
-      # bug the layer_discovery_spec guards). Opt-in via responds_to?, matching the
-      # find_panel_z_index / descendant_layer_clip_bounds idiom below. Today: ScrollView
-      # (scrollbar + 3 sticky) and VirtualMatrix (cursor + drag overlays).
-      if widget.responds_to?(:each_owned_layer)
-        widget.each_owned_layer { |aux| layers << aux }
-      end
-
-      # Check children
-      widget.children.each do |child|
-        layers.concat(collect_layers(child))
-      end
-
-      # Check overlays (Window maintains separate overlay list for popups, etc.)
-      # Overlays persist across DSL rebuilds and are auto-migrated
-      if widget.responds_to?(:overlays)
-        widget.overlays.each do |overlay|
-          layers.concat(collect_layers(overlay))
-        end
-      end
-
-      layers
-    end
-
-    # Sort layers for compositing: group by parent panel z-index, then by layer z-index
-    # This prevents cross-panel layer interleaving
-    private def sort_layers_for_compositing(layers : Array(Layer)) : Array(Layer)
-      layers.sort! do |a, b|
-        a_panel_z = find_panel_z_index(a)
-        b_panel_z = find_panel_z_index(b)
-        if a_panel_z != b_panel_z
-          a_panel_z <=> b_panel_z
-        else
-          a.z_index <=> b.z_index
-        end
-      end
-    end
-
-    # Find the z-index of the parent WindowPanel for a layer
-    # Layers without a WindowPanel ancestor (root content, overlays) use:
-    # - Int32::MIN for root layer (Window content, below all panels)
-    # - Int32::MAX for overlays (popups, tooltips, drag ghost, above all panels)
-    private def find_panel_z_index(layer : Layer) : Int32
-      widget = layer.owner_widget
-      # Ownerless layers (drag ghost, highlight) must render above all panels
-      return Int32::MAX if widget.nil?
-      # The nearest ancestor that declares a compositing z-boundary wins. Asked
-      # polymorphically (responds_to?), NOT by type-checking concrete widgets: a
-      # WindowPanel/LayerBox returns its z_index, a Popup returns Int32::MAX (overlays
-      # composite above all panels). Defaults: Int32::MIN for root content (below all
-      # panels), Int32::MAX for ownerless layers (handled above).
-      while widget
-        if widget.responds_to?(:compositing_z_index)
-          return widget.compositing_z_index
-        end
-        widget = widget.parent
-      end
-      Int32::MIN
-    end
-
-    # The bounds a layer's content must be clipped to, imposed by the nearest ancestor
-    # that declares one (e.g. a WindowPanel keeping descendants off its border) — or nil
-    # if no ancestor imposes a clip. Asked polymorphically (responds_to?), NOT by
-    # type-checking concrete widgets: any widget can opt in via `descendant_layer_clip_bounds`.
-    # Shared by both renderers; the clip the SFML/headless compositors apply.
-    private def find_descendant_clip_bounds(layer : Layer) : Rect?
-      # Start at the layer owner's PARENT: a widget's clip applies to its DESCENDANTS,
-      # never to its own layer (a panel must not clip its own chrome/background off its
-      # border row — invisible while the border is opaque, but wrong in principle).
-      widget = layer.owner_widget.try(&.parent)
-      while widget
-        if widget.responds_to?(:descendant_layer_clip_bounds)
-          return widget.descendant_layer_clip_bounds
-        end
-        widget = widget.parent
-      end
-      nil
-    end
-
     # Collect widgets to render based on render mode (full vs selective)
     # UNIFIED RENDERING: Always use per-widget textures (NEW path only)
     private def collect_widgets_to_render(layer : Layer, full_render : Bool) : Array(Widget)
@@ -2215,11 +2325,12 @@ module CrymbleUI
           # the buffer holds a margin of cells, and they must keep their backends (so a cell scrolled
           # into view already has its cached texture). Bounded by the buffer size.
           ce = layer.cache_extent
+          origin = layer.content_rect
           viewport = Rect.new(
-            layer.scroll_offset.x + layer.bounds.x - ce, # Buffer left edge in content coords
-            layer.scroll_offset.y + layer.bounds.y - ce, # Buffer top edge in content coords
-            layer.bounds.width + 2.0 * ce,
-            layer.bounds.height + 2.0 * ce
+            layer.scroll_offset.x + origin.x - ce, # Buffer left edge in content coords
+            layer.scroll_offset.y + origin.y - ce, # Buffer top edge in content coords
+            origin.width + 2.0 * ce,
+            origin.height + 2.0 * ce
           )
           layer.widgets.each do |widget|
             collect_visible_widgets_recursive(widget, all_widgets, layer, viewport)
@@ -2493,9 +2604,10 @@ module CrymbleUI
       # cell with no stamped slot no-ops (shift_slot/invalidate_slot are nil-safe). Slot keys via
       # slot_axis — the SAME arithmetic the render stamp uses (was term-wise ties-even rounds, which
       # diverge from the stamp at fractional coords → mis-classified boundary cells).
+      content_origin = layer.content_rect
       layer.widgets.each do |widget|
         wabs = widget.absolute_bounds
-        new_pos = horizontal ? slot_axis(wabs.x, layer.bounds.x, origin.x) : slot_axis(wabs.y, layer.bounds.y, origin.y)
+        new_pos = horizontal ? slot_axis(wabs.x, content_origin.x, origin.x) : slot_axis(wabs.y, content_origin.y, origin.y)
         next if new_pos < new_boundary_buf # before the boundary → not shifted
         extent = PixelSnap.cover(horizontal ? wabs.width : wabs.height)
         old_pos = new_pos - delta # the cell was repositioned by shift_bounds; its pixels were at old_pos
@@ -2508,10 +2620,8 @@ module CrymbleUI
         else
           # partially clipped at the far buffer edge → pixels not faithfully copied → dispose any texture
           # and drop the slot so it re-renders fresh.
-          if wb = widget.widget_backend
-            wb.dispose
+          if widget.widget_backend
             widget.widget_backend = nil
-            widget.background_backend.try(&.dispose)
             widget.background_backend = nil
             LayerRenderer.frame_boundary_cells_invalidated += 1
           end
@@ -2663,10 +2773,11 @@ module CrymbleUI
       # whole widget list. Slot keys via slot_axis at the OLD origin (pre-recenter — the buffer still
       # holds pre-shift pixels); the render stamp next frame uses the recentered origin, related by
       # exactly the (dest - src) shift applied below.
+      content_origin = layer.content_rect
       layer.widgets.each do |widget|
         wabs = widget.absolute_bounds
-        ob_x = slot_axis(wabs.x, layer.bounds.x, old_origin.x)
-        ob_y = slot_axis(wabs.y, layer.bounds.y, old_origin.y)
+        ob_x = slot_axis(wabs.x, content_origin.x, old_origin.x)
+        ob_y = slot_axis(wabs.y, content_origin.y, old_origin.y)
         w_w = PixelSnap.cover(wabs.width)
         w_h = PixelSnap.cover(wabs.height)
         fully_in_overlap = ob_x >= src_x && ob_y >= src_y &&
@@ -2683,10 +2794,8 @@ module CrymbleUI
         else
           # partially clipped at the old boundary → any cached pixels are truncated → dispose the texture
           # (if any) and drop the slot so it re-renders fresh (also fixes the boundary background seam).
-          if wb = widget.widget_backend
-            wb.dispose
+          if widget.widget_backend
             widget.widget_backend = nil
-            widget.background_backend.try(&.dispose)
             widget.background_backend = nil
             LayerRenderer.frame_boundary_cells_invalidated += 1
           end

@@ -594,8 +594,11 @@ describe "VirtualMatrix interactive resize", tags: "slow" do
       cell_after.not_nil!.object_id.should eq cell_id
     end
 
-    it "updates scroll view content size after resize without layout" do
+    # The drag defers the extents to the mouse-up layout (see flush_resize_update); without it the
+    # scrollbar a wider column needs appeared only after Ctrl+0.
+    it "updates the scroll view's content size when a resize drag ends" do
       renderer, app, matrix = make_resize_dsl
+      width_before = matrix.content_scroll_view.not_nil!.content_size.width
 
       # Resize col 0 wider by +40px
       app.handle_mouse_down(CrymbleUI::Vec2.new(COL_BORDER_0, 10.0))
@@ -605,9 +608,7 @@ describe "VirtualMatrix interactive resize", tags: "slow" do
       renderer.render_frame(app)
 
       matrix = app.find("resize_test").as(CrymbleUI::VirtualMatrix)
-
-      # Column positions should still reflect the resize after mouse up
-      matrix.cell_screen_position(0, 1).x.should be_close(RULER_COL_W + COL_W + 40.0, 2.0)
+      matrix.content_scroll_view.not_nil!.content_size.width.should be_close(width_before + 40.0, 0.5)
     end
   end
 end

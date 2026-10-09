@@ -12,6 +12,8 @@ module CrymbleUI
         # Data (set by host before each rebuild)
         property items : Array({String, String, String, File::Info}) = [] of {String, String, String, File::Info}
         property sort_column : Int32 = 0
+        # The name column alone (a folder picker: folders have no size or date to show).
+        property name_only : Bool = false
         property sort_ascending : Bool = true
         # The highlighted row, file OR directory — a directory is selected by one click and
         # entered by the second, so it has to be able to show as selected in between.
@@ -45,14 +47,14 @@ module CrymbleUI
         def get_scrollorder : {Array(Int32), Array(Int32)}
           n = @items.size + 1
           rows = (1...n).to_a + [0]  # Header (row 0) at end → sticky
-          cols = (0...3).to_a
+          cols = (0...(@name_only ? 1 : 3)).to_a
           {rows, cols}
         end
 
         def get_sizes : {Array(Float64), Array(Float64)}
           n = @items.size + 1
           row_heights = Array.new(n, 1.0)
-          col_widths = [12.0, 8.0, 14.0]
+          col_widths = @name_only ? [24.0] : [12.0, 8.0, 14.0]
           {row_heights, col_widths}
         end
 

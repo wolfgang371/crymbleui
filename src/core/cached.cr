@@ -239,10 +239,9 @@ module CrymbleUI
 
     # Sever this node from the reactive graph: unregister it from every source/node it read (so an
     # immortal global Source stops pinning it) and drop the enqueue hook (releasing its captured
-    # widget). Called on the DISCARDED widget tree in App#rebuild and on a dropped overlay. Terminal
-    # by the external invariant that a disposed node's widget is unreachable from @root (never rendered
-    # again). If one WERE rendered, get_primitives lazily mints a FRESH node — self-healing, no
-    # corruption. Idempotent: a second call finds @deps already empty.
+    # widget). Called on the DISCARDED widget tree in App#rebuild, on a dropped overlay, and on a grid cell
+    # that left (Widget#release_own) - which may be shown again: get_primitives then lazily mints a FRESH
+    # node, so a disposed node is never used again. Idempotent: a second call finds @deps already empty.
     def dispose : Nil
       @deps.each(&.remove_dependent(self))
       @deps.clear

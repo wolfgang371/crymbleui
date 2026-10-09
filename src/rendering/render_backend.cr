@@ -1,11 +1,36 @@
 require "../core/types"
 
 module CrymbleUI
+  # An error that is a defect, never a frame hiccup: both frame loops rescue broadly and recover by resetting
+  # caches, and let these out instead.
+  class RenderDefect < Exception
+  end
+
   # Raised when a backend is used after release. DISTINGUISHED on purpose: the frame loops rescue
   # broadly and recover by resetting caches, which would swallow this at 60 Hz into exactly the
   # abandonment it exists to report — a post-release use is a defect, not a transient hiccup, so
   # both renderers let this one through.
-  class DisposedBackendError < Exception
+  class DisposedBackendError < RenderDefect
+  end
+
+  # A clip primitive handed to a window-direct draw (App#overlay_primitives, Renderer#render_primitives).
+  # That path has no clip stack, so the clip would be ignored and the ink drawn outside it. A defect in the
+  # caller, so, like a post-release use, it is let out of frame recovery.
+  class WindowDirectClipError < RenderDefect
+    def initialize(primitive : DrawPrimitive)
+      super("#{primitive.class.name} is not supported on a window-direct draw (overlay_primitives, render_primitives)")
+    end
+  end
+
+  # A layer owner painted into a layer no widget in the tree owns (a stale render_layer), under
+  # Layer.strict_nesting: its layers would have no place in the composite order. A defect, let out of frame
+  # recovery; a release build falls back instead (Layer.orphaned_nestings).
+  class CompositeOrderError < RenderDefect
+  end
+
+  # A layer composited somewhere its render did not expect, under -Dverify_bounds: moved by a flush after its turn
+  # in the render loop, or a window-space rect (a WindowPanel's) under a scroller.
+  class LayerSpaceError < RenderDefect
   end
 
   # Abstract render backend interface
@@ -132,6 +157,15 @@ module CrymbleUI
       return unless @disposed
       raise DisposedBackendError.new(
         "#{self.class.name.split("::").last}##{op} on a DISPOSED backend (#{width}x#{height})")
+    end
+
+    # A read must lie inside the buffer. SFML's getPixel does not check - a rect past the edge
+    # killed the process with signal 11 - and the headless twin answered transparent instead, so the
+    # two disagreed exactly where a caller had a stale or oversized rect. Both raise now.
+    protected def assert_inside(x : Int32, y : Int32, w : Int32, h : Int32, op : String) : Nil
+      return if x >= 0 && y >= 0 && w >= 0 && h >= 0 && x + w <= width && y + h <= height
+      raise ArgumentError.new("#{self.class.name.split("::").last}##{op}: rect #{x},#{y} #{w}x#{h} " \
+                              "is not inside the #{width}x#{height} buffer")
     end
 
     # The dangerous shape is a LIVE receiver reading a DEAD source (or writing a dead target): the

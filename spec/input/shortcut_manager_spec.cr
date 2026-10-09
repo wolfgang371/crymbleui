@@ -70,7 +70,7 @@ describe CrymbleUI::ShortcutManager do
 
             # Register panel ^F (should override)
             panel = TestWidget.new(id: "test_panel")
-            manager.register("^F", CrymbleUI::ShortcutContext::Panel, panel.path_id) do
+            manager.register("^F", CrymbleUI::ShortcutContext::Panel, panel) do
                 panel_called = true
             end
 

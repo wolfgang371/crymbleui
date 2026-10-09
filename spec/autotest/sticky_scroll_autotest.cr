@@ -222,7 +222,6 @@ class StickyScrollAutoTest < CrymbleUI::App
   WINDOW_BG_RGBA = (80_u32 << 24) | (80_u32 << 16) | (80_u32 << 8) | 255_u32
 
   @adapter = AutotestTaskBoardAdapter.new
-  @scheduled_first = false
 
   # Test state machine
   enum Phase
@@ -251,12 +250,12 @@ class StickyScrollAutoTest < CrymbleUI::App
   @ctrl0_black = 0
   @ctrl0_buf_origin = CrymbleUI::Vec2.zero
 
-  def build : CrymbleUI::Widget
-    if @phase == Phase::Settle && !@scheduled_first && scheduler_ready?
-      @scheduled_first = true
-      schedule(30) { run_phase }
-    end
+  # The first phase, once the window is up.
+  def on_start
+    after(30.milliseconds) { run_phase }
+  end
 
+  def build : CrymbleUI::Widget
     matrix = CrymbleUI::VirtualMatrix.new(adapter: @adapter, id: "task_board")
     matrix.col_width(0, 4.0)
     matrix.row_height(0, 1.5)
@@ -264,19 +263,6 @@ class StickyScrollAutoTest < CrymbleUI::App
     window("Sticky Scroll Autotest", WINDOW_W, WINDOW_H) do
       widget(matrix)
     end
-  end
-
-  private def scheduler_ready? : Bool
-    begin
-      CrymbleUI::Widget.scheduler
-      true
-    rescue
-      false
-    end
-  end
-
-  private def schedule(delay_ms : Int32, &block)
-    CrymbleUI::Widget.scheduler.schedule(Time::Span.new(nanoseconds: delay_ms.to_i64 * 1_000_000), &block)
   end
 
   # --- Layer access helpers ---
@@ -353,19 +339,19 @@ class StickyScrollAutoTest < CrymbleUI::App
     rebuild if root.try(&.needs_layout?)
     @sub_step = 0
     # Settle over several render cycles
-    schedule(50) { settle_reset(next_phase) }
+    after(50.milliseconds) { settle_reset(next_phase) }
   end
 
   private def settle_reset(next_phase : Phase)
     @sub_step += 1
     rebuild if root.try(&.needs_layout?)
     if @sub_step < 3
-      schedule(50) { settle_reset(next_phase) }
+      after(50.milliseconds) { settle_reset(next_phase) }
     else
       @phase = next_phase
       @sub_step = 0
       @scrolling_right = true
-      schedule(10) { run_phase }
+      after(10.milliseconds) { run_phase }
     end
   end
 
@@ -378,7 +364,7 @@ class StickyScrollAutoTest < CrymbleUI::App
       root.try(&.mark_needs_layout)
       rebuild if root.try(&.needs_layout?)
       @phase = Phase::Baseline
-      schedule(30) { run_phase }
+      after(30.milliseconds) { run_phase }
 
     when Phase::Baseline
       log("\n=== PHASE: BASELINE (scroll=0) ===")
@@ -391,7 +377,7 @@ class StickyScrollAutoTest < CrymbleUI::App
       @phase = Phase::Test3Hops
       @sub_step = 0
       @scrolling_right = true
-      schedule(5) { run_hop_test(3) }
+      after(5.milliseconds) { run_hop_test(3) }
 
     when Phase::Test3Hops
       run_hop_test(3)
@@ -410,12 +396,12 @@ class StickyScrollAutoTest < CrymbleUI::App
       find("task_board").as?(CrymbleUI::VirtualMatrix).try(&.content_layer).try(&.mark_needs_layout)
       rebuild if root.try(&.needs_layout?)
       @sub_step = 0
-      schedule(50) { settle_ctrl0 }
+      after(50.milliseconds) { settle_ctrl0 }
 
     when Phase::Results
       output_results
       @phase = Phase::Done
-      schedule(10) { run_phase }
+      after(10.milliseconds) { run_phase }
 
     when Phase::Done
       quit
@@ -432,12 +418,12 @@ class StickyScrollAutoTest < CrymbleUI::App
         scroll = get_scroll_offset
         log("  scroll RIGHT hop #{@sub_step}/#{n_hops}: scroll_x=#{scroll.x.round(1)}")
         log_state("  after hop")
-        schedule(5) { run_hop_test(n_hops) }
+        after(5.milliseconds) { run_hop_test(n_hops) }
       else
         # Switch to scrolling left
         @scrolling_right = false
         @sub_step = 0
-        schedule(5) { run_hop_test(n_hops) }
+        after(5.milliseconds) { run_hop_test(n_hops) }
       end
     else
       # Scroll left: n_hops + extra to ensure we reach 0
@@ -449,10 +435,10 @@ class StickyScrollAutoTest < CrymbleUI::App
         scroll = get_scroll_offset
         log("  scroll LEFT  hop #{@sub_step}/#{max_left}: scroll_x=#{scroll.x.round(1)}")
         log_state("  after hop")
-        schedule(5) { run_hop_test(n_hops) }
+        after(5.milliseconds) { run_hop_test(n_hops) }
       else
         # Done scrolling — wait one frame for render to complete, then capture
-        schedule(20) { finish_hop_test(n_hops) }
+        after(20.milliseconds) { finish_hop_test(n_hops) }
       end
     end
   end
@@ -484,15 +470,15 @@ class StickyScrollAutoTest < CrymbleUI::App
       @phase = Phase::Reset3
       @sub_step = 0
       @scrolling_right = true
-      schedule(5) { run_phase }
+      after(5.milliseconds) { run_phase }
     when 2
       @phase = Phase::Reset2
       @sub_step = 0
       @scrolling_right = true
-      schedule(5) { run_phase }
+      after(5.milliseconds) { run_phase }
     when 1
       @phase = Phase::Ctrl0Fix
-      schedule(5) { run_phase }
+      after(5.milliseconds) { run_phase }
     end
   end
 
@@ -502,7 +488,7 @@ class StickyScrollAutoTest < CrymbleUI::App
     @sub_step += 1
     rebuild if root.try(&.needs_layout?)
     if @sub_step < 5
-      schedule(50) { settle_ctrl0 }
+      after(50.milliseconds) { settle_ctrl0 }
     else
       log_state("after Ctrl+0")
       save_layer_images("ctrl0")
@@ -516,7 +502,7 @@ class StickyScrollAutoTest < CrymbleUI::App
         log("  *** Ctrl+0 did NOT fully fix: #{@ctrl0_black} vs baseline #{@baseline_black} ***")
       end
       @phase = Phase::Results
-      schedule(5) { run_phase }
+      after(5.milliseconds) { run_phase }
     end
   end
 

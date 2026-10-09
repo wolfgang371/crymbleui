@@ -25,6 +25,9 @@
 # and this is the only build that compiles that flag — without these entries the widened check would
 # never run over the stacks and panels it exists to watch.
 #
+# The scrolled-layer spec is here for -Dverify_bounds too: each rendered layer's composite region must be the one
+# it had at its turn in the render loop (LayerSpaceError), and no panel may sit under a scroller.
+#
 # Usage: source setup.sh && ./tools/cv-coherency.sh
 set -euo pipefail
 
@@ -34,6 +37,9 @@ crystal spec -Dcache_validation -Dverify_bounds \
   spec/rendering/cv_non_matrix_oracle_spec.cr \
   spec/rendering/scroll_view_resize_cv_spec.cr \
   spec/rendering/image_shrink_ghost_cv_spec.cr \
+  spec/rendering/scrolled_layer_space_spec.cr \
+  spec/rendering/flush_changes_composite_spec.cr \
+  spec/widgets/virtual_matrix/layer_owning_cell_spec.cr \
   spec/autotest/ \
   spec/widgets/virtual_matrix_rendering_spec.cr \
   spec/widgets/virtual_matrix_black_rows_spec.cr \

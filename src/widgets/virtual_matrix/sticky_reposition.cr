@@ -9,141 +9,35 @@ module CrymbleUI
     # offset+positions, because StickyMath output includes a scroll-dependent offset
     # that only works correctly with viewport_cache layers.
     #
-    # - sticky_row cells: x = true_x - scroll_offset.x, y = true_y (fixed vertically)
-    # - sticky_col cells: x = true_x (fixed horizontally), y = true_y - scroll_offset.y
+    # - sticky_row cells: x = true_x - painted_scroll.x, y = true_y (fixed vertically)
+    # - sticky_col cells: x = true_x (fixed horizontally), y = true_y - painted_scroll.y
     # - sticky_corner cells: x = true_x, y = true_y (fixed both ways)
     # - content cells: not touched (viewport_cache handles scroll)
+    #
+    # So a sticky cell is painted AT its bounds: VirtualMatrix#paint_shift_for shifts it by nothing, and
+    # painted_rect reads its bounds as they are. Where a sticky cell belongs is ONE method, sticky_cell_rect,
+    # which this pass and the blit plan's mirror both apply.
     private def reposition_sticky_cells(cells_destroyed : Bool = false)
       sticky_rows = sticky_row_count
       sticky_cols = sticky_col_count
       return if sticky_rows == 0 && sticky_cols == 0
       return if @active_cells.empty?
 
-      col_sizes = @cached_col_sizes
-      row_sizes = @cached_row_sizes
-      return unless col_sizes && row_sizes
-
-      col_cum = @cached_col_physical_cum
-      row_cum = @cached_row_physical_cum
-
-      # ONE content-space scroll quantization per axis for the whole pass. The park
-      # predicates and the per-constituent visibility gates below are the same
-      # expression on this value — sharing the local (here and in the blit-plan
-      # mirror) makes a mixed quantization basis, where reposition and the blit
-      # plan disagree about whether a header is parked, structurally impossible.
-      scroll_x_i = scroll_offset.x.to_i.to_f64
-      scroll_y_i = scroll_offset.y.to_i.to_f64
-
-      # Per-axis compound-disposition context, built ONCE per pass — the same
-      # StickyMath.compound_axis serves the blit-plan fast path, so the two
-      # passes cannot disagree on a compound header's extent or park state.
-      # Y passes shifted: nil (physical-only) — pending its own arc.
-      col_view = AxisView.new(
-        sizes: col_sizes, cum: col_cum, ruler_offset: ruler_col_width_pixels,
-        sticky_extent: sticky_col_width_pixels + ruler_col_width_pixels,
-        viewport_extent: bounds.width, scroll_q: scroll_x_i,
-        shifted: @cached_col_shifted, park: OFFSCREEN_PARK)
-      row_view = AxisView.new(
-        sizes: row_sizes, cum: row_cum, ruler_offset: ruler_row_height_pixels,
-        sticky_extent: sticky_row_height_pixels + ruler_row_height_pixels,
-        viewport_extent: bounds.height, scroll_q: scroll_y_i,
-        shifted: nil, park: OFFSCREEN_PARK)
+      return unless @cached_col_sizes && @cached_row_sizes
+      col_view, row_view = sticky_axis_views
 
       any_changed = false
 
       @active_cells.each do |key, widget|
         row, col = key
-        is_sticky_row = row < sticky_rows
-        is_sticky_col = col < sticky_cols
-        next unless is_sticky_row || is_sticky_col
+        next unless row < sticky_rows || col < sticky_cols
 
-        # Grid-order position (for sticky dimensions that don't scroll)
-        # Ruler offsets shift all data cells right/down within the sticky layers
-        ruler_x_offset = ruler_col_width_pixels
-        ruler_y_offset = ruler_row_height_pixels
-        true_x = ruler_x_offset + (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-        true_y = ruler_y_offset + (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-
-        bounding = get_bounding_box(key)
-        is_compound = bounding[0] != bounding[1]
         # The layout pass's half of CRYMBLE_CARET_LOG. Without it, "no [caret] line this frame" is
         # ambiguous between "no frame ran" and "the OTHER pass ran" — and the two have opposite
         # fixes. The blit-path half lives in blit_plan.cr; the passes run either/or per frame.
         log_caret_frame(key, "LAYOUT", widget)
-        # Compound cells derive BOTH screen-space position AND visible extent per
-        # axis from StickyMath.compound_axis (shared with the blit-plan fast path):
-        # (a) correct screen-space position (not content-space)
-        # (b) extent shrinks as constituents shift out (prevents sibling overlap)
-        #
-        # KNOWN COST of (b), unfixed: the clipping means a group label sits at the MIDDLE of the
-        # visible slice rather than at the leading edge like everything else naming the same
-        # region, and once the slice gets short the label can fall outside it and not be drawn at
-        # all (field report 2026-09-06, image #45: "a" absent, then appearing after one line of
-        # scroll). Replacing this with the shared ink rule was tried three times and backed out
-        # three times — see the compound branch below for the measured reason.
-        compound_w = 0.0
-        compound_h = 0.0
-
-        if !is_sticky_col
-          if is_compound
-            # X KEEPS the box-level pin. The ink rule that replaces it on Y has no horizontal
-            # counterpart: `ink_region` is consumed by the `vcentered_*` family, and cell text
-            # is hard left-aligned at padding (text.cr) with no `hcentered_*` owner anywhere. Take
-            # this away without a replacement and a column header scrolls out with its span —
-            # measured in the demo, field report 2026-09-06 image #49 ("1a"/"2a" scrolling out
-            # immediately). Asymmetric because the two axes genuinely are.
-            new_x, compound_w = Widgets::VirtualMatrix::StickyMath.compound_axis(
-              col_view, bounding[0][1], bounding[1][1], true_x)
-          else
-            # Non-compound: screen-space position = content position − live scroll. Sticky layers
-            # are NOT viewport_cache (see this file's header), so the cell bounds must carry the
-            # scroll themselves. Using the cached @viewport_col_positions here was a bug: those
-            # StickyMath positions are recomputed only when a whole column crosses the boundary, so
-            # they dropped the sub-column scroll and froze the cells whenever scroll < one column.
-            content_x = (col_cum ? col_cum[col].to_f64 : (0...col).sum { |c| col_sizes[c] }.to_f64)
-            new_x = ruler_x_offset + content_x - scroll_x_i
-          end
-        else
-          new_x = true_x
-        end
-
-        if !is_sticky_row
-          if is_compound
-            # A SPAN keeps StickyMath.compound_axis on BOTH axes, and the reason is not the pin.
-            # Giving Y the natural span was tried twice and backed out twice; the second attempt
-            # broke compound_shifted_visibility_spec's equivalence lock, which is the measured
-            # reason: `compound_axis` also computes the span's extent under SHIFTED-OUT
-            # constituents (AxisView#shifted, the sticky-tail work), so a span's height is NOT
-            # `cum[hi+1] - cum[lo]` once the grid compacts. A naive sum makes the two passes
-            # disagree, and a divergence between them is a visible jump when the frame type flips.
-            #
-            # The cost of keeping it is field report 2026-09-06 (a): the box pin engages at a
-            # threshold and shifts the label 1-3px while the ruler beside it moves smoothly.
-            # Fixing that means teaching the shared rule about shifted constituents, not deleting
-            # the function that already knows.
-            new_y, compound_h = Widgets::VirtualMatrix::StickyMath.compound_axis(
-              row_view, bounding[0][0], bounding[1][0], true_y)
-          else
-            # Non-compound: screen-space position = content position − live scroll (see the X path
-            # above for why the cached @viewport_row_positions branch was a freeze bug).
-            content_y = (row_cum ? row_cum[row].to_f64 : (0...row).sum { |r| row_sizes[r] }.to_f64)
-            new_y = ruler_y_offset + content_y - scroll_y_i
-          end
-        else
-          new_y = true_y
-        end
-
-        # Compute target size: compound cells use visible size, others keep current
-        # Allow zero size for cells fully behind sticky header (prevents overlap assertions)
-        if is_compound
-          new_w = is_sticky_col ? widget.bounds.width : (compound_w == 0.0 ? 0.0 : {compound_w - grid_spacing, 1.0}.max)
-          new_h = is_sticky_row ? widget.bounds.height : (compound_h == 0.0 ? 0.0 : {compound_h - grid_spacing, 1.0}.max)
-        else
-          # Use fresh sizes from col_sizes/row_sizes — during resize drag,
-          # widget.bounds still has stale width from initial layout
-          new_w = (col_sizes[col] - grid_spacing).to_f64
-          new_h = (row_sizes[row] - grid_spacing).to_f64
-        end
+        target = sticky_cell_rect(key, widget, col_view, row_view)
+        new_x, new_y, new_w, new_h = target.x, target.y, target.width, target.height
 
         # Only reposition/resize if changed (avoids unnecessary layout calls)
         if widget.bounds.x != new_x || widget.bounds.y != new_y || widget.bounds.width != new_w || widget.bounds.height != new_h
@@ -199,6 +93,64 @@ module CrymbleUI
         sv.try(&.sticky_corner_layer).try(&.mark_needs_clear_and_render)
       end
       {% if flag?(:verify_bounds) %} verify_sticky_positions! {% end %}
+    end
+
+    # The per-axis context StickyMath.compound_axis places a merged span with - one for both passes (this one
+    # and the blit plan), built once per pass. Y passes shifted: nil (physical-only) - pending its own arc.
+    private def sticky_axis_views : {AxisView, AxisView}
+      scroll = painted_scroll
+      {AxisView.new(
+        sizes: placed_col_sizes, cum: placed_col_cum, ruler_offset: ruler_col_width_pixels,
+        sticky_extent: sticky_col_width_pixels + ruler_col_width_pixels,
+        viewport_extent: bounds.width, scroll_q: scroll.x,
+        shifted: @cached_col_shifted, park: OFFSCREEN_PARK),
+       AxisView.new(
+        sizes: placed_row_sizes, cum: placed_row_cum, ruler_offset: ruler_row_height_pixels,
+        sticky_extent: sticky_row_height_pixels + ruler_row_height_pixels,
+        viewport_extent: bounds.height, scroll_q: scroll.y,
+        shifted: nil, park: OFFSCREEN_PARK)}
+    end
+
+    # Where a sticky cell belongs this frame, in the matrix's own space - the one rule both passes apply. A plain
+    # cell is its line on each axis (painted_col / painted_row: pinned on its sticky axis, moved by painted_scroll
+    # on the other), inset by the grid gap. A merged span on a SCROLLING axis is placed by
+    # StickyMath.compound_axis (it pins at the band edge and shrinks as its constituents scroll under it - zero
+    # when wholly out); on its sticky axis it keeps its laid-out start and extent.
+    #
+    # X KEEPS the box-level pin. The ink rule that replaces it on Y has no horizontal counterpart: `ink_region`
+    # is consumed by the `vcentered_*` family, and cell text is hard left-aligned at padding (text.cr) with no
+    # `hcentered_*` owner anywhere. Take this away without a replacement and a column header scrolls out with its
+    # span - measured in the demo, field report 2026-09-06 image #49 ("1a"/"2a" scrolling out immediately).
+    # A SPAN keeps compound_axis on Y too, and the reason is not the pin: `compound_axis` also computes the span's
+    # extent under SHIFTED-OUT constituents (AxisView#shifted, the sticky-tail work), so a span's height is NOT
+    # `cum[hi+1] - cum[lo]` once the grid compacts; giving Y the natural span was tried twice and backed out twice
+    # (compound_shifted_visibility_spec's equivalence lock). KNOWN COST, unfixed: the clipping sits a group label
+    # at the MIDDLE of the visible slice, and once the slice gets short the label can fall outside it (field
+    # report 2026-09-06, image #45); the box pin engages at a threshold and shifts the label 1-3px while the ruler
+    # beside it moves smoothly (field report 2026-09-06 (a)).
+    private def sticky_cell_rect(key : Tuple(Int32, Int32), widget : Widget, col_view : AxisView, row_view : AxisView) : Rect
+      row, col = key
+      bounding = get_bounding_box(key)
+      compound = bounding[0] != bounding[1]
+      x, w = if !compound
+               pos, pitch = painted_col(col)
+               {pos, pitch - grid_spacing}
+             elsif col < sticky_col_count
+               {placed_col_start(col), widget.bounds.width}
+             else
+               pos, extent = Widgets::VirtualMatrix::StickyMath.compound_axis(col_view, bounding[0][1], bounding[1][1], placed_col_start(col))
+               {pos, extent == 0.0 ? 0.0 : {extent - grid_spacing, 1.0}.max}
+             end
+      y, h = if !compound
+               pos, pitch = painted_row(row)
+               {pos, pitch - grid_spacing}
+             elsif row < sticky_row_count
+               {placed_row_start(row), widget.bounds.height}
+             else
+               pos, extent = Widgets::VirtualMatrix::StickyMath.compound_axis(row_view, bounding[0][0], bounding[1][0], placed_row_start(row))
+               {pos, extent == 0.0 ? 0.0 : {extent - grid_spacing, 1.0}.max}
+             end
+      Rect.new(x, y, w, h)
     end
   end
 end

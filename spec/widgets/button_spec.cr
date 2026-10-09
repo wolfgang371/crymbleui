@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/widgets/button"
+require "../../src/testing/driver"
 
 # Test app for Button integration tests
 class ButtonTestApp < CrymbleUI::App
@@ -236,21 +237,12 @@ describe CrymbleUI::Button do
             button.path_id.should eq("toolbar/Submit")
         end
 
-        it "can be found with WidgetTester" do
-            tester = CrymbleUI::Testing::WidgetTester.new
+        it "can be found and clicked by id through the test Driver" do
             app = ButtonTestApp.new
+            ui = CrymbleUI::Testing::Driver.new(app)
 
-            tester.pump(app)
-
-            # Find button
-            button = tester.find("btn")
-            button.should_not be_nil
-            button.not_nil!.is_a?(CrymbleUI::Button).should be_true
-
-            # Trigger click
-            tester.tap("btn")
-
-            # Check callback was called
+            ui.find("btn").is_a?(CrymbleUI::Button).should be_true
+            ui.click "btn"
             app.clicked.should be_true
         end
     end

@@ -60,7 +60,7 @@ module CrymbleUI::Widgets::VirtualMatrix
 
     # ONE disposition for a compound (merged) cell's scrolling axis — THE shared
     # implementation for the layout pass (reposition_sticky_cells) and the
-    # blit-plan fast path (reposition_compound_in_blit_plan). The two passes run
+    # blit-plan fast path (both through sticky_cell_rect). The two passes run
     # either/or per frame, so any divergence is a user-visible header width/pin
     # JUMP when the frame type flips (they were born divergent: the fast path
     # scanned purely physically and counted shifted-out, compacted-away
