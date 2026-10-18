@@ -49,6 +49,14 @@ jobs:
           source setup.sh
           shards build showcase_demo
 
+      # The web flavour (docs/WEB.md) needs a patched compiler to BUILD, but the stock one type-checks it - so a
+      # change that breaks it is caught here without the toolchain.
+      - name: The web flavour type-checks (stock compiler)
+        run: |
+          source setup.sh
+          crystal build --no-codegen --cross-compile --target wasm32-unknown-wasi -Dwithout_mt -Dwithout_main \
+            examples/showcase_demo.cr
+
       - name: Specs (headless, excl. slow)
         run: |
           source setup.sh

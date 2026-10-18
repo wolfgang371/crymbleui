@@ -49,6 +49,21 @@ module CrymbleUI
       origin(start + length) - origin(start)
     end
 
+    # Filled EDGES, as the GPU fills a float shape: pixel i is painted when its centre i + 0.5 lies inside, and a
+    # centre exactly ON an edge by the rasterizer's top-left rule - a centre on a left or top edge is in, on a
+    # right or bottom edge out: fill_edge, ceil(v - 0.5). An SFML RenderTexture is y-flipped, which turns the rule
+    # upside down on its y axis - on the top edge out, on the bottom edge in: fill_edge_y_flipped, floor(v + 0.5)
+    # (which is snap). The window is not flipped. Off the ties all of them agree. Measured by tools/wasm/conformance
+    # ("fill_rect fractional" on a backend, "window-direct fill_rect fractional" on the window). What a backend
+    # that rasterizes itself (the web flavour's canvas) uses to paint the pixels the desktop paints.
+    def self.fill_edge(v : Float64) : Int32
+      (v - 0.5).ceil.to_i32
+    end
+
+    def self.fill_edge_y_flipped(v : Float64) : Int32
+      (v + 0.5).floor.to_i32
+    end
+
     # Culling/visibility BOUND: ceil — conservative, may over-include a widget, never
     # under-include one (cover(len) >= span(start, len) for every placement).
     def self.cover(length : Float64) : Int32

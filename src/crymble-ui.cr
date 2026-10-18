@@ -33,8 +33,12 @@ require "./layout/flow"
 require "./layout/decorated_container"
 require "./layout/split_view"
 
-# Rendering
-require "./rendering/sfml_renderer"
+# Rendering - the flavour's platform: SFML natively, the page's canvas in the web flavour (wasm32)
+{% if flag?(:wasm32) %}
+  require "./web/entry"
+{% else %}
+  require "./rendering/sfml_renderer"
+{% end %}
 require "./rendering/cache_validation"
 require "./rendering/blit_probe"
 
@@ -47,10 +51,14 @@ require "./widgets/file_dialog"
 module CrymbleUI
     VERSION = {{ `shards version "#{__DIR__}/.."`.chomp.stringify }}
 
-    @@renderer : SFMLRenderer? = nil
+    {% if flag?(:wasm32) %}
+      @@renderer : WebRenderer? = nil
+    {% else %}
+      @@renderer : SFMLRenderer? = nil
+    {% end %}
 
-    # Access the renderer (for testing/debugging)
-    def self.renderer : SFMLRenderer?
+    # Access the renderer (for testing/debugging) - the flavour's own renderer class
+    def self.renderer
         @@renderer
     end
 
@@ -87,13 +95,20 @@ module CrymbleUI
         window_widget = root.as(Window)
 
         # Create renderer with window settings
-        @@renderer = SFMLRenderer.new(
-            width: window_widget.width,
-            height: window_widget.height,
-            title: window_widget.title
-        )
+        {% if flag?(:wasm32) %}
+          # The web flavour: the page drives the loop (src/web/entry.cr), so start it and return to the app's top level.
+          renderer = @@renderer = WebRenderer.new(width: window_widget.width, height: window_widget.height,
+            title: window_widget.title)
+          renderer.start(app)
+        {% else %}
+          renderer = @@renderer = SFMLRenderer.new(
+              width: window_widget.width,
+              height: window_widget.height,
+              title: window_widget.title
+          )
 
-        # Run the application
-        @@renderer.not_nil!.run(app)
+          # Run the application
+          renderer.run(app)
+        {% end %}
     end
 end

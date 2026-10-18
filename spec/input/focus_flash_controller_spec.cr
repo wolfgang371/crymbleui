@@ -26,6 +26,17 @@ class FlashTestWidget < CrymbleUI::Widget
     @render_called += 1
     super
   end
+
+  def paints_focus_flash? : Bool
+    true
+  end
+end
+
+# Focusable, and draws nothing for focus_highlighted - a flash on it would only cost frames.
+class NoFlashWidget < FlashTestWidget
+  def paints_focus_flash? : Bool
+    false
+  end
 end
 
 describe CrymbleUI::FocusFlashController do
@@ -118,6 +129,32 @@ describe CrymbleUI::FocusFlashController do
 
       widget1.focus_highlighted?.should be_false  # Old widget reset
       widget2.focus_highlighted?.should be_true   # New widget starts highlighted
+    end
+  end
+
+  describe "a widget that does not paint the flash" do
+    it "gets no timer, no highlight and no render marks" do
+      controller = CrymbleUI::FocusFlashController.new
+      widget = NoFlashWidget.new("grid")
+
+      controller.start_flash(widget)
+      controller.toggle_flash
+
+      controller.timer_running?.should be_false
+      widget.focus_highlighted?.should be_false
+      widget.render_called.should eq 0
+    end
+
+    it "still ends the previous widget's flash" do
+      controller = CrymbleUI::FocusFlashController.new
+      button = FlashTestWidget.new("button")
+      grid = NoFlashWidget.new("grid")
+
+      controller.start_flash(button)
+      controller.start_flash(grid)
+
+      button.focus_highlighted?.should be_false
+      controller.timer_running?.should be_false
     end
   end
 

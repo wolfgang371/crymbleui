@@ -177,6 +177,11 @@ module CrymbleUI
       true
     end
 
+    # The focus flash brightens the button like a hover (to_primitives)
+    def paints_focus_flash? : Bool
+      true
+    end
+
     # false: a click acts without taking the keyboard from where it is (a text field the app keeps
     # typing into) - within its own panel: a click in a panel behind still raises it, and the raised
     # panel takes the keyboard. Tab still reaches it. Set it each build, like the label.

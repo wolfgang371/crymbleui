@@ -342,7 +342,7 @@ module CrymbleUI
 
     @started = false
 
-    # Run on_start, once. Called by the renderer (SFMLRenderer#run, TestRenderer#render_frame).
+    # Run on_start, once. Called by the renderer (WindowRenderer#start, TestRenderer#render_frame).
     def start : Nil
       return if @started
       @started = true

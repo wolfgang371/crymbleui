@@ -3,7 +3,7 @@ require "../core/app"
 
 module CrymbleUI
   # One frame's worth of input: the run loop dispatches queued events, then renders once. Kept apart
-  # from SFMLRenderer so a spec can drive the same batching over events it queues itself.
+  # from the window loop (WindowRenderer) so a spec can drive the same batching over events it queues itself.
   #
   # EVERY EVENT IS DISPATCHED AGAINST THE STATE THE EVENTS BEFORE IT PRODUCED. A handler that changes
   # structure only REQUESTS the work - a rebuild, or a matrix's invalidate_all! - and the frame after

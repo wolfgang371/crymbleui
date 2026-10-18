@@ -4,6 +4,7 @@ require "../core/scheduler"
 module CrymbleUI
   # Controls the 0.6s flashing animation for focused widgets
   # 0.3s normal appearance, 0.3s highlighted (lighter color)
+  # Only for a widget that paints it (Widget#paints_focus_flash?): every toggle marks the widget for render.
   class FocusFlashController
     FLASH_HALF_MS = 300  # Each phase: 300ms
 
@@ -17,6 +18,7 @@ module CrymbleUI
     def start_flash(widget : Widget)
       # Stop flash on previous widget if any
       stop_flash(@current_widget) if @current_widget
+      return unless widget.paints_focus_flash? # a toggle would only cost it a frame
 
       @current_widget = widget
       # Start HIGHLIGHTED for immediate visual feedback when focus changes

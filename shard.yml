@@ -1,5 +1,5 @@
 name: crymble-ui
-version: 1.8.0
+version: 1.9.0
 
 authors:
   - wolfgang371 <wolfgang371@bomel.de>
@@ -7,6 +7,12 @@ authors:
 description: |
   Declarative GUI framework for Crystal.
   Built on SFML for high-performance rendering.
+
+repository: https://github.com/wolfgang371/crymbleui
+
+# The web flavour's build command, installed into every app's bin/ by `shards install` (docs/WEB.md).
+executables:
+  - crymble-web
 
 # use `shards build` or `shards build --release` to generate into bin/
 targets:

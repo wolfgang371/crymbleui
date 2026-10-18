@@ -12,7 +12,7 @@ require "../../src/input/focus_cycler"
 # the highlight and re-dispatch the arrow to the grid (move the cell cursor). That
 # part works. BUT TextInput returns FALSE for a consumed arrow ("false-on-consume",
 # on the assumption that handle_key_down's return is discarded), while the real
-# input path (sfml_renderer.cr) treats a false return as "unhandled" and then calls
+# input path (KeyboardDispatch, run by the window loop) treats a false return as "unhandled" and then calls
 # FocusManager#navigate(direction) — a SPATIAL focus move that carries focus OUT of
 # the matrix to whatever focusable sits in that direction (in embrace: the section
 # above the data grid). So cursor-Up escapes the matrix entirely.
@@ -63,7 +63,7 @@ private def setup_with_sibling_above
   {renderer, app, matrix, sibling}
 end
 
-# Mirror sfml_renderer.cr key dispatch: send to focus manager; if NOT handled,
+# Mirror KeyboardDispatch's key dispatch: send to focus manager; if NOT handled,
 # do a spatial focus navigate in the arrow's direction.
 private def press_arrow(fm, app, renderer, key : SF::Keyboard::Key, dir : Symbol)
   handled = fm.handle_key_down(key, false, false)

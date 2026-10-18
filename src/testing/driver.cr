@@ -163,7 +163,7 @@ module CrymbleUI
       end
 
       # A user action the app REFUSES by raising - real input hands the exception to the app's
-      # on_event_exception (SFMLRenderer#handle_event; embrace shows it in the status bar). Inside this
+      # on_event_exception (WindowRenderer#handle_event; embrace shows it in the status bar). Inside this
       # block the Driver does the same, and every exception must match `message` - at least one must
       # arrive. Outside it, an act's exception stays loud: a spec never passes over a failed assert.
       def expect_reported(message : Regex | String, &) : Nil

@@ -1,0 +1,219 @@
+#!/bin/bash
+# crymble-web - build a crymble-ui app's web flavour: the same app, unchanged, as a static web page.
+# Installed into an app's bin/ by `shards install` (crymble-ui's shard.yml lists it under executables); run it from
+# the app's root, as `shards build` is run.
+#
+#   bin/crymble-web setup                       the toolchain, once (Linux x86_64; a few minutes, ~1 GB)
+#   bin/crymble-web build [TARGET...] [--release] [--local]
+#                                               bin/web/<target>/ for shard.yml targets (all when none named);
+#                                               a FILE.cr builds that main file as target FILE
+#   bin/crymble-web serve [TARGET] [PORT]       serve bin/web/<target>/ on http://127.0.0.1:PORT (default 8765)
+#
+# The output is a folder of static files: index.html (the app's own web/index.html if it has one, else a generic
+# page), crymble-web.js + crymble.js + vendor/ (the page's side), <target>.wasm, NOTICES. --local marks the page
+# as a local build (for trying it out; not a publication). --release compiles with flag?(:release) set - what an
+# app shows or skips in a release build - but not with LLVM's optimization (LLVM 18 emits invalid wasm exception
+# handling when it optimizes); every build is optimized after linking, by wasm-opt.
+set -euo pipefail
+
+die() { echo "crymble-web: $*" >&2; exit 1; }
+usage() { awk 'NR > 1 && /^#/ {sub(/^# ?/, ""); print; next} NR > 1 {exit}' "$0"; }
+
+# crymble-ui itself: the app's lib/crymble-ui, or this repository when run inside crymble-ui.
+if [ -f shard.yml ] && grep -q '^name: *crymble-ui *$' shard.yml; then
+  CUI=$PWD
+elif [ -d lib/crymble-ui ]; then
+  CUI=$(cd lib/crymble-ui && pwd)
+else
+  die "run me from an app's root (where shard.yml and lib/crymble-ui are; 'shards install' first)"
+fi
+HOME_DIR=${CRYMBLE_WASM_HOME:-$HOME/.cache/crymble-wasm}
+SDK=$HOME_DIR/wasi-sdk
+
+toolchain_ready() { [ -x "$HOME_DIR/crystal/.build/crystal" ] && [ -x "$SDK/bin/wasm-ld" ] && [ -f "$HOME_DIR/lib/libgc.a" ]; }
+
+# The shard.yml targets: name<TAB>main
+targets() {
+  awk '/^targets:/ {t=1; next} t && /^[^ #]/ {t=0} t && /^  [A-Za-z0-9_.-]+:/ {name=$1; sub(":", "", name)}
+       t && /^    main:/ {print name "\t" $2}' shard.yml
+}
+
+field() { awk -v k="$1" '$1 == k":" {print $2; exit}' shard.yml; }
+
+# What a tree is, for the page: its release tag when HEAD carries one (a release's page names the public tag, not a
+# commit of a private history), else the short commit.
+revision() {
+  git -C "$1" describe --tags --exact-match HEAD 2> /dev/null || git -C "$1" rev-parse --short HEAD 2> /dev/null ||
+    echo unknown
+}
+
+# The shards the app depends on: shard.lock's (transitive ones included), or what lib/ holds without a lock.
+app_shards() {
+  if [ -f shard.lock ]; then
+    awk '/^shards:/ {s=1; next} s && /^  [A-Za-z0-9_.-]+:/ {name=$1; sub(":", "", name); print name}' shard.lock
+  else
+    for d in lib/*/; do [ -d "$d" ] && basename "$d"; done
+  fi
+}
+
+build_target() {
+  local target=$1 main=$2 local_build=$3
+  local out=bin/web/$target work=$WORK/$target
+  mkdir -p "$work"
+  echo "crymble-web: $target ($main)"
+  rm -rf "$out"
+  mkdir -p "$out"
+
+  # Cross-compile (-O0: LLVM 18 cannot optimize wasm exception handling; wasm-opt does it after the link). The
+  # compiler asks pkg-config at compile time and for link flags - the shim answers for the toolchain's libraries
+  # only, so nothing of the host's -dev packages leaks into the wasm program.
+  local cross
+  cross=$(env -u CRYSTAL_LIBRARY_PATH -u LIBXML_VERSION PATH="$CUI/tools/wasm/shims:$PATH" \
+    CRYSTAL_PATH="lib:$HOME_DIR/crystal/src" \
+    "$HOME_DIR/crystal/.build/crystal" build --cross-compile --target wasm32-unknown-wasi -Dwithout_mt -Dwithout_main \
+    ${release[@]+"${release[@]}"} "$main" -o "$work/$target") || die "$target: the compile failed"
+  [ -s "$work/$target.wasm" ] || die "$target: no object file"
+
+  # The libraries: the -l flags of the link line the compiler printed (the app's @[Link] annotations). SFML's are
+  # the page's job (the web backend never calls them); every other one must exist for wasm in the toolchain.
+  local libs=() lib
+  # (whole words only: the line starts with "wasm-ld", whose "-ld" is not a flag)
+  for lib in $(echo "$cross" | tr ' ' '\n' | grep -x -- '-l.*' | sed 's/^-l//' | sort -u); do
+    case "$lib" in
+      csfml-* | sfml-* | c) ;;
+      gc | pthread | dl | pcre2-8 | z | xml2) libs+=("-l$lib") ;;
+      *) die "$target: links '$lib', which has no wasm build in the toolchain" ;;
+    esac
+  done
+
+  "$SDK/bin/wasm-ld" "$work/$target.wasm" "$HOME_DIR/lib/cpp_tag.o" "$SDK/share/wasi-sysroot/lib/wasm32-wasi/crt1-reactor.o" \
+    -o "$work/linked.wasm" -L"$HOME_DIR/lib" -L"$SDK/share/wasi-sysroot/lib/wasm32-wasi" ${libs[@]+"${libs[@]}"} -lc \
+    -lwasi-emulated-process-clocks -lwasi-emulated-mman -lwasi-emulated-signal \
+    -z stack-size=8388608 --stack-first --no-entry --fatal-warnings \
+    --export=_initialize --export=crymble_init --export=crymble_tick --export=crymble_gc --export=crymble_heap_mb \
+    --export=crymble_font --export=crymble_shortcuts --export=crymble_shortcuts_revision --export=malloc --export=free \
+    || die "$target: the link failed"
+  "$HOME_DIR/binaryen/bin/wasm-opt" -O2 --strip-debug --all-features "$work/linked.wasm" -o "$out/$target.wasm" \
+    || die "$target: wasm-opt failed"
+
+  # The page's side
+  cp "$CUI/web/crymble-web.js" "$CUI/web/crymble.js" "$out/"
+  cp -r "$CUI/web/vendor" "$out/"
+
+  # NOTICES: everything this folder ships or the module links
+  {
+    echo "Third-party software in this build of $target"
+    echo
+    echo "Crystal standard library 1.22.0, with crymble-ui's wasm patch - Apache License 2.0 (https://github.com/crystal-lang/crystal)"
+    echo "crymble-ui - MIT License"
+    echo "Boehm-Demers-Weiser garbage collector 8.2.8 - MIT-style license (https://github.com/ivmai/bdwgc)"
+    echo "wasi-libc (wasi-sdk 25) - Apache-2.0 WITH LLVM-exception / MIT"
+    echo "browser_wasi_shim - MIT OR Apache-2.0 (vendor/browser_wasi_shim/LICENSE-*)"
+    for lib in ${libs[@]+"${libs[@]}"}; do
+      case "$lib" in
+        -lpcre2-8) echo "PCRE2 10.42 - BSD-3-Clause (https://github.com/PCRE2Project/pcre2)" ;;
+        -lz) echo "zlib 1.3.1 - zlib License (https://zlib.net)" ;;
+        -lxml2) echo "libxml2 2.13.8 - MIT License (https://gitlab.gnome.org/GNOME/libxml2)" ;;
+        -lgc | -lpthread | -ldl) ;;
+        *) die "$target: no licence mapping for $lib" ;;
+      esac
+    done
+    echo "Google Cousine-Regular font (version 1.21, modified) - Apache License 2.0;"
+    echo "  one glyph (U+21BA) from DejaVu Sans Mono - Bitstream Vera license"
+    local shard listed=0
+    for shard in $(app_shards); do
+      [ "$shard" = crymble-ui ] && continue
+      if [ $listed = 0 ]; then
+        echo
+        echo "Crystal shards the app depends on (all of them, whether or not this target requires each):"
+        listed=1
+      fi
+      licence=$(awk '$1 == "license:" {print $2; exit}' "lib/$shard/shard.yml" 2> /dev/null || true)
+      [ -n "$licence" ] || die "$target: shard $shard declares no license (lib/$shard/shard.yml)"
+      echo "$shard - $licence"
+    done
+  } > "$out/NOTICES"
+
+  # The page: the app's own web/index.html, else a generic one - placeholders filled in either
+  local page=$CUI/web/index.html
+  [ -f web/index.html ] && page=web/index.html
+  local name version repo commit cui_version cui_commit built banner=""
+  name=$(field name); version=$(field version); repo=$(field repository)
+  commit=$(revision .)
+  cui_version=$(awk '$1 == "version:" {print $2; exit}' "$CUI/shard.yml")
+  cui_commit=$(revision "$CUI")
+  built=$(date -u +%Y-%m-%d)
+  [ "$local_build" = 1 ] && banner="local build - not for publication"
+  # the app and the crymble-ui it was built with (just one when the app is crymble-ui's own example)
+  local versions="$name $version ($commit)"
+  [ "$CUI" = "$PWD" ] || versions="$versions, crymble-ui $cui_version ($cui_commit)"
+  [ -n "$repo" ] || echo "crymble-web: shard.yml has no 'repository:' - the page shows no source link" >&2
+  python3 - "$page" "$out/index.html" target="$target" wasm="$target.wasm" name="$name" version="$version" \
+    repository="$repo" commit="$commit" crymble_ui_version="$cui_version" crymble_ui_commit="$cui_commit" \
+    versions="$versions" built="$built" banner="$banner" <<'EOF'
+import sys, html
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+for pair in sys.argv[3:]:
+    key, value = pair.split("=", 1)
+    text = text.replace("{{" + key + "}}", html.escape(value))
+open(dst, "w").write(text)
+EOF
+  echo "crymble-web: $out ($(du -h "$out/$target.wasm" | cut -f1) wasm, $(gzip -9c "$out/$target.wasm" | wc -c | awk '{printf "%.1f MB", $1/1048576}') gzipped)"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  setup)
+    exec "$CUI/tools/wasm/setup.sh"
+    ;;
+  build)
+    toolchain_ready || die "no toolchain yet - run 'bin/crymble-web setup' first (once; a few minutes, ~1 GB)"
+    local_build=0
+    release=()
+    names=()
+    files=()
+    for a in "$@"; do
+      case "$a" in
+        --local) local_build=1 ;;
+        --release) release=(-Drelease) ;;
+        -*) die "unknown option $a" ;;
+        *.cr) files+=("$a") ;;
+        *) names+=("$a") ;;
+      esac
+    done
+    WORK=$(mktemp -d) # the builds' intermediate files, gone however the run ends
+    trap 'rm -rf "$WORK"' EXIT
+    for name in ${names[@]+"${names[@]}"}; do
+      targets | cut -f1 | grep -Fqx -- "$name" || die "no such target in shard.yml: $name"
+    done
+    # a main file named directly builds as a target of its own name (a plain name: it lands in a page and a path)
+    for f in ${files[@]+"${files[@]}"}; do
+      [ -f "$f" ] || die "no such file: $f"
+      name=$(basename "$f" .cr)
+      [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9_.-]*$ ]] || die "$f: name the file with letters, digits, '_', '.' or '-' (not first: '.')"
+      build_target "$name" "$f" "$local_build"
+    done
+    if [ ${#names[@]} -gt 0 ] || [ ${#files[@]} -eq 0 ]; then
+      while IFS=$'\t' read -r name main; do
+        if [ ${#names[@]} -eq 0 ] || printf '%s\n' "${names[@]}" | grep -Fqx -- "$name"; then
+          build_target "$name" "$main" "$local_build"
+        fi
+      done < <(targets)
+    fi
+    ;;
+  serve)
+    target=${1:-$(targets | head -1 | cut -f1)}
+    port=${2:-8765}
+    [ -d "bin/web/$target" ] || die "bin/web/$target does not exist - build it first"
+    echo "crymble-web: http://127.0.0.1:$port/ (Ctrl+C stops)"
+    exec python3 -m http.server "$port" --bind 127.0.0.1 -d "bin/web/$target"
+    ;;
+  "" | -h | --help | help)
+    usage
+    ;;
+  *)
+    die "unknown command '$cmd' (setup, build, serve)"
+    ;;
+esac

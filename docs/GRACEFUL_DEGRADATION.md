@@ -50,7 +50,7 @@ The ancestry branch in `valid_layer_dimensions?` handles overlay and popup layer
 
 **Catch and recover** from exceptions that slip past validation.
 
-**Location**: `sfml_renderer.cr` and `test_renderer.cr`
+**Location**: `window_renderer.cr` (WindowRenderer#render_frame, which SFMLRenderer runs) and `test_renderer.cr`
 
 ```crystal
 def render_frame(app : App)
@@ -58,13 +58,13 @@ def render_frame(app : App)
     # ... layout and render ...
   rescue exception
     raise exception if exception.is_a?(RenderDefect)
-    handle_frame_exception(exception, app, window) # counts the failure run, recovers, displays, drains
+    handle_frame_exception(exception, app) # counts the failure run, recovers, presents (present_after_failure)
   else
     note_frame_completed                           # a frame that completes ends the run
   end
   end_frame(app)                                   # stamps the render trigger
   report_frame_failure(app)                        # AFTER the stamp: the handler's marks paint next
-  apply_title(app, window)
+  apply_title(app)
 end
 ```
 
@@ -91,7 +91,7 @@ neither counts nor ends one.)
 
 **Catch exceptions during event processing** to prevent a bad input handler from breaking the event loop.
 
-**Location**: `sfml_renderer.cr`
+**Location**: `window_renderer.cr` (WindowRenderer#handle_event, the window loop's dispatch)
 
 `handle_event` wraps `handle_event_impl` in a rescue. If `app.on_event_exception` is set (a `Proc(String, Nil)?`), the error message is forwarded there (e.g. for a status-bar warning); otherwise the full backtrace goes to STDERR. The method returns `false` (no redraw) and the frame loop continues normally. This path resets no caches — a bad event handler does not leave the render state partially modified.
 

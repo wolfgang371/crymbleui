@@ -1,3 +1,5 @@
+require "../widgets/virtual_matrix" # VirtualMatrix.row_cache_rebuild_rows: one of the counters the ledger reads
+
 module CrymbleUI
   # Per-frame work ledger — a low-overhead, self-describing profiler that attributes every unit of
   # frame work to (timing bucket, cause, volume) so double/wasted work is visible OFFLINE from the log

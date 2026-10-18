@@ -1,0 +1,35 @@
+#!/bin/bash
+# pkg-config for the wasm cross-compile: answers for the toolchain's own libraries only. Crystal asks pkg-config
+# directly - at link-flag time (link.cr) and at COMPILE time (LibGC::VERSION picks the GC binding, LibXML::VERSION
+# the XML one) - so the host's -dev packages must not answer: a delegating pkg-config compiles the host's
+# versions (measured: bdw-gc 8.2.6, libxml-2.0 2.9.14) into the wasm program. tools/wasm/spec/patch_spec.cr checks
+# the versions a program was compiled for.
+declare -A VERSION=([bdw-gc]=8.2.8 [libxml-2.0]=2.13.8 [libpcre2-8]=10.42 [zlib]=1.3.1)
+declare -A LIBS=([bdw-gc]="-lgc" [libxml-2.0]="-lxml2" [libpcre2-8]="-lpcre2-8" [zlib]="-lz")
+
+mode=exists
+pkgs=()
+for arg in "$@"; do
+  case "$arg" in
+    --modversion) mode=modversion ;;
+    --libs) mode=libs ;;
+    --cflags) mode=cflags ;;
+    --static | --silence-errors | --print-errors) ;;
+    --*) ;;
+    *) pkgs+=("$arg") ;;
+  esac
+done
+
+out=()
+for p in "${pkgs[@]}"; do
+  if [ -z "${VERSION[$p]:-}" ]; then
+    echo "crymble-web pkg-config: no wasm build of '$p' in the toolchain" >&2
+    exit 1
+  fi
+  case "$mode" in
+    modversion) out+=("${VERSION[$p]}") ;;
+    libs) out+=("${LIBS[$p]}") ;;
+  esac
+done
+[ ${#out[@]} -gt 0 ] && echo "${out[*]}"
+exit 0

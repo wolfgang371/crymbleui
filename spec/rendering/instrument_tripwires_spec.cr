@@ -270,7 +270,8 @@ describe "instrument tripwires" do
 
   describe "(j) one frame end" do
     it "ends both renderers' render_frame with record, then finish_frame, and records nowhere else" do
-      %w(src/rendering/sfml_renderer.cr src/testing/test_renderer.cr).each do |path|
+      # WindowRenderer holds the window renderers' render_frame (SFMLRenderer's and the web flavour's).
+      %w(src/rendering/window_renderer.cr src/testing/test_renderer.cr).each do |path|
         code = File.read_lines(path).map { |l| tripwire_strip(l) }
         records = code.each_index.select { |i| code[i].includes?("@render_trigger.record(") }.to_a
         records.size.should eq(1), "#{path}: the render trigger is stamped #{records.size} times; once, at the frame's end"
@@ -281,13 +282,15 @@ describe "instrument tripwires" do
         body = code[start...stop]
         body.count { |l| l.includes?("end_frame(app)") }.should be >= 1, "#{path}: render_frame never ends the frame"
         body.each_with_index do |l, i|
-          next unless l.matches?(/\breturn\b/) && !l.includes?("@window")
+          next unless l.matches?(/\breturn\b/) && !l.includes?("has_window?")
           body[i - 1].should contain("end_frame(app)"), "#{path}: a return in render_frame skips the frame's end"
         end
       end
+      window = File.read_lines("src/rendering/window_renderer.cr").map { |l| tripwire_strip(l) }.join("\n")
+      window.should match(/def end_frame.*?rescue ex.*?app\.report_event_exception\(ex\)/m),
+        "WindowRenderer#end_frame must report a flush that raised - the loop runs it outside the frame's rescue"
       sfml = File.read_lines("src/rendering/sfml_renderer.cr").map { |l| tripwire_strip(l) }.join("\n")
-      sfml.should match(/def end_frame.*?rescue ex.*?app\.report_event_exception\(ex\)/m),
-        "SFMLRenderer#end_frame must report a flush that raised - the loop runs it outside the frame's rescue"
+      sfml.should_not contain("@render_trigger.record("), "SFMLRenderer stamps the render trigger itself - the frame's end is WindowRenderer#end_frame's"
       sfml.should match(/unless app\.input_waits_for_frame\? \|\| @flushed_after_frame/),
         "SFMLRenderer must not block in wait_event after a frame whose end applied work"
     end
@@ -295,7 +298,9 @@ describe "instrument tripwires" do
 
   describe "(i) one mouse path" do
     it "keeps both renderers off App's mouse handlers - they go through MouseDispatch" do
-      offenders = %w(src/rendering/sfml_renderer.cr src/testing/test_renderer.cr).flat_map do |path|
+      # The window loop's dispatch lives in WindowRenderer (SFMLRenderer and the web flavour run it); SFMLRenderer
+      # stays in the scan so a platform cannot grow its own mouse path either.
+      offenders = %w(src/rendering/window_renderer.cr src/rendering/sfml_renderer.cr src/testing/test_renderer.cr).flat_map do |path|
         File.read_lines(path).each_with_index.compact_map do |raw, i|
           code = tripwire_strip(raw)
           "#{path}:#{i + 1}: #{raw.strip}" if code.matches?(/\.handle_mouse_(down|up|move)\b/)

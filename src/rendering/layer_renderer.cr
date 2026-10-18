@@ -459,6 +459,14 @@ module CrymbleUI
     def apply_zoom_change(root : Widget?)
       return unless root
       reload_font_for_zoom
+      invalidate_all_rendering(root)
+    end
+
+    # Drop every cached texture of the tree and re-render and re-lay-out all of it - zoom's response without the
+    # font reload. Also what a platform runs when its cached pixels became invalid behind the tree's back (the
+    # web flavour: an image decoded after it was first drawn, a lost and restored canvas context).
+    def invalidate_all_rendering(root : Widget?)
+      return unless root
       # Drop stale widget textures (incl. overlays) — they still hold old-size glyphs.
       invalidate_all_widget_backends(root)
       # For every in-tree layer, in ONE registry pass: drop its cached texture and

@@ -771,8 +771,17 @@ module CrymbleUI
         property children_escape_bounds : Bool
 
         # Focus highlight state (for flashing animation when widget has keyboard focus)
-        # Managed by FocusFlashController - widgets should not set this directly
+        # Managed by FocusFlashController for the widget holding the keyboard (only one that paints the flash:
+        # paints_focus_flash?, as each toggle costs a frame) - and by ComboBoxPopup for its items, which it flashes
+        # itself. Widgets should not set this directly
         @focus_highlighted : Bool = false
+
+        # Whether to_primitives draws the keyboard focus flash (FocusFlashController). The flash runs only on a widget
+        # that says so - a toggle marks it for render, a frame that paints nothing new on any other
+        # (spec/input/focus_flash_painters_spec.cr holds every focusable widget to its answer).
+        def paints_focus_flash? : Bool
+            false
+        end
 
         def focus_highlighted? : Bool
             @focus_highlighted

@@ -2,41 +2,32 @@ require "../csfml3/wrapper"
 require "../core/types"
 require "../core/widget"
 require "../core/app"
-require "./render_trigger"
-require "./frame_work_log"
-require "../core/scheduler"
-require "../core/font_sizing"
-require "../input/shortcut_manager"
-require "../input/focus_manager"
-require "../input/keyboard_dispatch"
-require "../input/mouse_dispatch"
-require "../input/event_batch"
-require "../widgets/window_panel"
+require "../core/embedded_font"
+require "./window_renderer"
 require "./pixel_snap"
 require "./sfml_font"
 require "./sfml_clipboard"
 require "./draw_primitive"
-require "./layer_renderer"
 require "./crsfml_backend"
 require "./render_debug"
 
 module CrymbleUI
-  # SFML-based renderer for CrymbleUI applications
-  class SFMLRenderer
-    include LayerRenderer # Shared layer rendering logic
+  # The third-party lines an app's About should show for the backend this flavour was built with (native: the
+  # SFML libraries it links and the embedded font). Ask this instead of naming the backend, so the same About
+  # is right in every flavour.
+  def self.backend_notices : Array(String)
+    ["CSFML (version #{SF::VERSION}, Zlib license)", "SFML (version #{SF::SFML_VERSION}, Zlib license)"] +
+      EmbeddedFont::ATTRIBUTION
+  end
 
+  # SFML-based renderer for CrymbleUI applications: the native platform under WindowRenderer's shared half -
+  # the window, its events and cursors, the font, and drawing layer regions onto the window.
+  class SFMLRenderer < WindowRenderer
     getter window : SF::RenderWindow?
-    property background_color : Color
-    getter scheduler : Scheduler
-    getter shortcut_manager : ShortcutManager
-    getter focus_manager : FocusManager
 
     # Default font for text rendering
     @default_font : SF::Font
     @font_path : String? # Store for font reloading on zoom
-
-    # Track window title to avoid setting every frame
-    @current_title : String = ""
 
     # Texture cache for DrawImage primitives (keyed by file path).
     # BLESSED (instrument_tripwires_spec, guard (d)): this is a file-path->image
@@ -45,13 +36,6 @@ module CrymbleUI
     # this instance-var image cache is legitimate — do not "fix" it away.
     @texture_cache = Hash(String, SF::Texture).new
 
-    # Track last mouse move time for event coalescing
-    @last_mouse_move_time : Time::Instant = Time.instant
-
-    # Cursor caching to avoid expensive hit tests
-    @last_cursor_panel : WindowPanel? = nil
-    @last_cursor_update_point : Vec2 = Vec2.new(0.0, 0.0)
-
     # Cursors for different resize/interaction directions
     @cursor_arrow : SF::Cursor
     @cursor_text : SF::Cursor
@@ -59,81 +43,13 @@ module CrymbleUI
     @cursor_size_vertical : SF::Cursor
     @cursor_size_nwse : SF::Cursor
     @cursor_size_nesw : SF::Cursor
-    @current_cursor : SF::Cursor::Type = SF::Cursor::Arrow
-
-    # Instrumentation: CPU% tracking (like CPUMonitor)
-    @@last_cpu_time : UInt64 = 0_u64
-    @@last_wall_time : Time::Instant = Time.instant
-
-    @@last_frame_time : Time::Instant = Time.instant
-
-    CLOCK_TICKS_PER_SEC = 100.0 # USER_HZ on most Linux systems
-
-    def self.read_cpu_time : UInt64
-      {% if flag?(:linux) %}
-        stat = File.read("/proc/self/stat")
-        fields = stat.split
-        utime = fields[13].to_u64
-        stime = fields[14].to_u64
-        utime + stime
-      {% else %}
-        0_u64
-      {% end %}
-    rescue
-      0_u64
-    end
-
-    def self.calculate_cpu_percent : Float64
-      current_cpu = read_cpu_time
-      current_wall = Time.instant
-      cpu_delta = current_cpu - @@last_cpu_time
-      wall_delta = (current_wall - @@last_wall_time).total_seconds
-      @@last_cpu_time = current_cpu
-      @@last_wall_time = current_wall
-      return 0.0 if wall_delta <= 0
-      (cpu_delta.to_f / CLOCK_TICKS_PER_SEC / wall_delta) * 100.0
-    end
-
-    def self.frame_delta_ms : Float64
-      current = Time.instant
-      delta = (current - @@last_frame_time).total_milliseconds
-      @@last_frame_time = current
-      delta
-    end
 
     # Target framerate for smooth rendering without lag
     TARGET_FPS = 60
 
-    # Embed font at compile time for self-contained binary.
-    #
-    # ⚠️  WINDOWS GLYPH GARBLING — see docs/WINDOWS_SFML_GL_SYNC_BUG.md
-    # On Windows, SFML 3.0.0 + system GL drivers do not synchronize glyph
-    # atlas uploads with subsequent reads, causing random characters to
-    # render with the wrong glyph (stochastic across process launches).
-    # The fix is an out-of-tree patch to SFML's Texture.cpp adding
-    # glFinish() after every glTexImage2D / glTexSubImage2D. Without it,
-    # text rendering on Windows is non-deterministic. The patched
-    # sfml-graphics-s.lib MUST be used for Windows builds.
-    EMBEDDED_FONT = {{ read_file(__DIR__+"/../../resources/Cousine-Regular.ttf") }}
-
-    # WHAT AN APP SHIPPING THIS LIBRARY HAS TO SAY ABOUT THE FONT.
-    #
-    # The notice belongs here because the font does: EMBEDDED_FONT is a compile-time read_file, so
-    # every consumer's binary contains our modified Cousine and owes the notice whether or not it
-    # ever draws with it. resources/FONTS.md has the full text and the reasoning; this is the line
-    # an About box shows, so that a consumer is not left composing a licence notice about a file it
-    # does not own — embrace hardcoded its own and it went stale the day the font was modified.
-    #
-    # NOT derived from @font_path, deliberately. A consumer may load its own font, and it would be
-    # tempting to return nothing then — but the obligation attaches to DISTRIBUTION, not to what is
-    # on screen: the modified Cousine is still inside their binary. An attribution that went silent
-    # exactly when a custom font was loaded would go silent while the notice was still owed. An app
-    # that loads its own font must additionally attribute THAT font, which this library cannot do
-    # for it because it does not know what was loaded.
-    FONT_ATTRIBUTION = [
-      "Google Cousine-Regular font (version 1.21, modified, Apache 2.0 license)",
-      "  incl. one glyph (U+21BA) from DejaVu Sans Mono, Bitstream Vera license",
-    ]
+    # The embedded font's attribution lives in EmbeddedFont (both flavours embed the same font). The old public
+    # name stays for its callers (an app's About; font_invariants_spec); new code asks CrymbleUI.backend_notices.
+    FONT_ATTRIBUTION = EmbeddedFont::ATTRIBUTION
 
     def initialize(
       width : Int32 = 800,
@@ -147,7 +63,7 @@ module CrymbleUI
       @default_font = if font_path
                         SF::Font.from_file(font_path)
                       else
-                        SF::Font.from_memory(EMBEDDED_FONT.to_slice)
+                        SF::Font.from_memory(EmbeddedFont::BYTES.to_slice)
                       end
 
       # Create the window (skipped in headless mode, for testing)
@@ -171,34 +87,14 @@ module CrymbleUI
         {% end %}
       end
 
-      # Default background
-      @background_color = Theme.current.app_background
-
-      # Create scheduler for timers
-      @scheduler = Scheduler.new
-      Widget.scheduler = @scheduler
-
-      # Create shortcut manager for keyboard shortcuts
-      @shortcut_manager = ShortcutManager.new
-      Widget.shortcut_manager = @shortcut_manager
-
-      # Create focus manager for keyboard focus
-      @focus_manager = FocusManager.new
-      Widget.focus_manager = @focus_manager
-
-      # Routes the keyboard events; kept out of this class so a spec can drive it headlessly.
-      @keyboard = KeyboardDispatch.new(@focus_manager, @shortcut_manager)
-      @mouse = MouseDispatch.new
-      @flushed_after_frame = false # the last frame's end applied work still to be painted (App#finish_frame)
+      # Scheduler, shortcut and focus managers, input dispatch, frame ledger (WindowRenderer)
+      super()
 
       # Set global font for text measurement (wrap in SFMLFont)
       Widget.font = SFMLFont.new(@default_font)
 
       # Set global clipboard to the platform (SFML) clipboard
       Widget.clipboard = SFMLClipboard.new
-
-      # Per-frame work ledger (writes only when ENV["CRYMBLE_WORKLOG"] is set; otherwise a no-op).
-      @work_log = FrameWorkLog.new
 
       # Initialize cursors
       @cursor_arrow = SF::Cursor.new
@@ -273,80 +169,132 @@ module CrymbleUI
       rt.texture.copy_to_image
     end
 
-    # Composite layer to window via sprite - the region composite_region computes (clip, sample, snap), the
-    # viewport-cache sample included
-    def composite_layer_to_window(layer : Layer, clip : Rect?)
-      return unless window = @window
-      return unless backend = layer.backend
+    # === WindowRenderer hooks ===
+
+    protected def has_window? : Bool
+      !@window.nil?
+    end
+
+    protected def window_open? : Bool
+      @window.not_nil!.open?
+    end
+
+    protected def window_size : Size
+      window = @window.not_nil!
+      Size.new(window.size.x.to_f64, window.size.y.to_f64)
+    end
+
+    protected def poll_event : LibCSFML::Event?
+      @window.not_nil!.poll_event
+    end
+
+    protected def close_window : Nil
+      @window.try &.close
+    end
+
+    protected def display_window : Nil
+      @window.not_nil!.display
+    end
+
+    # THE one drain point for released RenderTextures. Deliberately here and nowhere else:
+    # after display, no layer's RenderTexture is the active render target, so destroying FBOs
+    # cannot disturb the GL state SFML tracks mid-frame (the corruption mode the old pooling
+    # attempt hit). CrSFMLBackend#dispose only enqueues; this is what actually frees.
+    protected def after_display : Nil
+      CrSFMLBackend.drain_reaper
+    end
+
+    protected def present_after_failure : Nil
+      begin
+        @window.not_nil!.display
+      rescue
+        return # the reaper waits for the next good frame: after a display that raised, the GL state is unknown
+      end
+      # What the recovery released is freed here, in the state the success path drains in (after display) - a
+      # frame that keeps raising would otherwise park the working set in the reaper again and again.
+      CrSFMLBackend.drain_reaper
+    end
+
+    protected def apply_window_title(title : String) : Nil
+      @window.not_nil!.title = title
+    end
+
+    # Convert the CursorType to the SFML cursor loaded for it and install it
+    protected def apply_cursor(cursor : CursorType) : Nil
+      sf_cursor = case cursor
+                  when CursorType::Text
+                    @cursor_text
+                  when CursorType::SizeHorizontal
+                    @cursor_size_horizontal
+                  when CursorType::SizeVertical
+                    @cursor_size_vertical
+                  when CursorType::SizeNWSE
+                    @cursor_size_nwse
+                  when CursorType::SizeNESW
+                    @cursor_size_nesw
+                  else
+                    @cursor_arrow
+                  end
+      @window.not_nil!.mouse_cursor = sf_cursor
+    end
+
+    protected def on_window_resized(width : Int32, height : Int32) : Nil
+      window = @window.not_nil!
+      # Reset view to prevent content scaling
+      view = SF::View.new(SF.float_rect(0, 0, width.to_f32, height.to_f32))
+      window.view = view
+
+      # Force re-apply cursor after window resize
+      # OS takes over cursor during resize, we must reclaim it
+      window.mouse_cursor = @cursor_arrow
+    end
+
+    # Composite one layer region via sprite. Whole device pixels (composite_region snaps): a non-integer
+    # position + texture_rect offset interpolates
+    protected def draw_layer_region(backend : RenderBackend, region : CompositeRegion, opacity : Float64,
+                                    blend_mode : BlendMode) : Nil
       return unless backend.is_a?(CrSFMLBackend)
-
-      # Skip compositing if owner widget should not render (e.g., closed panels)
-      if owner = layer.owner_widget
-        return if owner.skip_render?
+      sprite = SF::Sprite.new(backend.texture)
+      sprite.texture_rect = SF.int_rect(region.src_x, region.src_y, region.width, region.height)
+      sprite.position = SF.vector2f(region.dest_x.to_f32, region.dest_y.to_f32)
+      if opacity < 1.0
+        sprite.color = SF::Color.new(255, 255, 255, (opacity * 255).to_u8)
       end
-
-      LayerRenderer.frame_composite_count += 1 # Instrumentation
-      LayerRenderer.frame_viewport_cache_count += 1 if layer.viewport_cache # Instrumentation
-
-      if region = composite_region(layer, clip, backend.width, backend.height)
-        # TRACE: Log compositor state for debugging ScrollView-in-Panel issues
-        if ENV["CRYMBLE_TRACE"]? == "1"
-          File.open("/tmp/compositor_trace.log", "a") do |f|
-            f.puts "COMPOSITE layer=#{layer.id} bounds=#{layer.bounds} viewport_cache=#{layer.viewport_cache} " \
-                   "SAMPLE src=(#{region.src_x},#{region.src_y}) size=(#{region.width},#{region.height}) -> dest=(#{region.dest_x},#{region.dest_y})"
-          end
-        end
-        sprite = SF::Sprite.new(backend.texture)
-        sprite.texture_rect = SF.int_rect(region.src_x, region.src_y, region.width, region.height)
-        # Whole device pixels (composite_region snaps): a non-integer position + texture_rect offset interpolates
-        sprite.position = SF.vector2f(region.dest_x.to_f32, region.dest_y.to_f32)
-        if layer.opacity < 1.0
-          sprite.color = SF::Color.new(255, 255, 255, (layer.opacity * 255).to_u8)
-        end
-        window.draw(sprite, blend_mode_to_render_states(layer.blend_mode))
-      end
-
-      # Draw the chrome border (e.g. a WindowPanel's) fresh each frame — NOT cached, so a
-      # resize leaves no ghost border. Asked polymorphically (responds_to? :chrome_border),
-      # not by sniffing the layer id + downcasting. A layer's owner_widget is the widget that
-      # owns it, so this fires once for the panel's own layer and never for its children's.
-      # (Popup borders are drawn by Popup#foreground_primitives, after its children.)
-      if (owner = layer.owner_widget) && owner.responds_to?(:chrome_border)
-        draw_chrome_border(window, owner.chrome_border)
-      end
+      @window.not_nil!.draw(sprite, blend_mode_to_render_states(blend_mode))
     end
 
     # Draw a 1px chrome border directly on the window (not cached in any layer).
     # 4 separate rectangles instead of outline_thickness, for pixel-perfect alignment.
-    private def draw_chrome_border(window : SF::RenderWindow, border : NamedTuple(bounds: Rect, color: Color))
-      color = to_sf_color(border[:color])
-      x = border[:bounds].x.to_f32
-      y = border[:bounds].y.to_f32
-      w = border[:bounds].width.to_f32
-      h = border[:bounds].height.to_f32
+    protected def draw_border_rect(bounds : Rect, color : Color) : Nil
+      window = @window.not_nil!
+      sf_color = to_sf_color(color)
+      x = bounds.x.to_f32
+      y = bounds.y.to_f32
+      w = bounds.width.to_f32
+      h = bounds.height.to_f32
 
       # Top edge
       top = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
       top.position = SF.vector2f(x, y)
-      top.fill_color = color
+      top.fill_color = sf_color
       window.draw(top)
 
       # Bottom edge
       bottom = SF::RectangleShape.new(SF.vector2f(w, 1.0_f32))
       bottom.position = SF.vector2f(x, y + h - 1.0_f32)
-      bottom.fill_color = color
+      bottom.fill_color = sf_color
       window.draw(bottom)
 
       # Left edge
       left = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
       left.position = SF.vector2f(x, y)
-      left.fill_color = color
+      left.fill_color = sf_color
       window.draw(left)
 
       # Right edge
       right = SF::RectangleShape.new(SF.vector2f(1.0_f32, h))
       right.position = SF.vector2f(x + w - 1.0_f32, y)
-      right.fill_color = color
+      right.fill_color = sf_color
       window.draw(right)
     end
 
@@ -360,50 +308,20 @@ module CrymbleUI
       end
     end
 
-    # App-level PULL render-trigger: render a frame iff the version-keyed aggregate moved since
-    # the last render — the correct-by-construction replacement for the any_needs_render? dirty walk
-    # (which can MISS a change nobody marked, e.g. a theme swap). Preserves the event-driven 0%-idle:
-    # no versioned change → same aggregate → no frame. The decision itself lives in RenderTrigger, a
-    # shared headless seam so a spec can exercise it (TestRenderer#render_frame_if_needed) — the loop's
-    # pull decision is no longer un-testable. PRIMARY: the version-keyed aggregate; BACKSTOP: the dirty
-    # walk, kept until the aggregate's completeness is spec+interactively proven (removing it = final
-    # flag deletion).
-    @render_trigger = RenderTrigger.new
-
-    private def any_layer_needs_render?(app : App) : Bool
-      @render_trigger.should_render?(app)
-    end
-
     # Clear window to background color
     def clear_window_background
       return unless window = @window
       window.clear(to_sf_color(@background_color))
     end
 
-    # Run the application with event loop
+    # Run the application with event loop: the blocking desktop loop - it waits for events (no timers) or until
+    # the next timer, then runs the iteration WindowRenderer#tick runs too.
     def run(app : App)
       # Set global app reference for widgets to trigger rebuilds
       Widget.app = app
       return unless window = @window # Headless mode - no window to run
 
-      # Set up quit callback so app can request window close
-      app.quit_callback = -> { window.close }
-
-      # NOTE: Scheduler callback removed - it was marking root which invalidated ALL backgrounds!
-      # Individual widgets (CPUMonitor, etc.) already call mark_needs_render themselves
-      # Marking root caused invalidate_children_backgrounds to cascade to entire tree
-      # Result: all widgets re-captured backgrounds every timer tick → garbage accumulation
-
-      # Build initial widget tree (or rebuild if already built to register shortcuts)
-      # First build happens in CrymbleUI.run before renderer exists (to get window dimensions)
-      # This rebuild ensures shortcuts get registered now that ShortcutManager exists
-      app.build_tree
-      app.start # the app's on_start: its timers find the scheduler from here on
-
-      # Register zoom change callback for cache invalidation
-      # This ensures font reload and texture invalidation happen regardless of
-      # whether zoom is changed via keyboard (Ctrl+/-/0) or direct API call
-      FontSizing.on_zoom_change = -> { apply_zoom_change(app.root) }
+      start(app)
 
       needs_redraw = true
 
@@ -411,6 +329,7 @@ module CrymbleUI
       # Process the pending events first, then render once per frame. A batch ends early at an event
       # that raises the input barrier, so the events behind it see the state it deferred (EventBatch).
       while window.open?
+        before_iteration
         # Check if there are scheduled timers
         next_wake = @scheduler.next_wake_time
         event_count = 0
@@ -420,9 +339,9 @@ module CrymbleUI
           remaining = next_wake
           while remaining > Time::Span.zero
             # Poll all pending events (coalescing - don't render per event)
-            event_count += EventBatch.drain(app, -> { window.poll_event }) do |event|
-              needs_redraw = true if dispatch(event, app)
-            end
+            drained, asked = drain_events(app)
+            event_count += drained
+            needs_redraw = true if asked
 
             # If redraw needed, break immediately to render (don't wait for timer)
             # This makes clicks/resizes feel instant instead of delayed by up to 400ms
@@ -449,23 +368,9 @@ module CrymbleUI
             remaining = @scheduler.next_wake_time || Time::Span.zero
           end
 
-          # Run expired timers
-          fired_count = @scheduler.run_expired_timers
-          if fired_count > 0
-            # Timers may have changed widget state (e.g., CPUMonitor marks itself)
-            # Individual widgets mark their layers as dirty, so check layers not root
-            # This is more precise than marking root (which invalidates all backgrounds!)
-            needs_redraw = any_layer_needs_render?(app)
-            # Also check overlay primitives (splash screen animation driven by timer)
-            if !needs_redraw
-              if w = @window
-                needs_redraw = !app.overlay_primitives(w.size.x.to_f64, w.size.y.to_f64).nil?
-              end
-            end
-            # Composite-only request (e.g., cursor flash opacity toggle)
-            if !needs_redraw
-              needs_redraw = app.needs_composite_only?
-            end
+          # Run expired timers; their verdict replaces what the events asked for
+          unless (verdict = fire_timers(app)).nil?
+            needs_redraw = verdict
           end
         else
           # No timers - block until event (0% CPU when idle)
@@ -481,369 +386,25 @@ module CrymbleUI
             end
 
             # After first event, poll any remaining queued events (event coalescing)
-            event_count += EventBatch.drain(app, -> { window.poll_event }) do |event|
-              needs_redraw = true if dispatch(event, app)
-            end
+            drained, asked = drain_events(app)
+            event_count += drained
+            needs_redraw = true if asked
           end
         end
 
-        # Apply a pending rebuild — requested by an EVENT handler OR a TIMER callback that changed app
-        # state. This runs every iteration, NOT only `if event_count > 0`: a timer-driven request_rebuild
-        # (a live clock, polled data, a state-based animation) used to be dropped when idle and deferred to
-        # the next input event — the "frozen until you move the mouse, then a rebuild on every move" class.
-        # (Timer-driven mark_needs_render was already honored via any_layer_needs_render? above; only the
-        # separate needs_rebuild? signal was gated on input.)
-        if app.needs_rebuild?
-          {% if flag?(:DEBUG_RENDER) %}
-            puts "\n[REBUILD CHECK @ loop] needs_rebuild? = true (#{event_count} events)"
-            app.root.try { |root| app.find_widgets_needing_layout(root) }
-          {% end %}
-          # App state changed - rebuild tree with reconciliation
-          app.rebuild
-          needs_redraw = true
-        elsif !needs_redraw
-          # Render needed (no rebuild) — decided by the aggregate-rev pull, which subsumes the old
-          # root.needs_layout? / needs_render? dirty checks (layout_rev/content_rev are in the aggregate).
-          needs_redraw = any_layer_needs_render?(app)
-        end
-
-        # The barrier is lifted only by a frame: without one, EventBatch would never drain again. Nor
-        # may the loop idle after a frame whose end applied work that still has to be painted.
-        needs_redraw = true if app.input_waits_for_frame? || @flushed_after_frame
-
-        # Render once per frame with latest state (after processing all events)
-        if needs_redraw
-          render_frame(app) # stamps the aggregate it rendered at, so the next pull idles until it moves
-          needs_redraw = false
-        elsif event_count > 0
-          # Events processed but no redraw triggered - this is where we save CPU!
-        end
+        finish_iteration(app, needs_redraw, event_count)
+        needs_redraw = false
       end
 
-      @work_log.close # flush + close the frame ledger on exit
-      InputLog.close  # ...and the keyboard trace, with its received-vs-accepted trailer
-    end
-
-    # Dispatch one polled event. Returns true if it requires a redraw.
-    private def dispatch(event : LibCSFML::Event, app : App) : Bool
-      @last_mouse_move_time = Time.instant if event.type == SF::Event::MouseMoved
-      handle_event(event, app) || event.type == SF::Event::MouseButtonPressed ||
-        event.type == SF::Event::MouseButtonReleased ||
-        event.type == SF::Event::KeyPressed ||
-        event.type == SF::Event::Resized
-    end
-
-    # Handle a single event
-    # Returns true if event requires redraw
-    private def handle_event(event : LibCSFML::Event, app : App) : Bool
-      handle_event_impl(event, app)
-    rescue ex
-      app.report_event_exception(ex)
-      false
-    end
-
-    private def handle_event_impl(event : LibCSFML::Event, app : App) : Bool
-      case event.type
-      when SF::Event::TextEntered, SF::Event::KeyPressed, SF::Event::KeyReleased, SF::Event::FocusLost
-        @keyboard.handle(event, app)
-      when SF::Event::MouseWheelScrolled
-        # Everything below is read from the event and the keyboard's event-stream state, never from
-        # the live devices: a queued wheel event belongs where and how it happened (KeyboardDispatch).
-        # Ctrl+MouseWheel = zoom: a widget's own content (on_zoom_wheel), else the UI's font (App)
-        if @keyboard.control?
-          wheel = event.mouse_wheel_scroll
-          app.handle_ctrl_wheel(wheel.delta.to_f64, Vec2.new(wheel.position.x.to_f64, wheel.position.y.to_f64))
-          return true
-        end
-
-        # Dispatch wheel event to widgets, at the position the wheel turned
-        wheel = event.mouse_wheel_scroll
-        mouse_pos = Vec2.new(wheel.position.x.to_f64, wheel.position.y.to_f64)
-        # Note: SFML delta is positive for scroll up, negative for scroll down
-        # Check wheel axis - touchpad can generate horizontal scroll events
-        delta = case wheel.wheel
-                when SF::Mouse::Wheel::HorizontalWheel
-                  Vec2.new(wheel.delta.to_f64, 0.0) # Horizontal scroll → X
-                else
-                  Vec2.new(0.0, wheel.delta.to_f64) # Vertical scroll → Y
-                end
-        # Shift turns the wheel horizontal
-        app.handle_mouse_wheel(delta, mouse_pos, @keyboard.shift?)
-        # Update hover after scroll - content under mouse has changed
-        app.update_hover(mouse_pos)
-        true # Redraw after scroll
-      when SF::Event::Closed
-        # Let app handle close request (can save data, show dialogs, etc.)
-        # App calls quit() when ready to actually close
-        app.handle_close_request
-        false
-      when SF::Event::MouseButtonPressed, SF::Event::MouseButtonReleased, SF::Event::MouseMoved
-        # MouseDispatch: the path TestRenderer#deliver takes too. The cursor shape needs the window.
-        redraw = @mouse.handle(event, app)
-        if at = @mouse.cursor_point(event, app)
-          redraw = update_cursor(app, at) || redraw
-        end
-        redraw
-      when SF::Event::Resized
-        if window = @window
-          # Reset view to prevent content scaling
-          view = SF::View.new(SF.float_rect(0, 0, event.size.size.x.to_f32, event.size.size.y.to_f32))
-          window.view = view
-
-          # Force re-apply cursor after window resize
-          # OS takes over cursor during resize, we must reclaim it
-          window.mouse_cursor = @cursor_arrow
-        end
-        # Mark root as needing layout to trigger re-layout with new size
-        app.root.try &.mark_needs_layout
-        false # Caller handles redraw for resize events
-      else
-        false
-      end
-    end
-
-    # Update cursor based on what's under the mouse
-    # Returns true if cursor changed (needs redraw), false otherwise
-    private def update_cursor(app : App, point : Vec2) : Bool
-      return false unless window = @window
-
-      # Ask app for cursor type (app has all the business logic)
-      cursor_type = app.get_cursor_for_point(point)
-
-      # Convert to SFML cursor type and set
-      set_cursor(cursor_type)
-    end
-
-    # Set the window cursor (only if changed)
-    # Returns true if cursor changed, false otherwise
-    private def set_cursor(cursor_type : CursorType) : Bool
-      # Convert CursorType to SF::Cursor::Type
-      sf_cursor_type = case cursor_type
-                       when CursorType::Text
-                         SF::Cursor::Text
-                       when CursorType::SizeHorizontal
-                         SF::Cursor::SizeHorizontal
-                       when CursorType::SizeVertical
-                         SF::Cursor::SizeVertical
-                       when CursorType::SizeNWSE
-                         SF::Cursor::SizeTopLeftBottomRight
-                       when CursorType::SizeNESW
-                         SF::Cursor::SizeBottomLeftTopRight
-                       when CursorType::SizeAll
-                         SF::Cursor::SizeAll
-                       else
-                         SF::Cursor::Arrow
-                       end
-
-      return false if @current_cursor == sf_cursor_type
-      return false unless window = @window
-
-      cursor = case sf_cursor_type
-               when SF::Cursor::Text
-                 @cursor_text
-               when SF::Cursor::SizeHorizontal
-                 @cursor_size_horizontal
-               when SF::Cursor::SizeVertical
-                 @cursor_size_vertical
-               when SF::Cursor::SizeTopLeftBottomRight
-                 @cursor_size_nwse
-               when SF::Cursor::SizeBottomLeftTopRight
-                 @cursor_size_nesw
-               else
-                 @cursor_arrow
-               end
-
-      window.mouse_cursor = cursor
-      @current_cursor = sf_cursor_type
-      true # Cursor changed
-    end
-
-    # Render a single frame
-    def render_frame(app : App)
-      return unless window = @window # Headless mode - no window to render to
-      unless root = app.root
-        end_frame(app) # nothing to paint, but the frame ends as every frame does
-        return
-      end
-
-      # Sync background color from app (app may override; nil = theme default).
-      @background_color = app.app_background_color || Theme.current.app_background
-
-      # Sync window title from root widget (e.g. "MyApp — document.txt")
-      apply_title(app, window)
-
-      # NOTE: Tried reset_gl_states here for texture pooling fix - didn't help.
-      # See docs/TEXTURE_POOLING_INVESTIGATION.md
-
-      frame_start = LayerRenderer.profile_enabled ? Time.instant : nil
-      did_layout = false # hoisted so the work-log record below (outside begin/rescue) can read it
-
-      begin
-        # Perform layout if needed (timed)
-        layout_start = Time.instant
-        window_size = Size.new(window.size.x.to_f64, window.size.y.to_f64)
-        did_layout = app.prepare_layout(window_size)
-        LayerRenderer.phase_layout_ms = (Time.instant - layout_start).total_milliseconds
-        if frame_start
-          LayerRenderer.record_profile("layout", LayerRenderer.phase_layout_ms)
-        end
-
-        # Invalidate layer cache after layout (layer set may have changed)
-        invalidate_layer_cache if did_layout
-
-        # Cheap-rebuild staleness: after a rebuild + layout (layer.widgets now repopulated), mark only
-        # the layers whose content actually changed (replaces the old unconditional post-rebuild clear).
-        # Guarded on did_layout: a rebuild always forces a full root re-layout (fresh ⇒ NeedsLayout).
-        if app.rebuild_needs_assessment
-          if did_layout && (r = app.root)
-            assess_rebuild_staleness(r)
-          end
-          app.rebuild_needs_assessment = false
-        end
-
-        # Re-detect hover after layout (restores hover state after rebuild)
-        app.redetect_hover if did_layout
-
-        # Render all layers using shared LayerRenderer logic (timed)
-        # Include ghost and highlight layers if drag-and-drop is active
-        render_start = Time.instant
-        render_all_layers(root, app.drag_manager.ghost_layer, app.drag_manager.highlight_layer)
-        # Note: composite timing is set inside render_all_layers
-        LayerRenderer.phase_render_ms = (Time.instant - render_start).total_milliseconds - LayerRenderer.phase_composite_ms
-
-        # Clear render state after rendering
-        app.clear_render_state unless did_layout
-
-        # Render overlay primitives (splash screen, etc.) directly to window
-        if overlay = app.overlay_primitives(window_size.width, window_size.height)
-          reject_window_direct_clips(overlay)
-          overlay.each { |p| execute_primitive(p, window) }
-        end
-
-        # Display (timed)
-        display_start = Time.instant
-        window.display
-        LayerRenderer.phase_display_ms = (Time.instant - display_start).total_milliseconds
-
-        # THE one drain point for released RenderTextures. Deliberately here and nowhere else:
-        # after display, no layer's RenderTexture is the active render target, so destroying FBOs
-        # cannot disturb the GL state SFML tracks mid-frame (the corruption mode the old pooling
-        # attempt hit). CrSFMLBackend#dispose only enqueues; this is what actually frees.
-        CrSFMLBackend.drain_reaper
-
-        # Cost of this frame, so InputLog can correlate each keystroke with the load at the moment
-        # it arrived — the reporter's loss is load-dependent (clean when slow, clean with one Shape,
-        # lossy with ten).
-        frame_ms = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms +
-                   LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
-        @keyboard.last_frame_ms = frame_ms
-        if InputLog.enabled?
-          InputLog.record_frame(frame_ms, did_layout, false,
-            LayerRenderer.rendered_layer_ids.any?(&.starts_with?("matrix_content")))
-          InputLog.batch_begin # events arriving after this frame form a new batch
-        end
-
-        if ENV["CRYMBLE_PERF"]? == "1"
-          total = LayerRenderer.phase_layout_ms + LayerRenderer.phase_render_ms + LayerRenderer.phase_composite_ms + LayerRenderer.phase_display_ms
-          if total > 1.0  # Only log slow frames (>1ms)
-            STDERR.puts "[PERF] total=#{total.round(1)}ms layout=#{LayerRenderer.phase_layout_ms.round(1)} render=#{LayerRenderer.phase_render_ms.round(1)} composite=#{LayerRenderer.phase_composite_ms.round(1)} display=#{LayerRenderer.phase_display_ms.round(1)} layers_rendered=#{LayerRenderer.frame_layers_needing_render} widgets=#{LayerRenderer.frame_widget_count} composites=#{LayerRenderer.frame_composite_count} ids=#{LayerRenderer.rendered_layer_ids.join(",")}"
-          end
-        end
-
-
-        if frame_start
-          LayerRenderer.record_profile("display", LayerRenderer.phase_display_ms)
-        end
-
-        if frame_start
-          LayerRenderer.record_profile("render_frame", (Time.instant - frame_start).total_milliseconds)
-        end
-      rescue exception
-        # A post-release use is a DEFECT, never a transient frame hiccup, so it must not enter
-        # graceful degradation: that path recovers by nil-ing every widget and layer backend, i.e.
-        # it would abandon the whole GPU working set once per frame while hiding the very bug this
-        # error exists to report. Let it out.
-        raise exception if exception.is_a?(RenderDefect)
-        handle_frame_exception(exception, app, window)
-      else
-        note_frame_completed
-      end
-
-      end_frame(app)
-      report_frame_failure(app)
-      apply_title(app, window) # a failure run marks it, the frame that ends one clears it
-
-      {% if flag?(:PERF_LOG) %}
-        frame_ms = frame_start ? (Time.instant - frame_start).total_milliseconds : 0.0
-        if frame_ms > 1.0 || LayerRenderer.frame_layers_needing_render > 0
-          File.open("/tmp/perf_log.txt", "a") do |f|
-            f.puts "FRAME: #{frame_ms.round(1)}ms layout=#{LayerRenderer.phase_layout_ms.round(1)}ms render=#{LayerRenderer.phase_render_ms.round(1)}ms composite=#{LayerRenderer.phase_composite_ms.round(1)}ms display=#{LayerRenderer.phase_display_ms.round(1)}ms layers_rendered=#{LayerRenderer.frame_layers_needing_render}/#{LayerRenderer.frame_layers_total} widgets=#{LayerRenderer.frame_widgets_iterated} prims=#{LayerRenderer.frame_primitive_count}"
-          end
-        end
-      {% end %}
-
-      # Per-frame work ledger (no-op unless CRYMBLE_WORKLOG is set) — record BEFORE the counters reset.
-      @work_log.record(
-        LayerRenderer.phase_layout_ms, LayerRenderer.phase_render_ms,
-        LayerRenderer.phase_composite_ms, LayerRenderer.phase_display_ms,
-        did_layout, app.mouse_down?)
-
-      # Reset frame counters for next frame (always, even after exception)
-      LayerRenderer.reset_frame_counters
-      Widget.reset_layout_count
-
-      Widget.increment_render_count
-    end
-
-    # The frame's end, the same in both renderers and reached by every frame: stamp the aggregate it
-    # rendered at, THEN apply the structural work of widgets that did not paint (App#finish_frame) - its
-    # marks must move the trigger after the stamp, and the loop must not idle before the frame that
-    # paints them.
-    #
-    # A flush that raised is reported like an event's exception - the loop runs it outside the frame's
-    # rescue - except the defects a frame never degrades over either.
-    private def end_frame(app : App) : Nil
-      @render_trigger.record(app)
-      @flushed_after_frame = app.finish_frame
-    rescue ex
-      raise ex if ex.is_a?(RenderDefect)
-      @flushed_after_frame = true # the others' work ran; paint it
-      app.report_event_exception(ex)
-    end
-
-    # Handle exception during frame rendering (graceful degradation)
-    private def handle_frame_exception(exception : Exception, app : App, window : SF::RenderWindow)
-      STDERR.puts "[GRACEFUL_DEGRADATION] Frame exception: #{exception.message}"
-      STDERR.puts "  #{exception.backtrace?.try(&.first(3).join("\n  "))}"
-      note_frame_failure(exception)
-      app.reset_all_caches
-      app.root.try(&.mark_needs_layout)
-      # CRITICAL: Always display the frame — a stale frame is better than a black hole
-      begin
-        window.display
-      rescue
-        return # the reaper waits for the next good frame: after a display that raised, the GL state is unknown
-      end
-      # What the recovery released is freed here, in the state the success path drains in (after display) - a
-      # frame that keeps raising would otherwise park the working set in the reaper again and again.
-      CrSFMLBackend.drain_reaper
-    end
-
-    # The window shows title_to_apply - written only when it changed.
-    private def apply_title(app : App, window : SF::RenderWindow) : Nil
-      return unless title = title_to_apply(app)
-      return if title == @current_title
-      window.title = title
-      @current_title = title
+      finish_run
     end
 
     # === PRIMITIVE-BASED RENDERING (New Architecture) ===
 
-    # Render a list of primitives to the current window
+    # Render a list of primitives to the current window (WindowRenderer#render_primitives refused clips)
     # This is the new rendering path - primitives are backend-agnostic data structures
-    def render_primitives(primitives : Array(DrawPrimitive))
-      return unless window = @window
-      reject_window_direct_clips(primitives)
+    protected def draw_primitives(primitives : Array(DrawPrimitive)) : Nil
+      window = @window.not_nil!
       primitives.each { |primitive| execute_primitive(primitive, window) }
     end
 

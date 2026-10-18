@@ -1,0 +1,9 @@
+{
+  "name": "crymble-ui-wasm-checks",
+  "private": true,
+  "description": "The web flavour's browser checks (conformance, smoke). Not shipped; tools/wasm/check.sh installs it.",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

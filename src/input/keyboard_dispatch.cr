@@ -19,6 +19,11 @@ module CrymbleUI
   # being held at drain time, while Tab (whose KeyEvent carries its own flags) kept navigating — cells
   # came out empty with the cursor still in step (AutoHotkey into embrace, 2026-09-22).
   class KeyboardDispatch
+    # The chords handled here in code rather than registered with the ShortcutManager - what an app gets without
+    # asking (the web flavour's page lists them next to the app's own when it names what a browser keeps).
+    # spec/input/keyboard_builtins_spec.cr feeds each one through this class and requires it to be consumed.
+    BUILT_INS = ["Ctrl+Tab", "Ctrl+Shift+Tab", "Ctrl+M", "Ctrl+0", "F6", "Shift+F6"]
+
     # Cost of the most recently rendered frame, stamped by the renderer for InputLog.
     property last_frame_ms : Float64 = 0.0
 

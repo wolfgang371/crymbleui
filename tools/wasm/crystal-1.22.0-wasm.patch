@@ -1,0 +1,451 @@
+Crystal 1.22.0 for wasm32-wasi: exceptions, struct returns, Boehm GC, WASI file system fixes.
+
+A derivative of Crystal (https://github.com/crystal-lang/crystal, Apache License 2.0). Applies to tag 1.22.0
+(commit 39f3f4d08f70c3678b579f85dc6f8b7be69c7956) with `git apply`; tools/wasm/setup.sh does that.
+
+What it changes, and why:
+- codegen/exception.cr, codegen/codegen.cr, raise.cr, compiler.cr, llvm/: wasm32 takes the funclet exception path
+  MSVC takes (one catch-all catchpad; llvm.wasm.get.exception yields the thrown Crystal Exception, raise is
+  llvm.wasm.throw) with LLVM's -wasm-enable-eh and +exception-handling. Stock 1.22: `raise` on wasm32 exits(1).
+- codegen/abi/wasm32.cr: a C function returning a struct returns it through a hidden pointer (StructRet), as
+  clang does. Stock 1.22: ByVal there, so the call site never allocates the slot - the compiler crashes on any
+  C function that returns a struct.
+- gc.cr: wasm32 uses Boehm (built for WASI by setup.sh) like every other target. Stock 1.22: gc/none - nothing
+  is ever freed. gc/boehm.cr: GC.init registers the static data (class variables, constants) as a root range
+  through the toolchain's shim - Boehm's wasm config scans none, so a constant like STDOUT was collected and its
+  finalizer closed the descriptor; a finalizer callback returns void whatever `finalize` returns (wasm traps on
+  the mismatched signature); GC_set_stackbottom returns void in bdwgc >= 8.2 (the binding's return type
+  made a signature-mismatch warning at link time).
+- crystal/event_loop/wasi.cr: EventLoop#open via LibC.open (stock: NotImplementedError - no file could be opened).
+- crystal/system/wasi/file.cr: File.delete uses the unix implementation (stock: NotImplementedError).
+- crystal/system/wasi/dir.cr: a refill that comes back empty ends the listing (stock: an empty directory on a
+  runtime without "." and ".." listed one entry with an empty name - FileUtils.rm_r recursed forever).
+- spec/expectations.cr: expect_raises works on wasm32 (the stub that skipped it is gone).
+
+diff --git a/src/compiler/crystal/codegen/abi/wasm32.cr b/src/compiler/crystal/codegen/abi/wasm32.cr
+index 2927024..82ab52f 100644
+--- a/src/compiler/crystal/codegen/abi/wasm32.cr
++++ b/src/compiler/crystal/codegen/abi/wasm32.cr
+@@ -26,7 +26,9 @@ class Crystal::ABI::Wasm32 < Crystal::ABI
+ 
+   private def compute_return_type(rty, ret_def, context)
+     if aggregate?(rty)
+-      ArgType.indirect(rty, LLVM::Attribute::ByVal)
++      # Returned through a caller-allocated slot passed as a hidden first argument, as clang does
++      # (ByVal here made prepare_call_args_external skip the slot: a nil @sret_value at codegen).
++      ArgType.indirect(rty, LLVM::Attribute::StructRet)
+     else
+       ArgType.direct(rty)
+     end
+diff --git a/src/compiler/crystal/codegen/codegen.cr b/src/compiler/crystal/codegen/codegen.cr
+index b4b1355..0bea152 100644
+--- a/src/compiler/crystal/codegen/codegen.cr
++++ b/src/compiler/crystal/codegen/codegen.cr
+@@ -303,6 +303,7 @@ module Crystal
+         @main.personality_function = windows_personality_fun.func
+       else
+         @personality_name = "__crystal_personality"
++        @main.personality_function = wasm_personality_fun.func if @program.has_flag?("wasm32")
+       end
+ 
+       @context = Context.new @main, main_type, @program
+diff --git a/src/compiler/crystal/codegen/exception.cr b/src/compiler/crystal/codegen/exception.cr
+index 944ac99..47be6f3 100644
+--- a/src/compiler/crystal/codegen/exception.cr
++++ b/src/compiler/crystal/codegen/exception.cr
+@@ -61,8 +61,10 @@ class Crystal::CodeGenVisitor
+     # Note we codegen the ensure body three times! In practice this isn't a big deal, since ensure bodies are typically small.
+ 
+     msvc = @program.has_flag?("msvc")
++    wasm_eh = @program.has_flag?("wasm32")
+ 
+     context.fun.personality_function = windows_personality_fun.func if msvc
++    context.fun.personality_function = wasm_personality_fun.func if wasm_eh
+ 
+     # This is the block which is entered when the body raises an exception
+     rescue_block = new_block "rescue"
+@@ -109,7 +111,20 @@ class Crystal::CodeGenVisitor
+ 
+       old_catch_pad = @catch_pad
+ 
+-      if msvc
++      if wasm_eh
++        # WebAssembly exception handling uses the same funclet IR as MSVC. A catch-all catchpad
++        # (null clause) catches every exception; llvm.wasm.get.exception yields the thrown pointer,
++        # which is the Crystal Exception itself (see __crystal_raise in raise.cr).
++        catch_body = new_block "catch_body"
++        catch_switch = builder.catch_switch(@catch_pad || LLVM::Value.null, @rescue_block || LLVM::BasicBlock.null, 1)
++        builder.add_handler catch_switch, catch_body
++        position_at_end catch_body
++        exception_type = @program.exception.virtual_type
++        @catch_pad = builder.catch_pad catch_switch, [llvm_context.void_pointer.null]
++        unwind_ex_obj = call wasm_get_exception_fun, [@catch_pad.not_nil!]
++        caught_exception = unwind_ex_obj
++        exception_type_id = type_id(caught_exception, exception_type)
++      elsif msvc
+         # Windows structured exception handling must enter a catch_switch instruction
+         # which decides which catch body block to enter. Crystal only ever generates one catch body
+         # which is used for all exceptions. For more information on how structured exception handling works in LLVM,
+@@ -249,7 +264,14 @@ class Crystal::CodeGenVisitor
+ 
+         # Codegen catchswitch+pad or landing pad as described above.
+         # This code is simpler because we never need to extract the exception type
+-        if msvc
++        if wasm_eh
++          rescue_ensure_body = new_block "rescue_ensure_body"
++          catch_switch = builder.catch_switch(old_catch_pad || LLVM::Value.null, @rescue_block || LLVM::BasicBlock.null, 1)
++          builder.add_handler catch_switch, rescue_ensure_body
++          position_at_end rescue_ensure_body
++          @catch_pad = builder.catch_pad catch_switch, [llvm_context.void_pointer.null]
++          unwind_ex_obj = call wasm_get_exception_fun, [@catch_pad.not_nil!]
++        elsif msvc
+           rescue_ensure_body = new_block "rescue_ensure_body"
+           catch_switch = builder.catch_switch(old_catch_pad || LLVM::Value.null, @rescue_block || LLVM::BasicBlock.null, 1)
+           builder.add_handler catch_switch, rescue_ensure_body
+@@ -323,6 +345,18 @@ class Crystal::CodeGenVisitor
+     end
+   end
+ 
++  private def wasm_personality_fun
++    fetch_typed_fun(@llvm_mod, "__gxx_wasm_personality_v0") do
++      LLVM::Type.function([] of LLVM::Type, @llvm_context.int32, true)
++    end
++  end
++
++  private def wasm_get_exception_fun
++    fetch_typed_fun(@llvm_mod, "llvm.wasm.get.exception") do
++      LLVM::Type.function([@llvm_context.token], @llvm_context.void_pointer)
++    end
++  end
++
+   private def windows_personality_fun
+     fetch_typed_fun(@llvm_mod, "__CxxFrameHandler3") do
+       LLVM::Type.function([] of LLVM::Type, @llvm_context.int32, true)
+diff --git a/src/compiler/crystal/compiler.cr b/src/compiler/crystal/compiler.cr
+index 60a071d..b46f51d 100644
+--- a/src/compiler/crystal/compiler.cr
++++ b/src/compiler/crystal/compiler.cr
+@@ -726,6 +726,10 @@ module Crystal
+     end
+ 
+     def create_target_machine
++      if @codegen_target.architecture == "wasm32"
++        LLVM.parse_command_line_options({"", "-wasm-enable-eh"})
++        @mattr = [@mattr, "+exception-handling"].compact.join(",")
++      end
+       @codegen_target.to_target_machine(@mcpu || "", @mattr || "", @optimization_mode, @mcmodel)
+     rescue ex : ArgumentError
+       stderr.print colorize("Error: ").red.bold
+diff --git a/src/crystal/event_loop/wasi.cr b/src/crystal/event_loop/wasi.cr
+index d3b3ab3..ee4a1c7 100644
+--- a/src/crystal/event_loop/wasi.cr
++++ b/src/crystal/event_loop/wasi.cr
+@@ -34,7 +34,11 @@ class Crystal::EventLoop::Wasi < Crystal::EventLoop
+   end
+ 
+   def open(path : String, flags : Int32, permissions : File::Permissions, blocking : Bool?) : {System::FileDescriptor::Handle, Bool} | Errno | WinError
+-    raise NotImplementedError.new("Crystal::Wasi::EventLoop#open")
++    path.check_no_null_byte
++    # WASI has no non-blocking file I/O: a plain open, resolved against the preopened directories.
++    fd = LibC.open(path, flags, permissions)
++    return Errno.value if fd == -1
++    {fd, true}
+   end
+ 
+   # TODO: LibWasi.fd_read
+diff --git a/src/crystal/system/wasi/dir.cr b/src/crystal/system/wasi/dir.cr
+index 5d64a2f..f95d094 100644
+--- a/src/crystal/system/wasi/dir.cr
++++ b/src/crystal/system/wasi/dir.cr
+@@ -34,6 +34,9 @@ module Crystal::System::Dir
+ 
+     if dir.pos + sizeof(LibWasi::DirEnt) > dir.buf.size
+       dir.fill_buffer(path)
++      # A refill can come back empty (an empty directory on a runtime that omits "." and ".."):
++      # without this check the zeroed buffer is read as one entry with an empty name.
++      return nil if dir.pos >= dir.end_pos
+     end
+ 
+     dirent = Pointer(LibWasi::DirEnt).new(dir.buf.to_unsafe.address + dir.pos).value
+diff --git a/src/crystal/system/wasi/file.cr b/src/crystal/system/wasi/file.cr
+index 17e91fd..2a75314 100644
+--- a/src/crystal/system/wasi/file.cr
++++ b/src/crystal/system/wasi/file.cr
+@@ -25,7 +25,5 @@ module Crystal::System::File
+     raise NotImplementedError.new "Crystal::System::File.utime"
+   end
+ 
+-  def self.delete(path : String, *, raise_on_missing : Bool) : Bool
+-    raise NotImplementedError.new "Crystal::System::File.delete"
+-  end
++  # File.delete: the unix implementation (LibC.unlink) works on WASI.
+ end
+diff --git a/src/gc.cr b/src/gc.cr
+index d42a229..34dec8a 100644
+--- a/src/gc.cr
++++ b/src/gc.cr
+@@ -216,7 +216,7 @@ module GC
+   end
+ end
+ 
+-{% if flag?(:gc_none) || flag?(:wasm32) %}
++{% if flag?(:gc_none) %}
+   require "gc/none"
+ {% else %}
+   require "gc/boehm"
+diff --git a/src/gc/boehm.cr b/src/gc/boehm.cr
+index d817ffd..e98e80b 100644
+--- a/src/gc/boehm.cr
++++ b/src/gc/boehm.cr
+@@ -49,6 +49,9 @@ require "crystal/tracing"
+   @[Link(dll: "gc.dll")]
+ {% end %}
+ lib LibGC
++  {% if flag?(:wasm32) %}
++    fun wasm_gc_add_data_roots : Void
++  {% end %}
+   {% unless flag?(:win32) %}
+     {% pkg_config_name = ((ann = LibGC.annotations(Link).find(&.["pkg_config"])) && ann["pkg_config"]) || ((ann = LibGC.annotations(Link).find(&.[0])) && ann[0]) %}
+     VERSION = {{ `pkg-config #{pkg_config_name} --silence-errors --modversion || printf "0.0.0"`.chomp.stringify }}
+@@ -123,7 +126,7 @@ lib LibGC
+ 
+   {% if !flag?(:without_mt) || flag?(:win32) || compare_versions(VERSION, "8.2.0") >= 0 %}
+     fun get_my_stackbottom = GC_get_my_stackbottom(sb : StackBase*) : ThreadHandle
+-    fun set_stackbottom = GC_set_stackbottom(th : ThreadHandle, sb : StackBase*) : ThreadHandle
++    fun set_stackbottom = GC_set_stackbottom(th : ThreadHandle, sb : StackBase*) # void in bdwgc >= 8.2
+   {% else %}
+     $stackbottom = GC_stackbottom : Void*
+   {% end %}
+@@ -225,6 +228,10 @@ module GC
+       LibGC.set_handle_fork(1)
+     {% end %}
+     LibGC.init
++    {% if flag?(:wasm32) %}
++      # Boehm's wasm config scans no static data: register class variables and constants (the toolchain's shim)
++      LibGC.wasm_gc_add_data_roots
++    {% end %}
+ 
+     {% unless flag?(:without_mt) %}
+       @@lock = Crystal::RWLock.new
+@@ -358,7 +365,9 @@ module GC
+ 
+   private def self.add_finalizer_impl(object : T) forall T
+     LibGC.register_finalizer_ignore_self(object.as(Void*),
+-      ->(obj, data) { obj.as(T).finalize },
++      # `; nil`: the callback returns void. A finalize returning a value made the proc return it, and wasm traps
++      # on the mismatched signature when the collector calls it.
++      ->(obj, data) { obj.as(T).finalize; nil },
+       nil, nil, nil)
+     nil
+   end
+diff --git a/src/llvm/context.cr b/src/llvm/context.cr
+index 67d7813..9dba3ef 100644
+--- a/src/llvm/context.cr
++++ b/src/llvm/context.cr
+@@ -35,6 +35,10 @@ class LLVM::Context
+     Type.new LibLLVM.int16_type_in_context(self)
+   end
+ 
++  def token : Type
++    Type.new LibLLVM.token_type_in_context(self)
++  end
++
+   def int32 : Type
+     Type.new LibLLVM.int32_type_in_context(self)
+   end
+diff --git a/src/llvm/lib_llvm/core.cr b/src/llvm/lib_llvm/core.cr
+index 0d23baa..708d7fb 100644
+--- a/src/llvm/lib_llvm/core.cr
++++ b/src/llvm/lib_llvm/core.cr
+@@ -103,6 +103,7 @@ lib LibLLVM
+   fun get_vector_size = LLVMGetVectorSize(vector_ty : TypeRef) : UInt
+ 
+   fun void_type_in_context = LLVMVoidTypeInContext(c : ContextRef) : TypeRef
++  fun token_type_in_context = LLVMTokenTypeInContext(c : ContextRef) : TypeRef
+ 
+   fun type_of = LLVMTypeOf(val : ValueRef) : TypeRef
+   fun get_value_kind = LLVMGetValueKind(val : ValueRef) : LLVM::Value::Kind
+diff --git a/src/raise.cr b/src/raise.cr
+index ab5d9a5..3347600 100644
+--- a/src/raise.cr
++++ b/src/raise.cr
+@@ -168,11 +168,20 @@ end
+     LibC.exit(1)
+   end
+ 
++  # :nodoc:
++  lib LibWasmEH
++    fun throw = "llvm.wasm.throw"(tag : Int32, ex : Void*) : NoReturn
++  end
++
++  # :nodoc:
++  fun __gxx_wasm_personality_v0 : Int32
++    0
++  end
++
+   # :nodoc:
+   @[Raises]
+   fun __crystal_raise(ex : Void*) : NoReturn
+-    Crystal::System.print_error "EXITING: __crystal_raise called"
+-    LibC.exit(1)
++    LibWasmEH.throw(0, ex)
+   end
+ 
+   # :nodoc:
+@@ -241,9 +250,7 @@ end
+ 
+ {% if flag?(:wasm32) %}
+   def raise(exception : Exception) : NoReturn
+-    Crystal::System.print_error "EXITING: Attempting to raise:\n%s\n", exception.inspect_with_backtrace
+-    LibIntrinsics.debugtrap
+-    LibC.exit(1)
++    __crystal_raise(exception.as(Void*))
+   end
+ {% else %}
+   # Raises the *exception*.
+diff --git a/src/spec/expectations.cr b/src/spec/expectations.cr
+index 2ba8405..81418d7 100644
+--- a/src/spec/expectations.cr
++++ b/src/spec/expectations.cr
+@@ -394,82 +394,76 @@ module Spec
+     # If *message* is a regular expression, it is used to match the error message.
+     #
+     # It returns the rescued exception.
+-    {% if flag?(:wasm32) %}
+-      def expect_raises(klass : T.class, message : String | Regex | Nil = nil, file = __FILE__, line = __LINE__, &) forall T
+-        # TODO: Enable "expect_raises" for wasm32 after exceptions are working.
++    def expect_raises(klass : T.class, message : String | Regex | Nil = nil, file = __FILE__, line = __LINE__, &) forall T
++      yield
++    rescue ex : T
++      # We usually bubble Spec::AssertionFailed, unless this is the expected exception
++      if ex.is_a?(Spec::AssertionFailed) && klass != Spec::AssertionFailed
++        raise ex
+       end
+-    {% else %}
+-      def expect_raises(klass : T.class, message : String | Regex | Nil = nil, file = __FILE__, line = __LINE__, &) forall T
+-        yield
+-      rescue ex : T
+-        # We usually bubble Spec::AssertionFailed, unless this is the expected exception
+-        if ex.is_a?(Spec::AssertionFailed) && klass != Spec::AssertionFailed
+-          raise ex
+-        end
+ 
+-        # `NestingSpecError` is treated as the same above.
+-        if ex.is_a?(Spec::NestingSpecError) && klass != Spec::NestingSpecError
+-          raise ex
+-        end
++      # `NestingSpecError` is treated as the same above.
++      if ex.is_a?(Spec::NestingSpecError) && klass != Spec::NestingSpecError
++        raise ex
++      end
+ 
+-        exception_as_string = ex.to_s
+-        case message
+-        when Regex
+-          unless exception_as_string =~ message
+-            expectation_failed_message = build_expectation_failed_message(klass, message, ex, exception_as_string)
+-            fail expectation_failed_message, file, line
+-          end
+-        when String
+-          unless exception_as_string.includes?(message)
+-            expectation_failed_message = build_expectation_failed_message(klass, message, ex, exception_as_string)
+-            fail expectation_failed_message, file, line
+-          end
+-        when Nil
+-          # No need to check the message
++      exception_as_string = ex.to_s
++      case message
++      when Regex
++        unless exception_as_string =~ message
++          expectation_failed_message = build_expectation_failed_message(klass, message, ex, exception_as_string)
++          fail expectation_failed_message, file, line
+         end
+-
+-        ex
+-      rescue ex
+-        expectation_failed_message = build_expectation_failed_message(klass, ex)
+-        fail expectation_failed_message, file, line
+-      else
+-        fail "Expected #{klass} but nothing was raised", file, line
++      when String
++        unless exception_as_string.includes?(message)
++          expectation_failed_message = build_expectation_failed_message(klass, message, ex, exception_as_string)
++          fail expectation_failed_message, file, line
++        end
++      when Nil
++        # No need to check the message
+       end
+ 
+-      private def build_expectation_failed_message(klass : Class, message : String, exception : Exception, exception_as_string : String)
+-        backtrace = "  # #{exception.backtrace.join("\n  # ")}"
++      ex
++    rescue ex
++      expectation_failed_message = build_expectation_failed_message(klass, ex)
++      fail expectation_failed_message, file, line
++    else
++      fail "Expected #{klass} but nothing was raised", file, line
++    end
++
++    private def build_expectation_failed_message(klass : Class, message : String, exception : Exception, exception_as_string : String)
++      backtrace = "  # #{exception.backtrace.join("\n  # ")}"
+ 
+-        <<-MESSAGE
+-        Expected #{klass} with message containing: #{message.inspect}
+-             got #{exception.class} with message: #{exception_as_string.inspect}
+-        Backtrace:
+-        #{backtrace}
+-        MESSAGE
+-      end
++      <<-MESSAGE
++      Expected #{klass} with message containing: #{message.inspect}
++           got #{exception.class} with message: #{exception_as_string.inspect}
++      Backtrace:
++      #{backtrace}
++      MESSAGE
++    end
+ 
+-      private def build_expectation_failed_message(klass : Class, message : Regex, exception : Exception, exception_as_string : String)
+-        backtrace = "  # #{exception.backtrace.join("\n  # ")}"
++    private def build_expectation_failed_message(klass : Class, message : Regex, exception : Exception, exception_as_string : String)
++      backtrace = "  # #{exception.backtrace.join("\n  # ")}"
+ 
+-        <<-MESSAGE
+-        Expected #{klass} with message matching: #{message.inspect}
+-             got #{exception.class} with message: #{exception_as_string.inspect}
+-        Backtrace:
+-        #{backtrace}
+-        MESSAGE
+-      end
++      <<-MESSAGE
++      Expected #{klass} with message matching: #{message.inspect}
++           got #{exception.class} with message: #{exception_as_string.inspect}
++      Backtrace:
++      #{backtrace}
++      MESSAGE
++    end
+ 
+-      private def build_expectation_failed_message(klass : Class, exception : Exception)
+-        exception_as_string = exception.to_s
+-        backtrace = "  # #{exception.backtrace.join("\n  # ")}"
++    private def build_expectation_failed_message(klass : Class, exception : Exception)
++      exception_as_string = exception.to_s
++      backtrace = "  # #{exception.backtrace.join("\n  # ")}"
+ 
+-        <<-MESSAGE
+-        Expected #{klass}
+-             got #{exception.class} with message: #{exception_as_string.inspect}
+-        Backtrace:
+-        #{backtrace}
+-        MESSAGE
+-      end
+-    {% end %}
++      <<-MESSAGE
++      Expected #{klass}
++           got #{exception.class} with message: #{exception_as_string.inspect}
++      Backtrace:
++      #{backtrace}
++      MESSAGE
++    end
+   end
+ 
+   module ObjectExtensions

@@ -241,9 +241,9 @@ module CrymbleUI
         end
       end
 
-      # Whether SFML's run loop would render a frame now, without input: a pending rebuild (also a
-      # non-blocking one, which lifts no barrier), the input barrier, or a moved frame aggregate. ONE
-      # predicate for settle_rendering and render_frame_if_needed, so neither drifts from the loop.
+      # Whether the window loop (WindowRenderer#finish_iteration) would render a frame now, without input: a
+      # pending rebuild (also a non-blocking one, which lifts no barrier), the input barrier, or a moved frame
+      # aggregate. ONE predicate for settle_rendering and render_frame_if_needed, so neither drifts from the loop.
       def loop_would_render?(app : App) : Bool
         app.needs_rebuild? || app.input_waits_for_frame? || @flushed_after_frame ||
           @render_trigger.should_render?(app)
@@ -260,7 +260,7 @@ module CrymbleUI
         @render_frame_count += 1
         @app = app  # Store for event simulation methods
         TestRenderer.record_rendered(app)
-        app.start # as SFMLRenderer#run does before its first frame (once; later frames find it started)
+        app.start # as WindowRenderer#start does before the first frame (once; later frames find it started)
 
         # Mirror the SFML zoom response. In SFML a registered FontSizing.on_zoom_change
         # callback drops caches + forces re-layout the instant zoom changes; headless
@@ -450,7 +450,7 @@ module CrymbleUI
       # mouse_down render or not on their own, so a spec built on them cannot see a batch at all. Build
       # the events with Testing::Keys.
       def deliver(app : App, events : Array(LibCSFML::Event)) : Nil
-        Widget.app = app # as SFMLRenderer#run does: widgets reach the app (and its input barrier) here
+        Widget.app = app # as WindowRenderer#start does: widgets reach the app (and its input barrier) here
         TestRenderer.record_rendered(app)
         keyboard = KeyboardDispatch.new(Widget.focus_manager, Widget.shortcut_manager)
         queue = Deque(LibCSFML::Event).new(events)

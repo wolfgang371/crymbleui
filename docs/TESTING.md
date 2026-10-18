@@ -152,7 +152,7 @@ any other widget answers its Text descendants' texts joined with a space, in tre
 
 `TestRenderer` (`src/testing/test_renderer.cr`) renders headlessly and simulates the mouse by
 coordinates - the tool for the coordinate specs above. Its `mouse_down`/`mouse_move`/`mouse_up` go
-through `MouseDispatch`, the path SFMLRenderer's run loop takes: a press focuses what it hits, and a
+through `MouseDispatch`, the path the window loop (WindowRenderer) takes: a press focuses what it hits, and a
 move drags while a button is down and hovers otherwise. `TestRenderer#deliver` hands keyboard and
 mouse events over in the batches the run loop forms (`EventBatch`), one frame per batch: the path for
 anything that depends on how QUEUED input interleaves with frames - a click and the typing after it

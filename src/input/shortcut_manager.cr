@@ -26,11 +26,20 @@ module CrymbleUI
             @panel_shortcuts = {} of Widget => Hash(Shortcut, Proc(Nil))
         end
 
+        # Moves whenever the registrations may have changed (a host that shows them re-reads on a change).
+        getter revision : Int32 = 0
+
+        # Every registered shortcut, global and per panel (the web flavour's page names the ones a browser keeps).
+        def registered : Array(Shortcut)
+            (@global_shortcuts.keys + @panel_shortcuts.values.flat_map(&.keys)).uniq
+        end
+
         # Register a shortcut with its handler
         # context: Global or Panel
         # panel: the panel (a WindowPanel) for Panel context, nil for Global
         # Returns true if registered, false if conflicted (but still registers)
         def register(shortcut_str : String, context : ShortcutContext, panel : Widget?, &block : -> Nil) : Bool
+            @revision &+= 1 # wraps: only a change matters
             shortcut = Shortcut.parse(shortcut_str)
 
             case context
@@ -121,6 +130,7 @@ module CrymbleUI
 
         # Clear all shortcuts (useful for testing)
         def clear
+            @revision &+= 1
             @global_shortcuts.clear
             @panel_shortcuts.clear
         end

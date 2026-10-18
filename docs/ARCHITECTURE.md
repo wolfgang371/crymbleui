@@ -116,6 +116,45 @@ writes `@focus_highlighted` before the focus transfer).
 
 **Avoid `mark_needs_layout` from app code** — in DSL apps, `mark_needs_layout` propagating to root triggers a full rebuild. Use `mark_needs_render` for visual-only changes, or `request_rebuild` for structural changes.
 
+### Renderers, and driving the loop
+
+Four classes share the rendering engine, each adding what its setting needs:
+
+| | what it is | who uses it |
+|---|---|---|
+| `LayerRenderer` (module) | the engine: layout-driven layer rendering, the blit plans, `composite_region`, zoom response | every renderer |
+| `WindowRenderer` (abstract class) | a window app: the loop's decisions, event dispatch (`LibCSFML::Event` in), cursor choice, the frame (`render_frame`), the composite decisions (`composite_layer_to_window`, chrome borders) | `SFMLRenderer`, and the web flavour's renderer |
+| `SFMLRenderer < WindowRenderer` | the native platform: the SFML window, its events and cursors, the font, drawing a layer region or a border onto the window, and the blocking `run` loop | desktop apps (`CrymbleUI.run`) |
+| `Testing::TestRenderer` | headless: no window, no OS loop; mirrors the loop's render decision (`loop_would_render?`) | the specs |
+
+A platform implements `WindowRenderer`'s hooks (`has_window?`, `window_open?`, `window_size`, `poll_event`,
+`display_window` + `after_display`, `present_after_failure`, `apply_window_title`, `apply_cursor`,
+`on_window_resized`, `draw_layer_region`, `draw_border_rect`, `render_primitives`, the backend factories and
+`clear_window_background`) and runs the SAME decisions as every other platform - nothing of the loop or the
+dispatch is copied per platform. `has_window?` (false headless) is what the shared half's guards ask, not
+`window_open?`: after a quit inside a dispatch, the iteration's frame still renders on the closed window, so its
+end (`App#finish_frame`) runs.
+
+**Driving the loop.** One iteration is: platform work due before it (`before_iteration`), the queued events
+(`EventBatch` through `dispatch`), the expired timers, then `finish_iteration` - a pending rebuild, else the pull
+(`RenderTrigger`), the input barrier's and the flushed frame's force, and the frame. Two drivers:
+
+- `SFMLRenderer#run` blocks: with timers due it drains events and sleeps in chunks until the next one (a redraw,
+  the barrier or a flushed frame ends the wait early); without timers it waits for an event. Its first
+  iteration renders whatever it finds: with timers due, `needs_redraw = true` ends the first wait at once;
+  without timers it waits in `wait_event` first, and the window system's own startup events (Resized,
+  FocusGained on map) end that wait.
+- `WindowRenderer#start` once, then `#tick` per host frame (a browser's `requestAnimationFrame`): the same
+  iteration without the waits; returns whether it rendered. Its gate on input is the no-timer branch's: no
+  draining while the barrier is up or after a frame whose end applied deferred work - a host frame paints that
+  work first and takes the input at the next tick.
+
+When timers fired, their verdict is ASSIGNED to the redraw decision (it can replace a redraw an event in the same
+iteration forced; the iteration's pull then decides) - the loop's rule as it has always been, now stated once in
+`WindowRenderer#fire_timers`. Pinned headlessly by `spec/rendering/window_renderer_spec.cr` (a scripted platform
+driven with real `LibCSFML::Event`s, in the CI command) and through the real SFML window by
+`spec/autotest/tick_autotest.cr`, `run_loop_autotest.cr` and `timer_rebuild_autotest.cr`.
+
 ### 3. Testability First
 
 All business logic must be testable without rendering:

@@ -414,7 +414,7 @@ describe CrymbleUI::Testing::Driver do
     end
 
     # A refused user action: real input hands the exception to the app's on_event_exception
-    # (SFMLRenderer#handle_event). Mutation: `reported` re-raising regardless.
+    # (WindowRenderer#handle_event). Mutation: `reported` re-raising regardless.
     it "hands a refusal to the app's on_event_exception inside expect_reported" do
       reported = [] of String
       app = WindowApp.new do |w|

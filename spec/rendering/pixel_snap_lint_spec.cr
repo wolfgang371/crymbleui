@@ -94,6 +94,12 @@ LINT_EXPECTED = {
   "src/rendering/sfml_clipboard.cr"     => {0, "no coordinates"},
   "src/rendering/sfml_font.cr"          => {0, "measures only, draws nothing"},
   "src/rendering/sfml_renderer.cr"      => {0, "text + compositor snapped"},
+  "src/rendering/window_renderer.cr"    => {0, "loop, dispatch, frame and composite decisions: no conversions (regions come from composite_region)"},
+  "src/web/entry.cr"                    => {0, "no coordinates"},
+  "src/web/js.cr"                       => {0, "the page's imports: declarations only"},
+  "src/web/web_backend.cr"              => {0, "fills via PixelSnap.fill_edge(_y_flipped), text via PixelSnap.snap; the page rasterizes the rest by the same rule"},
+  "src/web/web_font.cr"                 => {0, "measures only; line spacing in FreeType's 26.6 arithmetic"},
+  "src/web/web_renderer.cr"             => {0, "regions come from composite_region; borders are fills"},
   "src/testing/test_render_backend.cr"  => {8, "4 fill_rect centre-coverage (SFML rasterizer model); 4 draw_rect raw truncation — diverges from SFML at frac(x) > 0.5, tracked in the backlog"},
   "src/testing/test_renderer.cr"        => {0, "compositor snapped; clip extents via cover (parity with SFML)"},
   "src/widgets/fitted.cr"               => {0, "a render scale and its mapping: factors and content-space points, no device pixels"},
@@ -114,6 +120,7 @@ describe "PixelSnap lint tripwire" do
   it "covers exactly the globbed render-path files (a rename cannot disarm the guard)" do
     globbed = src_glob("src/rendering/*.cr").to_set
     globbed.concat(src_glob("src/widgets/virtual_matrix/*.cr"))
+    globbed.concat(src_glob("src/web/*.cr"))
     globbed << "src/testing/test_render_backend.cr"
     globbed << "src/testing/test_renderer.cr"
     globbed << "src/widgets/virtual_matrix.cr"

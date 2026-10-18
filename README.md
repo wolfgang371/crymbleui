@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.8.0**
+**Version 1.9.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~41314 LOC
-- spec/: ~87735 LOC
+- src/: ~42197 LOC
+- spec/: ~88329 LOC
 
 ## Used by
 
@@ -115,8 +115,35 @@ crystal run src/hello.cr
 ![Screenshot](screenshots/showcase.png)
 
 and many more in examples/
+## In a browser (since crymble-ui v1.9.0)
+
+Any crymble-ui app also builds, unchanged, as a static web page: the same Crystal, compiled to WebAssembly, drawing
+on an HTML canvas. No line of the app changes and nothing is conditionally compiled - crymble-ui brings a second
+backend and a build tool, `bin/crymble-web`, which `shards install` puts into your app's `bin/`. The app runs in
+the visitor's browser tab only; there is no server side.
+
+From your app's root (Linux x86_64 build host; [docs/WEB.md](docs/WEB.md) lists what the toolchain needs):
+
+```bash
+bin/crymble-web setup                # once: the WebAssembly toolchain, into ~/.cache/crymble-wasm (a few minutes, ~1 GB)
+bin/crymble-web build src/hello.cr   # bin/web/hello/: index.html, hello.wasm, the page's scripts, NOTICES
+bin/crymble-web serve hello          # try it: http://127.0.0.1:8765/
+```
+
+`bin/crymble-web build` without arguments builds every target in your `shard.yml`. The folder `bin/web/<target>/`
+is the whole site: copy it to any static web server. Visitors need a current desktop browser (Chrome, Edge,
+Firefox or Safari - WebAssembly exception handling) with a mouse and a keyboard; files the app saves live in the
+tab and are gone when it closes. [docs/WEB.md](docs/WEB.md) explains the architecture, the page an app can bring
+along, the differences to the desktop, and how the result is checked.
 
 ## New Features
+
+### v1.9.0
+
+#### In a browser
+Any crymble-ui app also builds, unchanged, as a static web page: the same Crystal compiled to WebAssembly, drawing on an HTML canvas through a second backend that paints the desktop's pixels. `bin/crymble-web` (installed by `shards install`) sets up the toolchain once, builds a page per target and serves it to try. No line of the app changes; see "In a browser" above and [docs/WEB.md](docs/WEB.md).
+
+---
 
 ### v1.7.0
 

@@ -1,0 +1,57 @@
+<!doctype html>
+<!-- The page bin/crymble-web writes for an app without its own web/index.html. {{...}} are filled at build time
+     (target, wasm, name, version, repository, commit, crymble_ui_version, crymble_ui_commit, versions, built, banner). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{target}}</title>
+<style>
+  :root { --bg: #1e1e1e; --fg: #d4d4d4; --muted: #9a9a9a; --bar: #2a2a2a; --link: #8cb4ff; }
+  @media (prefers-color-scheme: light) { :root { --bg: #f4f4f4; --fg: #1e1e1e; --muted: #5a5a5a; --bar: #e4e4e4; --link: #1a5fd0; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header { background: var(--bar); padding: 4px 10px; color: var(--muted); }
+  header a { color: var(--link); }
+  header b { color: var(--fg); }
+  #app { display: block; width: 100%; height: 100%; outline: none; }
+  main { position: relative; min-height: 0; }
+  #overlay { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; background: var(--bg); padding: 16px; }
+  #overlay.hidden { display: none; }
+  #overlay small { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <b>{{target}}</b> - a crymble-ui app compiled from Crystal to WebAssembly, running only in this tab ·
+  files you save live in this tab and are gone when it closes ·
+  {{versions}}, built {{built}}
+  <b>{{banner}}</b> <span id="source">· <a href="{{repository}}">source</a></span> · <a href="NOTICES">notices</a>
+  <span id="keys" hidden> · not available in a browser tab (the browser keeps them): <span id="keylist"></span></span>
+</header>
+<main>
+  <canvas id="app" tabindex="0"></canvas>
+  <div id="overlay"><div id="msg">Loading&hellip;</div><small id="sub"></small></div>
+</main>
+<script type="module">
+  import { boot } from './crymble-web.js';
+  const overlay = document.getElementById('overlay'), msg = document.getElementById('msg'), sub = document.getElementById('sub');
+  const source = document.querySelector('#source a');
+  if (!source.getAttribute('href')) source.parentElement.remove(); // no repository: in the app's shard.yml
+  const show = (text, detail = '') => { overlay.classList.remove('hidden'); msg.textContent = text; sub.textContent = detail; };
+  boot({
+    canvas: document.getElementById('app'),
+    wasmUrl: '{{wasm}}',
+    confirmLeave: true,
+    onStatus(kind, text) {
+      if (kind === 'progress') show('Loading…', text);
+      else if (kind === 'starting') show('Starting…');
+      else if (kind === 'running') overlay.classList.add('hidden');
+      else if (kind === 'unsupported') show('This app ' + text);
+      else if (kind === 'closed' || kind === 'error') show(text);
+      else if (kind === 'shortcuts') { document.getElementById('keys').hidden = !text; document.getElementById('keylist').textContent = text; }
+    },
+  }).catch((e) => show('The app could not start', String(e.message || e)));
+</script>
+</body>
+</html>

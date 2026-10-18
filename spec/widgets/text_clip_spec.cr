@@ -105,7 +105,7 @@ describe "TextInput clips its text to the text box on the X axis" do
     bounds = input.absolute_bounds
     border_x = (bounds.width - CrymbleUI::TextInput::BORDER_WIDTH).to_i
 
-    input.focus_highlighted?.should be_false # else the border is focused_border_color
+    input.focus_highlighted?.should be_false # never flashed: a TextInput shows focus by effectively_focused?, not the flash
     wb = input.widget_backend.as(CrymbleUI::Testing::TestRenderBackend)
     mid_y = (bounds.height / 2.0).to_i
     wb.get_pixel(border_x, mid_y).should eq(input.border_color)
