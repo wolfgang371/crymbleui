@@ -4,8 +4,14 @@ require "./focus_cycler"
 require "./focus_flash_controller"
 
 module CrymbleUI
-  # Manages keyboard focus for widgets
-  # Only one widget can be focused at a time
+  # Manages keyboard focus for widgets. Only one widget can be focused at a time.
+  #
+  # THE PANEL IN FRONT HOLDS THE KEYBOARD. A panel raised at event time (a press in it or on its title bar,
+  # Ctrl+Tab) is entered: the keyboard goes to the widget that last held it there, else the panel's home widget,
+  # else its first Tab stop, else nobody - unless it is already inside. Tab, Shift+Tab and the arrows move among the
+  # Tab stops of the keyboard's panel; from nobody they enter the front panel. App opens panels and hands the
+  # keyboard on when its panel closes (App#settle_keyboard). See docs/LAYER_RENDERING_ARCHITECTURE.md "Keyboard and
+  # panels".
   class FocusManager
     # Currently focused widget (nil = no focus)
     @focused_widget : Widget? = nil
@@ -26,24 +32,68 @@ module CrymbleUI
       @focused_widget
     end
 
-    # Focus a widget (or clear focus with nil)
-    # Calls on_blur on old widget, on_focus on new widget
-    # Also manages flash animation
-    def focus(widget : Widget?)
-      return if @focused_widget == widget
+    # Focus a widget (or clear focus with nil): on_blur on the old one, on_focus on the new one, the flash moves.
+    # `reveal` scrolls the new one into view; a keyboard handed back to a panel does not (it must not move what
+    # the user left there).
+    def focus(widget : Widget?, reveal : Bool = true)
+      old = @focused_widget
+      return if old == widget
 
-      # Stop flash on old widget
-      @flash_controller.stop_flash(@focused_widget)
+      remember(old, widget)
+      @flash_controller.stop_flash(old)
+      old.try &.on_blur
+      return unless @focused_widget == old # on_blur moved the keyboard itself
 
-      # Blur old widget
-      @focused_widget.try &.on_blur
-
-      # Focus new widget
       @focused_widget = widget
-      widget.try &.on_focus
+      if w = widget
+        w.on_focus
+        w.scroll_into_view if reveal
+        @flash_controller.start_flash(w)
+      end
+    end
 
-      # Start flash on new widget
-      widget.try { |w| @flash_controller.start_flash(w) }
+    # The keyboard leaves a panel: it records the widget that held it there, for the next time it enters.
+    private def remember(old : Widget?, new : Widget?) : Nil
+      return unless (o = old) && (panel = o.find_panel)
+      return if panel.same?(new.try(&.find_panel))
+      panel.last_focus_id = o.id
+    end
+
+    # The panel the keyboard moves in: the focused widget's, the front one when nobody holds the keyboard or its
+    # holder sits in a closed panel; nil when it is in the window body or a popup.
+    def keyboard_panel(root : Widget) : WindowPanel?
+      w = @focused_widget
+      return root.find_topmost_panel if w.nil? || in_closed_panel?(w) # keyboard_nowhere?, spelled out to narrow w
+      w.find_panel
+    end
+
+    # Nobody holds the keyboard, or its holder sits in a closed panel - as good as nobody.
+    private def keyboard_nowhere? : Bool
+      w = @focused_widget
+      w.nil? || in_closed_panel?(w)
+    end
+
+    private def in_closed_panel?(widget : Widget) : Bool
+      panel = widget.find_panel
+      while panel
+        return true if panel.closed
+        panel = panel.find_panel
+      end
+      false
+    end
+
+    # Hand the keyboard to `panel`, unless it is already inside: the widget that last held it there, else the
+    # panel's home widget, else its first Tab stop, else nobody. Callers pass live panels (a raised one, the front
+    # one) - a replaced instance would hand the keyboard to an orphan.
+    def enter(panel : WindowPanel) : Nil
+      return if panel.closed
+      return if !keyboard_nowhere? && @focused_widget.try(&.widget_in_tree?(panel))
+      stops = @cycler.collect_focusable_widgets(panel)
+      focus(stop(stops, panel.last_focus_id) || stop(stops, panel.home_focus_id) || stops.first?, reveal: false)
+    end
+
+    private def stop(stops : Array(Widget), id : String?) : Widget?
+      id.try { |i| stops.find { |w| w.id == i } }
     end
 
     # Check if a specific widget has focus
@@ -73,19 +123,23 @@ module CrymbleUI
     # dangling on an orphan. An orphan still receives keys (handle_key_down sends
     # to @focused_widget regardless of attachment), so a stale TextInput would
     # swallow Alt+Left and the panel shortcut would never fire until the user
-    # clicked back in. Drop focus when the focused widget is no longer in `root`.
-    def reconcile_focus(root : Widget)
-      if w = @focused_widget
-        clear_focus unless w.widget_in_tree?(root)
-      end
+    # clicked back in. Drop focus when the focused widget is no longer in `root`, or sits
+    # in a closed panel. True when the dropped keyboard was in a panel: the panel now in
+    # front takes it (App#settle_keyboard).
+    def reconcile_focus(root : Widget) : Bool
+      return false unless w = @focused_widget
+      return false if w.widget_in_tree?(root) && !in_closed_panel?(w)
+      clear_focus
+      !w.find_panel.nil?
     end
 
     # === FOCUS CYCLING (Tab / Shift+Tab) ===
 
-    # Cycle focus through focusable widgets in tab order
-    # forward=true for Tab, forward=false for Shift+Tab
+    # Tab (forward) / Shift+Tab: the next Tab stop of the keyboard's panel - of the window body when the keyboard
+    # is there. From nobody, the front panel is entered instead.
     def cycle_focus(forward : Bool, root : Widget)
-      focusables = @cycler.collect_focusable_widgets(root)
+      return if enter_from_nobody(root)
+      focusables = @cycler.collect_focusable_widgets(keyboard_panel(root) || root)
       return if focusables.empty?
 
       next_widget = @cycler.find_next(
@@ -95,6 +149,14 @@ module CrymbleUI
       )
 
       focus(next_widget) if next_widget
+    end
+
+    # Nobody holds the keyboard (or its holder's panel closed) and a panel is open: enter the front one.
+    private def enter_from_nobody(root : Widget) : Bool
+      return false unless keyboard_nowhere?
+      return false unless front = root.find_topmost_panel
+      enter(front)
+      true
     end
 
     # Tab / Shift+Tab dispatch. The focused widget gets first dibs: a focus
@@ -136,11 +198,12 @@ module CrymbleUI
       false
     end
 
-    # Navigate focus in spatial direction
+    # Navigate focus in spatial direction, among the Tab stops of the keyboard's panel (or the window body's)
     def navigate(direction : Symbol, root : Widget)
+      return if enter_from_nobody(root)
       return unless current = @focused_widget
 
-      focusables = @cycler.collect_focusable_widgets(root)
+      focusables = @cycler.collect_focusable_widgets(keyboard_panel(root) || root)
 
       target = @navigator.find_neighbor(current, focusables, direction)
       focus(target) if target
@@ -150,13 +213,7 @@ module CrymbleUI
 
     # Handle Enter/Space activation of focused widget
     def handle_activation_key(key : Symbol)
-      widget = @focused_widget
-      return unless widget
-
-      # Try to trigger click if widget responds to it
-      if widget.responds_to?(:trigger_click)
-        widget.trigger_click
-      end
+      @focused_widget.try &.trigger_click
     end
 
     # === KEY DISPATCH ===
@@ -176,43 +233,42 @@ module CrymbleUI
       @focused_widget.try &.on_text_input(char)
     end
 
+    # One typed character to the widget holding the keyboard, traced as typing (InputLog) - the one text path:
+    # real keystrokes (KeyboardDispatch) and text typed from code (type_text) both take it.
+    def type_char(char : Char, app : App, frame_ms : Float64 = 0.0) : Nil
+      InputLog.next_in_batch if InputLog.enabled?
+      outcome = handle_text_input(char)
+      if InputLog.enabled?
+        InputLog.record("text", char.to_s, outcome.is_a?(Bool) ? outcome : nil, @focused_widget, app.needs_rebuild?, frame_ms)
+      end
+    end
+
+    # Text typed from code as a user types it (an app's "insert today's date"): each character through type_char.
+    # A character whose handling makes input wait for a rebuilt frame (App#input_waits_for_frame?) ends it - real
+    # input would wait, then land on a tree the caller never saw; the rest is not typed.
+    def type_text(text : String, app : App) : Nil
+      text.each_char do |char|
+        break if app.input_waits_for_frame?
+        type_char(char, app)
+      end
+    end
+
     # === PANEL CYCLING (Ctrl+Tab / Ctrl+Shift+Tab) ===
 
-    # Cycle through panels (WindowPanels) in z-order
-    # forward=true for Ctrl+Tab, forward=false for Ctrl+Shift+Tab
-    # Returns the panel that was activated, or nil if no valid target
+    # Rotate the open panels in z-order; the raised one takes the keyboard (bring_to_front enters it). Forward
+    # (Ctrl+Tab) raises the bottom panel; backward (Ctrl+Shift+Tab), the true reverse, sends the front one to the
+    # back and raises the one beneath. One open panel is raised - from the window body or from nobody, Ctrl+Tab is
+    # the way into it. Returns the raised panel, nil when none is open.
     def cycle_panel(forward : Bool, root : Widget) : WindowPanel?
-      # Get all non-closed panels
-      panels = root.find_all_panels.reject(&.closed)
-      return nil if panels.size < 2  # Need at least 2 panels to cycle
-
-      # Sort by z_index (ascending: lowest first)
-      sorted = panels.sort_by(&.z_index)
-
-      # Find current topmost panel
-      current = sorted.last  # Highest z_index is topmost
-
-      # Find index of current panel
-      current_index = sorted.index(current)
-      return nil unless current_index
-
-      # Calculate target index
-      # Panels form a cycle: [z=1, z=2, z=3, ...] with topmost at the end
-      # Forward (Ctrl+Tab): cycle to NEXT in order (higher index wraps to 0)
-      # Backward (Ctrl+Shift+Tab): cycle to PREVIOUS in order (lower index)
-      target_index = if forward
-                       # Forward: next in cycle (wrap to beginning)
-                       (current_index + 1) % sorted.size
-                     else
-                       # Backward: previous in cycle (wrap to end)
-                       (current_index - 1 + sorted.size) % sorted.size
-                     end
-
-      target = sorted[target_index]
-
-      # Bring target panel to front
+      panels = root.find_all_panels.reject(&.closed).sort_by(&.z_index)
+      return nil if panels.empty?
+      target = if forward || panels.size == 1
+                 panels.first
+               else
+                 panels.last.send_to_back
+                 panels[-2]
+               end
       target.bring_to_front
-
       target
     end
   end

@@ -1,5 +1,5 @@
 name: crymble-ui
-version: 1.7.2
+version: 1.8.0
 
 authors:
   - wolfgang371 <wolfgang371@bomel.de>
@@ -103,6 +103,8 @@ targets:
     main: tutorials/tutorial-28.cr
   tutorial-29:
     main: tutorials/tutorial-29.cr
+  tutorial-30:
+    main: tutorials/tutorial-30.cr
 
 crystal: ">= 1.20.0"
 

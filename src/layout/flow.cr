@@ -57,9 +57,11 @@ module CrymbleUI
         def measure(constraints : BoxConstraints) : Size
             return Size.new(padding * 2, padding * 2) if @children.empty?
 
-            inner_max_width = (constraints.max_width - padding * 2).clamp(0.0, Float64::MAX)
+            # `{x, 0.0}.max`, never `clamp(0.0, Float64::MAX)`: INFINITY.clamp(0, MAX) is MAX, a FINITE number, and a
+            # child that takes a finite width whole (a text input) then measured ~1.8e308 wide.
+            inner_max_width = {constraints.max_width - padding * 2, 0.0}.max
             # Height is laid out freely; the flow decides its own height
-            inner_max_height = (constraints.max_height - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_height = {constraints.max_height - padding * 2, 0.0}.max
 
             child_constraints = BoxConstraints.loose(Size.new(inner_max_width, inner_max_height))
 
@@ -103,7 +105,7 @@ module CrymbleUI
         # at the given width.
         def min_intrinsic_width(height : Float64) : Float64
             return padding * 2 if @children.empty?
-            inner_max_height = (height - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_height = {height - padding * 2, 0.0}.max
             widest = 0.0
             @children.each do |child|
                 widest = Math.max(widest, child.min_intrinsic_width(inner_max_height))
@@ -115,7 +117,7 @@ module CrymbleUI
             my_size = measure(constraints)
             @bounds = Rect.new(position.x, position.y, my_size.width, my_size.height)
 
-            inner_max_width = (my_size.width - padding * 2).clamp(0.0, Float64::MAX)
+            inner_max_width = {my_size.width - padding * 2, 0.0}.max
 
             # Use loose max_height — rows grow tall as needed
             child_constraints = BoxConstraints.loose(Size.new(inner_max_width, Float64::INFINITY))

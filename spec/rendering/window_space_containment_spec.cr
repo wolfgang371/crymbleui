@@ -21,6 +21,21 @@ WINDOW_SPACE_FILES = [
   "src/widgets/menu.cr",
 ]
 
+# A block of fixed size (the fitted case below).
+class WscBlock < CrymbleUI::Widget
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    CrymbleUI::Size.new(40.0, 20.0)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, CrymbleUI::Size.new(40.0, 20.0))
+  end
+
+  def to_primitives(bounds : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    [] of CrymbleUI::DrawPrimitive
+  end
+end
+
 private def tripwire_code_lines(path : String) : Array({Int32, String})
   # to_a, not the lazy Iterator: `empty?` consumes it, and the failure message then names no
   # lines at all — caught by mutating drag_manager.cr and reading what the tripwire actually said.
@@ -54,5 +69,23 @@ describe "window-space containment" do
 
     child.absolute_bounds.y.should eq(300.0)
     child.viewport_bounds.y.should eq(180.0)
+  end
+
+  # And for an enclosing fitted: the painted rect is the laid-out one scaled into the box and centred there.
+  # The window's content box (400x300 less 8 on every side) is 384x284; 40x20 fits it at min(9.6, 14.2) = 9.6,
+  # 384x192, centred: (8, 8 + (284 - 192) / 2).
+  it "keeps viewport_bounds scaling and centring for an enclosing fitted" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = TestApp.new
+    window = CrymbleUI::Window.new("t", 400, 300)
+    fitted = CrymbleUI::Fitted.new
+    child = WscBlock.new
+    fitted.add_child(child)
+    window.add_child(fitted)
+    app.root_widget = window
+    renderer.render_frame(app)
+
+    child.absolute_bounds.size.should eq(CrymbleUI::Size.new(40.0, 20.0))
+    child.viewport_bounds.should eq(CrymbleUI::Rect.new(8.0, 54.0, 384.0, 192.0))
   end
 end

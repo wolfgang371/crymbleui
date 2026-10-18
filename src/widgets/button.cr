@@ -150,7 +150,7 @@ module CrymbleUI
       local_rect = Rect.new(Vec2.zero, Size.new(bounds.width, bounds.height))
 
       primitives do
-        fill_rect(local_rect, bg_color)
+        fill_background(bounds, bg_color)
         draw_rect(local_rect, bd_color, 1.0)
         draw_text(display_text, text_position, txt_color, font_scale)
       end
@@ -178,11 +178,16 @@ module CrymbleUI
     end
 
     # false: a click acts without taking the keyboard from where it is (a text field the app keeps
-    # typing into). Tab still reaches it. Set it each build, like the label.
+    # typing into) - within its own panel: a click in a panel behind still raises it, and the raised
+    # panel takes the keyboard. Tab still reaches it. Set it each build, like the label.
     property focus_on_click : Bool = true
 
     def takes_focus_on_click? : Bool
       focus_on_click
+    end
+
+    def takes_activation_keys? : Bool
+      true
     end
 
     # Trigger click programmatically (used for keyboard activation with Enter/Space)

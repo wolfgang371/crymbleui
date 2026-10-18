@@ -219,7 +219,7 @@ module CrymbleUI
       local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
 
       primitives do
-        fill_rect(local_bounds, Theme.current.combo_background)
+        fill_background(bounds, Theme.current.combo_background)
         draw_rect(local_bounds, Theme.current.combo_border)
         content_y = BORDER_WIDTH + PADDING
         content_height = bounds.height - (BORDER_WIDTH + PADDING) * 2
@@ -277,6 +277,7 @@ module CrymbleUI
       popup.on_select = ->(idx : Int32, _val : String) { select_one(idx); collapse }
       popup.on_cancel = -> { collapse }
       popup.on_click_outside_callback = -> { collapse }
+      wire_popup_tab_callback(popup)
 
       mount_popup(popup)
 
@@ -328,6 +329,7 @@ module CrymbleUI
         popup.on_select = ->(idx : Int32, _val : String) { select_one(idx); collapse }
         popup.on_cancel = -> { collapse }
         popup.on_click_outside_callback = -> { collapse }
+        wire_popup_tab_callback(popup)
       end
     end
   end

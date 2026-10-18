@@ -22,6 +22,7 @@ require "../layout/hstack"
 require "../layout/flow"
 require "../widgets/scroll_view"
 require "../widgets/expanded"
+require "../widgets/fitted"
 require "../widgets/combo_box_item"
 require "../widgets/combo_box"
 require "../widgets/multi_combo_box"
@@ -340,6 +341,47 @@ module CrymbleUI
                 expanded(id: id, flex: flex, fit: :loose, &block)
             end
 
+            # Create a fitted container: shows its one child uniformly SCALED to fit the space it is given,
+            # keeping its proportions - text rasterised at its final size (crisp), clicks landing where they
+            # are drawn. The child is laid out at its natural size; no widget inside knows it is scaled.
+            #
+            # expanded decides how MUCH space; fitted scales its content into whatever it got. (Unrelated to
+            # `expanded(fit:)`, which is about whether expanded's child fills its space.)
+            #
+            # Usage:
+            #   window("Clock", 300, 120) do
+            #     fitted { text(now) }              # no font_scale: the box sets the size
+            #   end
+            #
+            #   vstack do
+            #     text("Title")
+            #     expanded(fill_area: true) { fitted { text(now) } }
+            #   end
+            #
+            # Sizing (Flutter's FittedBox, BoxFit.contain): the factor is the largest that fits on every axis
+            # the space bounds. Given more than the image needs (a window's single child), it centres the
+            # image and leaves the rest showing what lies behind. In a stack, or anywhere its space is loose,
+            # it takes only what the image needs and sits at the start of its slot - to give it all the space
+            # AND centre it, wrap it: `expanded(fill_area: true) { fitted { } }`. A plain `expanded` fills
+            # only the stack's own axis, so it does not centre. Keep a ticking text's length constant
+            # (`%H:%M:%S`), or its width - and the factor - changes every tick.
+            #
+            # Refused inside (it raises on the layout that finds one, naming it, where it is and what to
+            # do): anything that owns a layer - scroll_view, window_panel, layer / aligned_layer, popup,
+            # another fitted. Put fitted around the content INSIDE a scroll view, not around the view.
+            # recursive_grid is fine. Ctrl+zoom is cancelled inside a fitted that fills its space (a larger
+            # text just fits at a smaller factor); popups and dropdowns opened from inside open at their
+            # natural size. Takes exactly one child (wrap several in a vstack or hstack).
+            #
+            # Planned keyword args: `align:` (where the image sits in a larger box) and
+            # `mode: :contain | :scale_down` (scale_down: never above the natural size).
+            def fitted(id : String? = nil, &block)
+                fit = Fitted.new(id: id)
+                current_container.add_child(fit)
+                with_container(fit, &block)
+                fit
+            end
+
             # Create a recursive grid layout with automatic cell spanning
             #
             # Cells can contain widgets OR nested RecursiveGrids.
@@ -383,11 +425,23 @@ module CrymbleUI
                 win = Window.new(title, width, height, id: id)
                 # Build content inside window context
                 # All widgets created in the block will be added as children via add_child()
-                @container_stack ||= [] of Widget
-                @container_stack.not_nil!.push(win)
-                yield  # Don't capture result - widgets are added via add_child()
-                @container_stack.not_nil!.pop
+                stack = @container_stack ||= [] of Widget
+                depth = stack.size
+                stack.push(win)
+                begin
+                    yield  # Don't capture result - widgets are added via add_child()
+                ensure
+                    # Back to the depth on entry: a build that raised inside a container (they pop without an
+                    # ensure) leaves no stale window or container for the next build.
+                    stack.pop(stack.size - depth)
+                end
                 win
+            end
+
+            # The window this build is inside - the innermost on this builder's container stack; nil outside
+            # `window(...)`. Per builder: a Widget building with the DSL has its own stack and sees none.
+            def current_window : Window?
+                @container_stack.try(&.reverse_each.find(&.is_a?(Window))).try(&.as(Window))
             end
 
             # Create a text widget and add it to the current container
@@ -788,6 +842,7 @@ module CrymbleUI
                 draggable : Bool = true,
                 resizable : Bool = true,
                 id : String? = nil,
+                home_focus : String? = nil,
                 &block
             )
                 # Auto-assign z_index based on panel order if using default (0)
@@ -799,6 +854,7 @@ module CrymbleUI
                 end
 
                 panel = WindowPanel.new(title, x, y, width, height, z_index: auto_z_index, closeable: closeable, draggable: draggable, resizable: resizable, id: id)
+                panel.home_focus_id = home_focus
                 # Add panel to current container (usually Window)
                 current_container.add_child(panel)
                 # Build content inside panel context

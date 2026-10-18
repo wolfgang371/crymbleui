@@ -284,8 +284,8 @@ describe "ScrollView focus scrolling" do
     end
   end
 
-  # TextInput#on_focus must chain to super (request_scroll_into_view), like every other
-  # focusable — it was the lone override that dropped it. RED without super: no scroll.
+  # Focusing a TextInput scrolls it into view (FocusManager#focus reveals it). It once didn't: the
+  # TextInput#on_focus override dropped the chain to the hook that did the scroll.
   describe "TextInput scroll-into-view on focus" do
     it "scrolls a below-fold TextInput into view on focus" do
       fm, sv, fields = build_text_field_scroll_view
@@ -293,7 +293,7 @@ describe "ScrollView focus scrolling" do
       target = fields[15]
       (target.bounds.y + target.bounds.height).should be > 150.0  # precondition: genuinely below the fold
 
-      fm.focus(target) # real focus -> on_focus -> (super) request_scroll_into_view
+      fm.focus(target) # real focus -> FocusManager#focus reveals it
 
       sv.scroll_offset.y.should be > 0.0 # scrolled down (RED without super: stays 0)
       top = sv.scroll_offset.y           # ...and the field is now fully within the viewport:

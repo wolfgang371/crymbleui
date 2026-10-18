@@ -40,7 +40,7 @@ module CrymbleUI
     # ceil covers the snapped backend in every case (ceil(bounds.width) >= widget_width); the fill is
     # clamped to the backend, so it never bleeds onto a sibling.
     def fill_background(bounds : Rect, color : Color)
-      @primitives.not_nil! << FillRect.new(Rect.new(0.0, 0.0, bounds.width.ceil, bounds.height.ceil), color)
+      @primitives.not_nil! << FillRect.new(Rect.new(0.0, 0.0, bounds.width.ceil, bounds.height.ceil), color, covers: true)
     end
 
     # Draw text at a position with automatic SFML offset compensation

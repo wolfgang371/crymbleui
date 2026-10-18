@@ -32,6 +32,69 @@ class UnbCell < CrymbleUI::Widget
   end
 end
 
+# Records the max width each measure was handed.
+class UnbSpy < CrymbleUI::Widget
+  getter seen = [] of Float64
+
+  def initialize
+    super(id: nil)
+  end
+
+  def measure(constraints : CrymbleUI::BoxConstraints) : CrymbleUI::Size
+    @seen << constraints.max_width
+    CrymbleUI::Size.new(40.0, 20.0)
+  end
+
+  def perform_layout(constraints : CrymbleUI::BoxConstraints, position : CrymbleUI::Vec2)
+    @bounds = CrymbleUI::Rect.new(position, measure(constraints))
+  end
+
+  def to_primitives(b : CrymbleUI::Rect) : Array(CrymbleUI::DrawPrimitive)
+    [] of CrymbleUI::DrawPrimitive
+  end
+end
+
+class UnbFlowFittedApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window("t", 400, 300) do
+      fitted(id: "f") do
+        flow(id: "flow") { text_input("abc", id: "ti") { } }
+      end
+    end
+  end
+end
+
+describe "unbounded constraints through a flow" do
+  it "stays unbounded, so a child that takes a finite width whole is not handed MAX" do
+    spy = UnbSpy.new
+    flow = CrymbleUI::FlowLayout.new
+    flow.add_child(spy)
+    flow.measure(CrymbleUI::BoxConstraints.new)
+    spy.seen.empty?.should be_false
+    spy.seen.each { |w| w.finite?.should be_false }
+  end
+
+  # The visible consequence. A text_input takes a finite max width whole (measured: so do combo_box and
+  # split_view; a separator measures 0 and fills only at layout), so a flow handed MAX measured ~1.8e308 wide,
+  # and a fitted around it - which lays its child out unbounded - would scale it by ~1e-306: nothing drawn.
+  it "draws a flow holding a text input inside a fitted at the factor its natural size gives" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 300)
+    app = UnbFlowFittedApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    flow = app.find("flow").not_nil!
+    flow.bounds.width.should be < 10_000.0
+    fitted = app.find("f").not_nil!
+    box = fitted.viewport_bounds
+    f = {box.width / flow.bounds.width, box.height / flow.bounds.height}.min
+    f.should be > 1.0
+    input = app.find("ti").not_nil!
+    input.viewport_bounds.width.should be_close(input.bounds.width * f, 0.5)
+    centre = input.viewport_bounds.center
+    renderer.backend.get_pixel(centre.x.to_i, centre.y.to_i).should eq(CrymbleUI::Theme.current.input_background)
+  end
+end
+
 describe "unbounded constraints through a stack" do
   it "stays unbounded, so a nested scroller does not swallow the width" do
     vstack = CrymbleUI::VStack.new(spacing: 0.0)

@@ -81,6 +81,24 @@ module CrymbleUI
       @expanding = false
     end
 
+    # Wire Tab/Shift+Tab on the popup's TextInput: commit the highlighted value, then —
+    # inside a focus-scope (VirtualMatrix) — re-dispatch Tab so the grid cursor advances
+    # and focus stays in the matrix (return true to hold the Tab-trap); standalone,
+    # return false so FocusManager cycles on - from this box, which the commit's collapse
+    # refocused, so Tab stays in the box's panel. At expand and on the box a rebuild puts
+    # in place while the list is open.
+    private def wire_popup_tab_callback(popup : ComboBoxPopup)
+      popup.text_input.on_tab = ->(shift : Bool) {
+        popup.select_highlighted
+        if scope = focus_scope_ancestor
+          scope.on_key_down(SF::Keyboard::Key::Tab, false, shift)
+          true
+        else
+          false
+        end
+      }
+    end
+
     # Tear down the current popup: stop its flash timer, remove it from the Window
     # overlays, clear open state, and restore focus to the focus-scope ancestor (if
     # we were proxy-focused when it opened) or to self (standalone usage).

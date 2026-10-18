@@ -34,6 +34,8 @@ module CrymbleUI
     # Rebuild flag: explicitly set when DSL tree needs to be rebuilt.
     # Separate from mark_needs_layout which only affects geometry.
     @needs_rebuild : Bool = false
+    # The panel in front takes the keyboard at the next frame (settle_keyboard)
+    @enter_front_pending : Bool = false
 
     # Cheap-rebuild staleness: set at the end of rebuild(), consumed by the renderer AFTER prepare_layout
     # (once layer.widgets is repopulated) to run the per-layer content-staleness assessment
@@ -366,7 +368,21 @@ module CrymbleUI
       # blanket rescue. Shortcuts re-register as widgets are created.
       Widget.shortcut_manager?.try(&.clear)
 
-      @root = build()
+      install_root(build())
+    end
+
+    # Make `root` the app's tree as a first build does: its open panels count as seen (no raise), and the front
+    # one takes the keyboard at the next frame, as any panel the app opens does - launch is an opening.
+    protected def install_root(root : Widget) : Nil
+      @root = root
+      root.find_all_panels.each { |panel| panel.seen_open = !panel.closed }
+      enter_front_panel if root.find_topmost_panel
+    end
+
+    # The panel in front takes the keyboard at the next frame, laid out (settle_keyboard); no input runs before.
+    private def enter_front_panel : Nil
+      @enter_front_pending = true
+      request_frame_before_input
     end
 
     # Find widget by ID in the widget tree
@@ -412,16 +428,6 @@ module CrymbleUI
 
       old_root = @root
 
-      # Collect old panel IDs before rebuild (to detect new panels after reconciliation)
-      old_panel_ids = Set(String).new
-      if old_root
-        old_root.children.each do |child|
-          if child.is_a?(WindowPanel) && (id = child.id)
-            old_panel_ids << id
-          end
-        end
-      end
-
       # The widgets a gesture in progress holds (the pressed one - crucial for e.g. scrollbar scrolling - and
       # the drag's), with their ancestors: reconcile records what it pairs each with, and they are handed on
       # after it.
@@ -439,24 +445,24 @@ module CrymbleUI
       # Build new tree
       new_root = build()
 
-      # Reconcile old and new trees
+      # Reconcile old and new trees. A panel open now that was not at the last rebuild (new, or reopened) comes to
+      # the front and takes the keyboard - raise_z only: these instances are not laid out yet, settle_keyboard
+      # hands the keyboard over at the next frame.
       if old_root
         reconcile(old_root, new_root)
-      end
-
-      # Bring new (unreconciled) panels to front so they appear on top
-      unless old_panel_ids.empty?
-        new_root.children.each do |child|
-          if child.is_a?(WindowPanel)
-            id = child.id
-            if id.nil? || !old_panel_ids.includes?(id)
-              child.bring_to_front
-            end
+        @root = new_root
+        opened = false
+        new_root.find_all_panels.each do |panel|
+          if !panel.closed && !panel.seen_open
+            panel.raise_z
+            opened = true
           end
+          panel.seen_open = !panel.closed
         end
+        enter_front_panel if opened
+      else
+        install_root(new_root)
       end
-
-      @root = new_root
 
       # Clear hovered widget - it points to old tree now
       # Will be re-detected on next layout+update_hover or mouse move
@@ -467,7 +473,7 @@ module CrymbleUI
       # (e.g. a closed dialog) leaves focus dangling on an orphan that keeps
       # eating key events (a stale TextInput swallows Alt+Left so the panel
       # shortcut never fires). Mirrors the @hovered_widget reset.
-      Widget.focus_manager?.try &.reconcile_focus(new_root)
+      enter_front_panel if Widget.focus_manager?.try &.reconcile_focus(new_root)
 
       # Hand the gesture to the widgets that replaced the ones it holds - the pressed one (a drag of a
       # scrollbar or a panel goes on) and the drag's (a pending drag keeps the payload its pressed source
@@ -823,6 +829,16 @@ module CrymbleUI
       dismissed
     end
 
+    # Close every open popup (Ctrl+Tab does, as a press elsewhere does)
+    def close_popups : Nil
+      @root.as?(Window).try &.close_popups
+    end
+
+    # Close every open menu (Ctrl+Tab does, as a press elsewhere does). True when one was open.
+    def close_menus : Bool
+      @root.try { |r| close_all_menus(r) } || false
+    end
+
     # Handle ESC key press - cancels drags and closes menus
     # Returns true if something was cancelled/closed
     def handle_escape : Bool
@@ -833,11 +849,7 @@ module CrymbleUI
       end
 
       # Priority 2: Close menus
-      if r = @root
-        return close_all_menus(r)
-      end
-
-      false
+      close_menus
     end
 
     # Handle mouse move events (for dragging and hover)
@@ -977,6 +989,8 @@ module CrymbleUI
         Widget.increment_layout_count # Instrumentation
       end
 
+      settle_keyboard(root)
+
       # Check if topmost panel changed (even without layout)
       # This forces cache rebuild when panel z-order changes
       old_topmost = @topmost_panel
@@ -988,6 +1002,28 @@ module CrymbleUI
       @drag_manager.follow_pointer(@drag_manager.state.current_position, root)
 
       did_layout || topmost_changed
+    end
+
+    # The keyboard after a rebuild, on laid-out instances: a pending entry of the front panel (a panel opened,
+    # the keyboard's panel closed or gone); then the rule that the keyboard's panel is the front one - a build's
+    # own focus, or a programmatic one, into a panel behind raises that panel. In that order: a dialog opened in
+    # the same rebuild as a Shape's build focused its grid stays in front.
+    private def settle_keyboard(root : Widget) : Nil
+      return unless fm = Widget.focus_manager?
+      if @enter_front_pending
+        @enter_front_pending = false
+        root.find_topmost_panel.try { |front| fm.enter(front) }
+      end
+      return unless (focused = fm.focused_widget) && (panel = outermost_panel(focused))
+      panel.raise_z unless panel.in_front?
+    end
+
+    private def outermost_panel(widget : Widget) : WindowPanel?
+      outer = widget.find_panel
+      while outer && (up = outer.find_panel)
+        outer = up
+      end
+      outer
     end
 
     # Get the current topmost panel (cached)

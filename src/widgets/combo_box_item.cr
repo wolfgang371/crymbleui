@@ -197,15 +197,12 @@ module CrymbleUI
                    base_bg
                  end
 
-      # Background rect
-      bg_rect = Rect.new(0.0, 0.0, bounds.width, bounds.height)
-
       # Text baseline (vertically centered). The x origin depends on the row kind and is
       # resolved below, next to the clip box it has to agree with.
       text_y = vcentered_text_y(bounds.height, font_scale)
 
       primitives do
-        fill_rect(bg_rect, bg_color)
+        fill_background(bounds, bg_color)
         # MultiComboBox checkbox rows render a REAL checkbox in the gutter. Calling the
         # pull-closure HERE (inside to_primitives) auto-captures the selection Source, so
         # a selection change re-renders this row with no manual mark. Read the reactive
@@ -236,7 +233,7 @@ module CrymbleUI
           draw_check_glyph(fn.call, box_rect, box_color: text_color, check_color: text_color,
             line_thickness: box * 0.2, junction_radius: box * 0.1)
         end
-        clipped(label_box, within: bg_rect) do
+        clipped(label_box, within: Rect.new(0.0, 0.0, bounds.width, bounds.height)) do
           draw_text(label_text, Vec2.new(label_origin, text_y), text_color, font_scale)
         end
       end

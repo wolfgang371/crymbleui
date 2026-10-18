@@ -516,6 +516,102 @@ describe CrymbleUI::Testing::Driver do
     end
   end
 
+  # An act does what a press does, in its order - the hit widget takes the keyboard when it takes focus on a
+  # click, then its panel comes to the front - and a panel's title bar and close button are pressed for real.
+  describe "panels and the keyboard (as a press does)" do
+    two_panels = ->(w : CrymbleUI::Window) do
+      back = CrymbleUI::WindowPanel.new("Back", 10.0, 10.0, 240.0, 120.0, id: "back")
+      back.add_child(CrymbleUI::Button.new("b", id: "back_button") { })
+      front = CrymbleUI::WindowPanel.new("Front", 300.0, 10.0, 240.0, 120.0, id: "front")
+      front.add_child(CrymbleUI::Button.new("f", id: "front_button") { })
+      w.add_child(back)
+      w.add_child(front)
+      nil
+    end
+
+    # Mutation: drop the focus step from act. Today: the click leaves the keyboard where it was (nobody).
+    it "click puts the keyboard on a widget that takes focus on a click" do
+      ui = driver { |w| two_panels.call(w) }
+      ui.click "back_button"
+      ui.focused_id.should eq("back_button")
+    end
+
+    # Mutation: focus regardless of takes_focus_on_click?.
+    it "click leaves the keyboard alone for a button that does not take focus on a click" do
+      ui = driver do |w|
+        two_panels.call(w)
+        quiet = CrymbleUI::Button.new("q", id: "quiet") { }
+        quiet.focus_on_click = false
+        w.add_child(quiet)
+      end
+      ui.click "front_button"
+      ui.click "quiet"
+      ui.focused_id.should eq("front_button")
+    end
+
+    # Mutation: focus_cell focusing the grid outside the act (no raise). Today: the grid's panel stays behind.
+    it "focus_cell brings the grid's panel to front" do
+      ui = driver do |w|
+        back = CrymbleUI::WindowPanel.new("Back", 10.0, 10.0, 300.0, 200.0, id: "back")
+        back.add_child(CrymbleUI::VirtualMatrix.new(adapter: ConfigurableMatrixAdapter.new(1, 1, 5, 2, 1, 1), id: "grid"))
+        w.add_child(back)
+        w.add_child(CrymbleUI::WindowPanel.new("Front", 400.0, 10.0, 200.0, 100.0, id: "front"))
+      end
+      ui.find("front").as(CrymbleUI::WindowPanel).bring_to_front
+      ui.focus_cell "grid", 1, 1
+      (ui.find("back").as(CrymbleUI::WindowPanel).z_index > ui.find("front").as(CrymbleUI::WindowPanel).z_index).should be_true
+    end
+
+    # Mutation: press_title raising by a call instead of a press (the press path must run: a title-bar press
+    # starts the panel's drag tracking - checked through mouse_down?).
+    it "press_title raises the panel by a real press on its title bar" do
+      ui = driver { |w| two_panels.call(w) }
+      ui.press_title "back"
+      (ui.find("back").as(CrymbleUI::WindowPanel).z_index > ui.find("front").as(CrymbleUI::WindowPanel).z_index).should be_true
+      ui.find("back").as(CrymbleUI::WindowPanel).maximized.should be_false
+      ui.app.mouse_down?.should be_false # pressed AND released
+    end
+
+    # Two presses on one title bar within the double-click time maximize the panel; press_title never makes one.
+    # Mutation: press_title at a fixed point (the second press on "back" maximizes it).
+    it "press_title on the same panel twice, with no rebuild between, does not maximize it" do
+      ui = driver { |w| two_panels.call(w) }
+      ui.press_title "back"
+      ui.press_title "front"
+      ui.press_title "back"
+      ui.find("back").as(CrymbleUI::WindowPanel).maximized.should be_false
+      (ui.find("back").as(CrymbleUI::WindowPanel).z_index > ui.find("front").as(CrymbleUI::WindowPanel).z_index).should be_true
+    end
+
+    # Mutation: no covered check (the press lands on the panel on top).
+    it "press_title refuses a title bar another panel covers" do
+      ui = driver do |w|
+        w.add_child(CrymbleUI::WindowPanel.new("Under", 10.0, 10.0, 240.0, 120.0, id: "under"))
+        w.add_child(CrymbleUI::WindowPanel.new("Over", 0.0, 0.0, 300.0, 200.0, id: "over"))
+      end
+      ui.find("over").as(CrymbleUI::WindowPanel).bring_to_front
+      expect_raises(ArgumentError, /covered/) { ui.press_title "under" }
+    end
+
+    # Mutation: close_panel calling close directly (the on_closed callback is the panel's - both run - but a
+    # covered button must refuse, which only the position check gives).
+    it "close_panel presses the close button: the panel closes" do
+      ui = driver { |w| two_panels.call(w) }
+      ui.close_panel "back"
+      ui.find("back").as(CrymbleUI::WindowPanel).closed.should be_true
+    end
+
+    it "close_panel refuses a close button another panel covers" do
+      ui = driver do |w|
+        w.add_child(CrymbleUI::WindowPanel.new("Under", 10.0, 10.0, 240.0, 120.0, id: "under"))
+        w.add_child(CrymbleUI::WindowPanel.new("Over", 0.0, 0.0, 300.0, 200.0, id: "over"))
+      end
+      ui.find("over").as(CrymbleUI::WindowPanel).bring_to_front
+      expect_raises(ArgumentError, /covered/) { ui.close_panel "under" }
+      ui.find("under").as(CrymbleUI::WindowPanel).closed.should be_false
+    end
+  end
+
   describe "drag" do
     # Mutation: skip retarget in drag_onto (no enter, no leave).
     it "runs start, enter, drop, end and leave, in that order" do
@@ -669,6 +765,26 @@ describe CrymbleUI::Testing::Driver do
       ui.press "Ctrl+S", on: "keys"
       ui.find("keys").as(KeyRecorder).keys.should contain("Ctrl+S")
       ui.focused_id.should eq("keys")
+    end
+
+    # The keyboard where the app put it, never where the Driver puts it: a click, then the keys. Mutation: focus the
+    # last-named input - the text lands in "b".
+    it "types to whatever holds the keyboard - the input a click put it on, not the other one" do
+      ui = driver do |w|
+        w.add_child(CrymbleUI::TextInput.new(value: "", id: "a"))
+        w.add_child(CrymbleUI::TextInput.new(value: "", id: "b"))
+      end
+      ui.click "a"
+      ui.type "Area"
+      ui.text("a").should eq("Area")
+      ui.text("b").should eq("")
+    end
+
+    # A spec typing into nothing would pass over whatever it meant to check. Mutation: deliver anyway.
+    it "raises when typing with nothing holding the keyboard" do
+      ui = driver { |w| w.add_child(CrymbleUI::TextInput.new(value: "", id: "a")) }
+      CrymbleUI::Widget.focus_manager.clear_focus
+      expect_raises(ArgumentError, /nothing holds the keyboard/) { ui.type "x" }
     end
 
     it "raises on an unknown key name" do

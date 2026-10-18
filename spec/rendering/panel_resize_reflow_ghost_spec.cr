@@ -43,6 +43,9 @@ describe "panel resize re-flow repairs vacated pixels" do
         app.root_widget = window
 
         renderer.render_frame(app)
+        # The subject is the chips' pixels, not a focus tint: nobody holds the keyboard (the panel open at
+        # launch would hand it to the first chip).
+        CrymbleUI::Widget.focus_manager.clear_focus
         renderer.settle_rendering(app)
 
         layer = panel.layer.not_nil!
@@ -121,6 +124,7 @@ describe "panel resize re-flow repairs vacated pixels" do
         drag = ->(steps : Array(Float64)) do
             right = panel.x + panel.width
             app.handle_mouse_down(CrymbleUI::Vec2.new(right - 4.0, panel.y + 300.0))
+            CrymbleUI::Widget.focus_manager.clear_focus # a press hands the panel the keyboard; no focus tint
             renderer.render_frame(app)
             before = packing.call
             steps.each do |dx|

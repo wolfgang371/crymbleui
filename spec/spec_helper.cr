@@ -142,7 +142,7 @@ class TestApp < CrymbleUI::App
 
   # Allow tests to set root widget directly
   def root_widget=(widget : CrymbleUI::Widget)
-    @root = widget
+    install_root(widget)
   end
 end
 

@@ -93,14 +93,7 @@ module CrymbleUI
       # Dispatch text input to focused widget
       # Filter control characters (< 32) except for specific cases
       # Also filter DEL (127)
-      if char.ord >= 32 && char.ord != 127
-        InputLog.next_in_batch if InputLog.enabled?
-        _outcome = @focus_manager.handle_text_input(char)
-        if InputLog.enabled?
-          InputLog.record("text", char.to_s, _outcome.is_a?(Bool) ? _outcome : nil,
-            @focus_manager.focused_widget, app.needs_rebuild?, @last_frame_ms)
-        end
-      end
+      @focus_manager.type_char(char, app, @last_frame_ms) if char.ord >= 32 && char.ord != 127
       true # Redraw for text input
     end
 
@@ -131,6 +124,9 @@ module CrymbleUI
           end
         when SF::Keyboard::Tab # Ctrl+Tab / Ctrl+Shift+Tab = cycle panels
           if root = app.root
+            # A list or menu left open would sit over the next panel: close them, as a press elsewhere does
+            app.close_popups
+            app.close_menus
             @focus_manager.cycle_panel(forward: !key.shift, root: root)
           end
           return true
@@ -145,9 +141,25 @@ module CrymbleUI
         end
       end
 
+      # F6 / Shift+F6: the next / previous part of the keyboard's panel - its Tab stops in reading order, whatever
+      # holds the keyboard (a grid keeps Tab for its cursor, F6 is the way to the panel's other parts). Before the
+      # focused widget, as Ctrl+Tab; open lists and menus close first, as a press elsewhere does. With a modifier
+      # (Ctrl, Alt, Super) the key stays the widget's and the app's.
+      if key.code == SF::Keyboard::F6 && !key.control && !key.alt && !key.system
+        if root = app.root
+          app.close_popups
+          app.close_menus
+          @focus_manager.cycle_focus(forward: !key.shift, root: root)
+        end
+        return true
+      end
+
+      # Panel shortcuts go to the keyboard's panel - the front one when nobody holds the keyboard, none for a
+      # widget of the window body or a popup.
+      active_panel = app.root.try { |root| @focus_manager.keyboard_panel(root) }
+
       # ESC key: panel shortcuts first (dialog close), then app-level (drags, menus)
       if key.code == SF::Keyboard::Escape
-        active_panel = app.root.try(&.find_topmost_panel)
         if active_panel && @shortcut_manager.handle_key_event(key, active_panel)
           return true
         end
@@ -166,10 +178,13 @@ module CrymbleUI
         return true
       end
 
-      # For Enter/Space, check topmost panel shortcuts first
-      # (dialog confirm/cancel takes priority over widget focus)
+      # Enter/Space: a focused button, checkbox or header is pressed - what Tab reached is what Enter acts on;
+      # otherwise the panel's shortcuts first (a dialog's Enter = Ok from its text field), then the widget.
       if key.code == SF::Keyboard::Enter || key.code == SF::Keyboard::Space
-        active_panel = app.root.try(&.find_topmost_panel)
+        if !(key.alt || key.control || key.shift) && @focus_manager.focused_widget.try(&.takes_activation_keys?)
+          @focus_manager.handle_activation_key(key.code == SF::Keyboard::Enter ? :enter : :space)
+          return true
+        end
         if active_panel && @shortcut_manager.handle_key_event(key, active_panel)
           return true
         end
@@ -201,7 +216,6 @@ module CrymbleUI
 
       # If still not handled, try keyboard shortcuts
       unless handled
-        active_panel = app.root.try(&.find_topmost_panel)
         @shortcut_manager.handle_key_event(key, active_panel)
       end
       true # Redraw for key events

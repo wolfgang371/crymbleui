@@ -339,7 +339,7 @@ module CrymbleUI
       primitives do
         # Background — override-able so callers can tint the cell (e.g. to
         # highlight a changed cell) without losing the combo widget.
-        fill_rect(local_bounds, background_color || Theme.current.combo_background)
+        fill_background(bounds, background_color || Theme.current.combo_background)
         # Border
         draw_rect(local_bounds, Theme.current.combo_border)
         # Text (vertically centered in content area, matching TextInput alignment)
@@ -533,20 +533,5 @@ module CrymbleUI
       true
     end
 
-    # Wire Tab/Shift+Tab on the popup's TextInput: commit the highlighted value, then —
-    # inside a focus-scope (VirtualMatrix) — re-dispatch Tab so the grid cursor advances
-    # and focus stays in the matrix (return true to hold the Tab-trap); standalone,
-    # return false so FocusManager cycles to the next widget. Called from wire_popup.
-    private def wire_popup_tab_callback(popup)
-      popup.text_input.on_tab = ->(shift : Bool) {
-        popup.select_highlighted
-        if scope = focus_scope_ancestor
-          scope.on_key_down(SF::Keyboard::Key::Tab, false, shift)
-          true
-        else
-          false
-        end
-      }
-    end
   end
 end

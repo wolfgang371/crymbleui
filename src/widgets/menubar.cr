@@ -173,9 +173,8 @@ module CrymbleUI
                         fill_rect(bg_rect, background_color)
                     end
                 else
-                    # No menus - draw full background to menubar width
-                    bg_rect = Rect.new(0.0, 0.0, menubar_width, bounds.height - BORDER_WIDTH)
-                    fill_rect(bg_rect, background_color)
+                    # No menus - the whole widget; the border strip below paints its last row
+                    fill_background(bounds, background_color)
                 end
 
                 # Draw bottom border to menubar width

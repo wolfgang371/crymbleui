@@ -622,7 +622,7 @@ module CrymbleUI
         display_empty ? 0.0 : measure_text(value, fs).width, band_box: inner)
 
       primitives do
-        fill_rect(local_bounds, background_color)
+        fill_background(bounds, background_color)
 
         # Draw border as 4 filled rectangles (avoids SFML outline_thickness clipping)
         # Drawn INSIDE bounds for pixel-perfect alignment
@@ -726,9 +726,6 @@ module CrymbleUI
 
     # Called when widget gains focus
     def on_focus
-      # Chain to Widget#on_focus (request_scroll_into_view) so a focused field scrolls into view
-      # inside a ScrollView — the base behavior every other focusable keeps (VirtualMatrix also
-      # chains super; TextInput was the lone override that dropped it).
       super
       @cursor_visible.set(true)
       @edit_mode.set(@default_mode)

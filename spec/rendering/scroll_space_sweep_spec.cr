@@ -116,6 +116,11 @@ private def build_sweep(direction : CrymbleUI::ScrollDirection, scroll : Crymble
     else SweepFiller.new
     end)
   end
+  # A scaled consumer, last: a row inside a fitted, whose painted rect is its laid-out one scaled
+  scaled_row = SweepRow.new("scaled", id: "scaled_row")
+  fitted = CrymbleUI::Fitted.new(id: "fitted")
+  fitted.add_child(scaled_row)
+  content.add_child(fitted)
   sv.set_content(content)
   root.add_child(sv)
 
@@ -129,7 +134,7 @@ private def build_sweep(direction : CrymbleUI::ScrollDirection, scroll : Crymble
   renderer.render_frame(app)
 
   {renderer: renderer, app: app, window: window, sv: sv, drag_row: drag_row, drop_row: drop_row,
-   fg_box: fg_box, combo: combo, inner: inner, outside: outside}
+   fg_box: fg_box, combo: combo, inner: inner, outside: outside, scaled_row: scaled_row, fitted: fitted}
 end
 
 
@@ -277,6 +282,30 @@ describe "scroll-space sweep" do
         painted = inner.viewport_bounds
         layer.bounds.x.should be_close(painted.x, 1.0)
         layer.bounds.y.should be_close(painted.y, 1.0)
+      end
+
+      # A fitted in the content takes the content's width. Painted = laid out, scaled into that slot. It is the
+      # last row, so only a case that scrolls vertically shows it (the unscrolled control stays at zero): no
+      # such probe in the others.
+      unless direction.horizontal? || scroll.y == 0.0
+        it "finds a scaled row under its painted position, and hands it its own space" do
+          f = build_sweep(direction, scroll)
+          row = f[:scaled_row]
+          fitted = f[:fitted]
+          sweep_focus(f, row, direction, scroll)
+          if direction.vertical?
+            expected = fitted.parent.not_nil!.bounds.width / 300.0
+            (expected - 1.0).abs.should be > 0.05 # coverage: a real scale
+            row.viewport_bounds.width.should be_close(300.0 * expected, 0.5)
+          end
+          scale = row.viewport_bounds.width / row.absolute_bounds.width
+          click = sweep_visible_point(row, f[:sv])
+          f[:window].hit_test(click).should eq(row)
+          f[:app].handle_mouse_down(click)
+          seen = row.seen.should_not be_nil
+          (seen.x - row.absolute_bounds.x).should be_close((click.x - row.viewport_bounds.x) / scale, 0.5)
+          (seen.y - row.absolute_bounds.y).should be_close((click.y - row.viewport_bounds.y) / scale, 0.5)
+        end
       end
 
       it "orders focus by what the user sees" do

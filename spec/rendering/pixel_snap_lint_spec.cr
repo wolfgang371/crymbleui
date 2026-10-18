@@ -82,7 +82,7 @@ LINT_EXPECTED = {
   "src/rendering/cache_validation.cr"   => {0, "clean"},
   "src/rendering/clip_math.cr"          => {0, "the clip conversion itself — all via PixelSnap"},
   "src/rendering/crsfml_backend.cr"     => {0, "text snapped; shapes/blits outside pattern scope"},
-  "src/rendering/draw_primitive.cr"     => {0, "data definitions"},
+  "src/rendering/draw_primitive.cr"     => {0, "data definitions and their scaling: factors, and device spans handed in"},
   "src/rendering/fbo_math.cr"           => {0, "pure Int32 flip algebra"},
   "src/rendering/frame_work_log.cr"     => {0, "diagnostics"},
   "src/rendering/layer_renderer.cr"     => {0, "consolidated: origin/span/cover + slot_axis; kept-raw sites are annotated"},
@@ -96,6 +96,7 @@ LINT_EXPECTED = {
   "src/rendering/sfml_renderer.cr"      => {0, "text + compositor snapped"},
   "src/testing/test_render_backend.cr"  => {8, "4 fill_rect centre-coverage (SFML rasterizer model); 4 draw_rect raw truncation — diverges from SFML at frac(x) > 0.5, tracked in the backlog"},
   "src/testing/test_renderer.cr"        => {0, "compositor snapped; clip extents via cover (parity with SFML)"},
+  "src/widgets/fitted.cr"               => {0, "a render scale and its mapping: factors and content-space points, no device pixels"},
   # Matrix blit/park internals + the layer sampling seam:
   "src/widgets/virtual_matrix/adapter.cr"           => {0, "no coordinate conversions"},
   "src/widgets/virtual_matrix/blit_plan.cr"         => {0, "dests via PixelSnap.origin; scroll quantization is content-space round-trips"},
@@ -117,6 +118,7 @@ describe "PixelSnap lint tripwire" do
     globbed << "src/testing/test_renderer.cr"
     globbed << "src/widgets/virtual_matrix.cr"
     globbed << "src/core/layer.cr"
+    globbed << "src/widgets/fitted.cr"
     LINT_EXPECTED.keys.to_set.should eq(globbed)
     LINT_EXPECTED.each_key { |f| File.exists?(f).should be_true, "lint target vanished: #{f}" }
   end

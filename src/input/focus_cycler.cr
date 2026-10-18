@@ -5,11 +5,11 @@ module CrymbleUI
   # Handles Tab/Shift-Tab focus cycling
   # Order: top-to-bottom, left-to-right (reading order)
   class FocusCycler
-    # Collect all focusable widgets in tab order
-    # Returns widgets sorted by reading order: (y, x)
-    def collect_focusable_widgets(root : Widget) : Array(Widget)
+    # The Tab stops of `scope` - focusable, enabled, shown - in reading order: (y, x). A WindowPanel is a wall for
+    # every walk but its own: from a panel Tab never leaves it, from the window body it never enters one.
+    def collect_focusable_widgets(scope : Widget) : Array(Widget)
       focusables = [] of Widget
-      collect_recursive(root, focusables)
+      collect_recursive(scope, scope, focusables)
 
       # Sort by reading order: primary Y (top-to-bottom), secondary X (left-to-right).
       # PAINTED position, not laid-out: "reading order" is what the user sees, and widgets on
@@ -45,17 +45,16 @@ module CrymbleUI
       focusables[next_index]
     end
 
-    private def collect_recursive(widget : Widget, result : Array(Widget))
-      # Add widget if focusable
-      result << widget if widget.focusable?
+    private def collect_recursive(widget : Widget, scope : Widget, result : Array(Widget))
+      return if widget.is_a?(WindowPanel) && !widget.same?(scope)
+      result << widget if widget.focusable? && widget.enabled?
 
       # Don't recurse into focus scope widgets (e.g., VirtualMatrix)
       # Their children are managed internally, not part of the tab order
       return if widget.is_focus_scope?
 
-      # Recurse into children
-      widget.children.each do |child|
-        collect_recursive(child, result)
+      widget.shown_children.each do |child|
+        collect_recursive(child, scope, result)
       end
     end
   end

@@ -106,6 +106,14 @@ In DSL-style apps, `build()` creates the **entire widget tree from scratch** on 
 
 **Key rule:** If `build()` would produce a **different widget tree** (different widgets, different structure), call `request_rebuild`. If the same widgets just need to repaint with new data, use `mark_needs_render` or `invalidate_all!`.
 
+**`copy_state_from` carries state; it never marks a fresh instance for RENDER.** It runs on an instance that has
+not been laid out yet (still NeedsLayout), so a `mark_needs_render` from it - directly or through a marking setter -
+escalates to a `mark_needs_layout` of its whole layer: the panel re-renders at every rebuild. Write the carried
+field (an `@[Reconcile]` property, or the ivar) instead; the rebuild's own staleness check compares the new
+instance's primitives with what the layer buffer holds. (A structural `mark_needs_layout`, as VirtualMatrix's
+auto_size handover does, is a layout by intent.) The base class does this for the focus flash (`Widget#copy_state_from`
+writes `@focus_highlighted` before the focus transfer).
+
 **Avoid `mark_needs_layout` from app code** — in DSL apps, `mark_needs_layout` propagating to root triggers a full rebuild. Use `mark_needs_render` for visual-only changes, or `request_rebuild` for structural changes.
 
 ### 3. Testability First
@@ -549,7 +557,7 @@ end
 - **`layout: true`** — the setter *also* calls `mark_needs_layout`. Use when the field changes the widget's size/position. Layout is an imperative pass (not a pull node), so a layout-affecting change must poke it explicitly; auto-capture alone won't.
 - **`reconcile: true`** — the value survives a DSL rebuild (`@[Reconcile]` plus a plain build-shadow that the reconciler compares by `==`). Use for state that must persist across rebuilds (e.g. `scroll_offset`, a selected color).
 
-**Rule of thumb: Source-back what renders.** Read the field's *getter* (`text_color`, never the `@text_color` ivar — that's the raw `Source` object) inside `to_primitives`, and a change re-renders automatically. A field never read while painting doesn't earn a `Source`: a managed object uses `reconcile_property`, and a handful of structural state fields (`visible`/`enabled`/`focus_highlighted`) keep an explicit `mark_needs_render` because they're gates, not paint content.
+**Rule of thumb: Source-back what renders.** Read the field's *getter* (`text_color`, never the `@text_color` ivar — that's the raw `Source` object) inside `to_primitives`, and a change re-renders automatically. A field never read while painting doesn't earn a `Source`: a managed object uses `reconcile_property`, and a handful of structural state fields (`visible`/`enabled`/`focus_highlighted`) keep an explicit `mark_needs_render` because they're gates, not paint content. (A rebuild carries `focus_highlighted` onto the fresh instance WITHOUT that mark - see "copy_state_from carries state" above.)
 
 See `docs/REACTIVITY.md` for *why* this works (reading a value is what declares the dependency, so an edge can never be forgotten) and for the one case where you reach for a bare `Source(T)` (a global signal with no widget to hang a property on).
 
@@ -1213,7 +1221,7 @@ unbounded request mid-compose would be silently clamped: `VStack#measure` turns 
 
 `WindowPanel` uses this so its flexible content (e.g. a data grid) can never be starved to nothing by
 rigid content above it: `panel_min = @content.min_intrinsic_height + chrome`, cached in
-`perform_layout` (recomputed only on a *structural* change — expand/collapse/rebuild — and merely
+`perform_layout` (recomputed only on a layout of the panel — a *structural* change, a rebuild, a window resize — and merely
 READ by the resize fast-path, so a resize frame stays O(1); `@@min_floor_recompute_count` guards
 this). The panel **won't resize below** `panel_min`, and **grows to it before** laying content out
 (so opening a section enlarges the panel in a single pass). Growth is **downward-only** and
@@ -1225,14 +1233,46 @@ floor and clips rather than overflow.
 `VStack`/`TreeNode`/`Content` take the MAX (width is their cross axis), `FlowLayout` reports its widest
 single child (it wraps to one-per-row), and width-greedy widgets that fill (`MenuBar`, `ScrollView`,
 fill `VirtualMatrix`) override or they poison the floor (`MenuBar` = Σ its menus; `VirtualMatrix` =
-ruler-col + 1 col). `WindowPanel` floors **and grows-at-build on WIDTH exactly like height**. The
+ruler-col + 1 col). `WindowPanel` floors **and grows-at-build on WIDTH like height**, with two
+differences (below): the window caps it, and a width the user never chose returns to the app's ask when
+the floor drops. The width is settled first, so the height floor is measured at the width the content
+gets. The
 governing principle (the user's law): **scrolling is OPT-IN** — wrap content in a `ScrollView` (reports
 min 0 on both axes) and the panel can shrink past it while the ScrollView clips/scrolls; otherwise the
 floor guarantees **nothing clips**. The lib never imposes a scrollbar. **Window-boundary caveat**:
-"never clips" holds only while the window can *contain* the content — a `maximized` panel (or a
-free-floating one whose content exceeds the window) clips-to / overflows the window, exactly as the
-height axis already did; the genuinely content-bigger-than-window case is a deferred follow-on
-(auto-collapse chrome under pressure).
+"never clips" holds only while the window can *contain* the content — the window wins over the floor.
+
+**A panel lies inside its window** unless the user chose otherwise, per quantity
+(`window_panel_window_fit_spec.cr`). This applies to a panel directly in the `Window`, the ones
+`constrain_to_window_bounds` reaches. The size is not settled while the panel is maximized or being
+resized.
+- **Width.** Unless the user resized it (`user_sized`), the width is DERIVED at every layout:
+  `max(ask, floor)`, capped at the window's width, never below `MIN_PANEL_SIZE`. It narrows when the
+  window does and widens back when the window does; the content clips meanwhile. A width the user
+  chose keeps the grow-only floor and no cap.
+- **x.** Unless the user moved it (`user_moved_x`), x is the ask, shifted inside the window, the left
+  edge winning in a window narrower than the panel. A moved x keeps `MIN_VISIBLE_MARGIN` visible, as
+  the drag does.
+- **y.** Unless the user moved it (`user_moved_y`), y is the ask, shifted up so the bottom stays inside
+  the panel area (below the menubar, above the statusbar), the top winning for a panel taller than the
+  area. A moved y keeps the title bar inside, as the drag does. So a panel lifts when the window loses
+  height, when its content grows past the bottom (right after the click that grew it), and when a
+  bottom-edge resize past the window is released (it hops up, its height kept - the twin of the right
+  edge); it returns to its ask when there is room again.
+- **The ask** is the build's `x:`/`y:`/`width:` at first placement, or the last write from code (`x=`,
+  `y=`, `width=`, `move_to`). It's carried across rebuilds like the geometry, so a later build's `x:`/`y:`
+  doesn't move a placed panel.
+- **The flags are set only by a gesture that changed that quantity.** A drag sets `user_moved_x` when x
+  changed and `user_moved_y` when y did; the left handles move the x, the top handles the y. A press,
+  a height-only resize, maximize and restore set nothing. There is no slop: a 1 px wobble across a
+  vertical drag (or down a horizontal one) hands that axis over too. Internal writes go to the Source,
+  never through the setters, so derived geometry never becomes an ask.
+- **No position fit during a gesture.** A rebuild mid-press must not move the panel under the cursor;
+  the title bar is still kept inside meanwhile, and the release lays out again.
+- **The asymmetry is deliberate:** the width returns to the ask on collapse, while the height stays
+  grow-only (above).
+- **Height** is not fitted - only the position is: a panel taller than the area keeps its top, and its
+  bottom leaves the window. A `maximized` panel fills the window and clips.
 
 **Loose content + relaxation-skip (grow is O(1)).** A panel hands its content a **loose** box
 (`min 0`, `max` = content area), NOT a tight one. So a non-fill body takes its **intrinsic** size (and
@@ -1273,9 +1313,9 @@ entire content tree was re-measured per frame (an ~30%-CPU live-resize cost). Co
 you want that. Pinned by `spec/rendering/grow_resize_perf_spec.cr` (measure/grow-frame is
 content-independent *for content with no wrapping layout* — see the paragraph above for the exception).
 
-*Deferred extensions*: a remembered desired-height to shrink back on collapse; growing **upward** /
-clamping when a panel is pinned to the screen bottom (today an over-tall panel's bottom edge can go
-off-screen, recoverable by dragging the title bar up).
+*Deferred extensions*: a remembered desired-height to shrink back on collapse (the width has it: its
+ask); capping the height at the window (today a panel taller than the window keeps its top, and its
+bottom edge goes off-screen).
 
 ## Event Handling and Input
 
@@ -1329,6 +1369,12 @@ refreshes other views of the data - embrace's per-cell write - is requested with
 script typing into a grid does not pay a rebuild per committed cell. Specs reproduce queued
 input with `TestRenderer#deliver` and `Testing::Keys`; `key_down` renders after every key and cannot
 see a batch.
+
+**Text typed from code** (an app's "insert today's date") takes the same text path as a keystroke:
+`FocusManager#type_char` - the focused widget's `on_text_input`, traced as typing (`InputLog`) - which
+`KeyboardDispatch`'s TextEntered branch calls too. `FocusManager#type_text` types character by
+character and ends at the input barrier: real input would wait for the frame, then land on a tree the
+caller never saw, so the rest is not typed (embrace's Ctrl+. on a drill-down cell drills once).
 
 ### Implementation Guidelines for Text Input
 

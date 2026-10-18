@@ -172,12 +172,9 @@ module CrymbleUI
             # Border rect (top border)
             border_rect = Rect.new(0.0, 0.0, bounds.width, BORDER_HEIGHT)
 
-            # Local bounds rect for background
-            local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
-
             primitives do
                 # Draw background
-                fill_rect(local_bounds, background_color)
+                fill_background(bounds, background_color)
 
                 # Draw top border
                 fill_rect(border_rect, border_color)

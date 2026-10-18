@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.7.2**
+**Version 1.8.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -21,8 +21,8 @@ CrymbleUI is fully AI generated.
 Its first line of code emerged 2.11.2025, 19:46.
 
 Currently is has:
-- src/: ~40479 LOC
-- spec/: ~84284 LOC
+- src/: ~41314 LOC
+- spec/: ~87735 LOC
 
 ## Used by
 
@@ -126,7 +126,7 @@ A small to-do app and its use-case spec, which runs headless: no window, no pixe
 
 
 <details>
-<summary>View source code</summary>
+<summary>The app under test - <code>tutorials/tutorial-29.cr</code></summary>
 
 ```crystal
 require "../src/crymble-ui"
@@ -181,7 +181,7 @@ CrymbleUI.run(TodoApp.new)
 
 </details>
 
-Its use-case spec, `spec/tutorials/tutorial_29_spec.cr` - headless, part of the suite:
+The spec that drives it, headless - `spec/tutorials/tutorial_29_spec.cr`, part of the test suite. It requires the app above and acts on it by widget id:
 
 ```crystal
 require "../spec_helper"
@@ -2357,7 +2357,7 @@ A small to-do app and its use-case spec, which runs headless: no window, no pixe
 
 
 <details>
-<summary>View source code</summary>
+<summary>The app under test - <code>tutorials/tutorial-29.cr</code></summary>
 
 ```crystal
 require "../src/crymble-ui"
@@ -2412,7 +2412,7 @@ CrymbleUI.run(TodoApp.new)
 
 </details>
 
-Its use-case spec, `spec/tutorials/tutorial_29_spec.cr` - headless, part of the suite:
+The spec that drives it, headless - `spec/tutorials/tutorial_29_spec.cr`, part of the test suite. It requires the app above and acts on it by widget id:
 
 ```crystal
 require "../spec_helper"
@@ -2452,6 +2452,90 @@ describe TodoApp do
     ui.text("done_2").should eq("Bread")
     ui.checked?("done_2").should be_true
     ui.text("open_count").should eq("0 open")
+  end
+end
+```
+
+---
+### Tutorial 30: Fitted - a clock that follows the window
+A clock whose digits grow and shrink with the window: `fitted { }` shows its one child scaled to the space it is given, and no widget inside knows about it. The text is rasterised at its final size (crisp at any size), and a click lands where it is drawn.
+
+
+
+<details>
+<summary>The app under test - <code>tutorials/tutorial-30.cr</code></summary>
+
+```crystal
+require "../src/crymble-ui"
+
+class ClockApp < CrymbleUI::App
+  state now : String = ""
+
+  # Where the time comes from - the spec hands in a clock it moves itself.
+  def initialize(@clock : -> Time = -> { Time.local })
+    super()
+    @now = tick
+  end
+
+  def on_start
+    every(1.second) { self.now = tick }
+  end
+
+  def build : CrymbleUI::Widget
+    window("Tutorial 30: Fitted", 360, 160) do
+      vstack(spacing: 4.0) do
+        text("Resize the window - the clock follows it", id: "hint")
+        expanded(fill_area: true) do
+          fitted(id: "clock_box") do
+            text(now, id: "clock")
+          end
+        end
+      end
+    end
+  end
+
+  private def tick : String
+    @clock.call.to_s("%H:%M:%S")
+  end
+end
+
+CrymbleUI.run(ClockApp.new)
+```
+
+</details>
+
+The spec that drives it, headless - `spec/tutorials/tutorial_30_spec.cr`, part of the test suite. It requires the app above and acts on it by widget id:
+
+```crystal
+require "../spec_helper"
+require "../../src/testing/driver"
+require "../../tutorials/tutorial-30"
+
+describe ClockApp do
+  it "shows the time and ticks every second" do
+    time = Time.local(2026, 10, 10, 12, 0, 0)
+    ui = CrymbleUI::Testing::Driver.new(ClockApp.new(-> { time }), 360, 160)
+    ui.text("clock").should eq("12:00:00")
+
+    time += 1.second
+    ui.advance(1.0)
+    ui.text("clock").should eq("12:00:01")
+  end
+
+  # What the user sees of it: the clock is as wide as the space it is given, centred there, and
+  # follows the window when it is resized.
+  it "draws the clock across the width it is given, and follows the window" do
+    ui = CrymbleUI::Testing::Driver.new(ClockApp.new(-> { Time.local(2026, 10, 10, 12, 0, 0) }), 360, 160)
+    {360, 520}.each do |width|
+      ui.renderer.resize(width, 160)
+      ui.app.root.not_nil!.mark_needs_layout
+      ui.settle
+      box = ui.find("clock_box").viewport_bounds
+      clock = ui.find("clock").viewport_bounds
+      clock.width.should be_close(box.width, 0.5) # a wide clock: the width binds
+      clock.center.y.should be_close(box.center.y, 0.5)
+      box.width.should be_close(width - CrymbleUI::Window::CONTENT_PADDING * 2, 0.5)
+    end
   end
 end
 ```

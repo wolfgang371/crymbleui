@@ -89,6 +89,10 @@ module CrymbleUI
         "PageUp"
       when "pagedown"
         "PageDown"
+      when "period"
+        "."
+      when "comma"
+        ","
       else
         # Capitalize first letter for single char keys (s → S)
         # Keep multi-char keys as-is (Space, Enter, F1, etc.)

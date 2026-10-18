@@ -131,6 +131,7 @@ module CrymbleUI
     # never appear: past this point a cell would lose content while its cut marker, which
     # compares text against the box it was given, still reported everything as fitting.
     MAX_WIDGET_SPAN = 16384.0
+    MAX_TEXTURE_SPAN = MAX_WIDGET_SPAN.to_i32 # the same limit as a device span: what a SCALED span is clamped to
 
     private def covers?(occluder : Rect, target : Rect) : Bool
       ox = occluder.x + OCCLUDER_INSET
@@ -592,12 +593,14 @@ module CrymbleUI
               # must not. @dirty_widgets is only emptied by clear_render_state, which lives inside
               # render_layer, so a layer that never renders accumulates every widget ever marked on it
               # and pins whole discarded generations: measured 28 -> 90 MB of heap over a few hundred
-              # rebuilds, while GPU memory fell. Emptying it is also the semantically right answer,
-              # since an empty set means "all dirty" (Layer#widget_dirty?) and a layer that has been
-              # invisible for a while should repaint wholesale when it comes back. Done WITHOUT the
-              # mark_needs_* helpers on purpose: those bump the revs, which would move the render
+              # rebuilds, while GPU memory fell. What the set named is not lost: the layer repaints
+              # wholesale when it comes back - a full clear and render, requested by needs_clear, which
+              # no later mark narrows (the reveal itself marks the panel's title bar, so an empty set
+              # would be read as "only that"). A viewport_cache layer never reads the set. Both writes
+              # are raw on purpose: the mark_needs_* helpers bump the revs, which would move the render
               # trigger every frame and undo the saving.
               layer.dirty_widgets.clear
+              layer.needs_clear = true unless layer.viewport_cache
               skipped << layer
               next
             end
@@ -705,6 +708,10 @@ module CrymbleUI
     # Render a layer to its backend buffer
     private def render_layer(layer : Layer)
       LayerRenderer.frame_layer_count += 1 # Instrumentation
+      # Reachable only if a fitted's refusal of a layer owner inside it failed: the viewport_cache paths
+      # (buffer origin, recenter, slot keys, sampling) have no scaled form.
+      assert(!(layer.viewport_cache && layer.render_scale != 1.0),
+        "viewport_cache layer #{layer.id} is scaled - a layer owner got inside a fitted past its refusal")
 
       # Validation (Option C): Skip layers with invalid dimensions
       return unless valid_layer_dimensions?(layer)
@@ -756,11 +763,9 @@ module CrymbleUI
         if render_widgets = layer.blit_plan_render_widgets
           render_widgets_count = render_widgets.size
           origin = layer.content_rect
-          layer_offset_x = origin.x
-          layer_offset_y = origin.y
           drag_offset = Vec2.new(0.0, 0.0)
           render_widgets.each do |widget|
-            render_single_widget(widget, backend, origin, layer, drag_offset)
+            render_single_widget(widget, backend, origin, size, layer, drag_offset)
           end
           layer.blit_plan_render_widgets = nil
         end
@@ -901,12 +906,16 @@ module CrymbleUI
         end
         backend.display
       {% else %}
-        # Collect widgets to render (full or selective)
-        widgets_to_render = collect_widgets_to_render(layer, full_render)
+        # Collect widgets to render (full or selective). A selective CHROME frame walks the layer once: the dirty filter,
+        # the foreground pass and the signature refresh share the walk (viewport_cache: it feeds the foreground pass
+        # only - the render list is the visible cells). A full render's list serves the foreground pass itself.
+        layer_walk = full_render ? nil : collect_layer_content(layer)
+        widgets_to_render = collect_widgets_to_render(layer, layer_walk)
 
         # Cheap-rebuild staleness: capture what a CHROME layer full-renders, so the next rebuild can
         # compare + skip when unchanged (assess_rebuild_staleness). Only on full_render (a selective
-        # reactive render must not pay the O(all-prims) capture) and only for non-viewport_cache layers
+        # reactive render must not pay the O(all-prims) capture: it refreshes only what it painted, see
+        # refresh_rendered_signature) and only for non-viewport_cache layers
         # (viewport layers self-gate via viewport_body_stale?). widgets_to_render here IS the full
         # collect_all_widgets_recursive set — the SAME basis the assessment rebuilds → no instrument drift.
         if full_render && !layer.viewport_cache
@@ -985,12 +994,13 @@ module CrymbleUI
         # IMPORTANT: For viewport_cache layers, clip to BUFFER size not viewport size!
         # Viewport_cache buffers are larger than viewport (viewport + 2*cache_extent), and widgets
         # render to buffer-relative positions that can exceed viewport dimensions.
+        extent = layer.size # the layer's pixel extent, read once: the clip and every widget's culling
         layer_clip_rect = if layer.viewport_cache
                             # Viewport_cache: clip to buffer size (allows rendering beyond viewport)
                             Rect.new(0.0, 0.0, backend.width.to_f64, backend.height.to_f64)
                           else
                             # Normal: clip to viewport (layer bounds)
-                            Rect.new(0.0, 0.0, layer.size.width, layer.size.height)
+                            Rect.new(0.0, 0.0, extent.width, extent.height)
                           end
         # BALANCE IS LOAD-BEARING. The clip now lives on the target's view, so it survives
         # every render-target re-activation for the life of the backend — a push left
@@ -1004,7 +1014,7 @@ module CrymbleUI
         begin
           # Render each widget using per-widget texture approach
           widgets_to_render.each do |widget|
-            render_single_widget(widget, backend, origin, layer, drag_offset)
+            render_single_widget(widget, backend, origin, extent, layer, drag_offset)
           end
 
           # Second pass: render foreground primitives for DecoratedContainers
@@ -1012,15 +1022,7 @@ module CrymbleUI
           # IMPORTANT: Must iterate ALL widgets, not just dirty ones — foreground
           # primitives (e.g., connecting lines) span multiple children and get
           # overwritten when any child re-renders its background
-          all_layer_widgets = if full_render
-                                widgets_to_render
-                              else
-                                all_fg = [] of Widget
-                                layer.widgets.each do |w|
-                                  collect_all_widgets_recursive(w, all_fg, layer)
-                                end
-                                all_fg
-                              end
+          all_layer_widgets = layer_walk || widgets_to_render
           all_layer_widgets.each do |widget|
             if widget.responds_to?(:has_foreground?) && widget.has_foreground?
               render_foreground_primitives(widget, backend, layer_offset_x, layer_offset_y, layer)
@@ -1031,6 +1033,7 @@ module CrymbleUI
             backend.pop_clip
           end
         end
+        refresh_rendered_signature(layer, layer_walk, widgets_to_render) if layer_walk && !layer.viewport_cache
         backend.display
       {% end %}
 
@@ -1254,22 +1257,22 @@ module CrymbleUI
           # one extra fractional-edge column that the (correctly device_pixel_span-sized) cache never has →
           # a FALSE ~1px "stale cache" seam at every fractional-width widget edge. The instrument, not the
           # cache, was the bug.
-          widget_width = device_pixel_span(widget_abs.x - layer_offset_x, widget_abs.width)
-          widget_height = device_pixel_span(widget_abs.y - layer_offset_y, widget_abs.height)
+          local_x, widget_width = paint_span(layer, layer_offset_x, widget_abs.x, widget_abs.width)
+          local_y, widget_height = paint_span(layer, layer_offset_y, widget_abs.y, widget_abs.height)
           next if widget_width <= 0 || widget_height <= 0
 
-          # Viewport-relative position: origin of the DIFFERENCE (matches production
-          # round_to_layer_pixels); the scroll term is content-space quantization and
-          # stays raw (clamped >= 0, floor == trunc).
-          local_x = PixelSnap.origin(widget_abs.x - layer_offset_x) - layer.scroll_offset.x.to_i
-          local_y = PixelSnap.origin(widget_abs.y - layer_offset_y) - layer.scroll_offset.y.to_i
+          # Viewport-relative position: paint_span's origin of the DIFFERENCE (production's owner); the scroll
+          # term is content-space quantization and stays raw (clamped >= 0, floor == trunc).
+          local_x -= layer.scroll_offset.x.to_i # snap-exempt: content-space scroll quantization (as production)
+          local_y -= layer.scroll_offset.y.to_i # snap-exempt: content-space scroll quantization (as production)
 
           # Skip widgets completely outside viewport
           next if local_x + widget_width <= 0 || local_y + widget_height <= 0
           next if local_x >= viewport_w || local_y >= viewport_h
 
           # FRESH primitives — bypasses primitive cache entirely
-          primitives = widget.to_primitives(widget.bounds)
+          primitives = DrawPrimitive.scaled_primitives(widget.to_primitives(widget.bounds), layer.render_scale, widget_width, widget_height)
+          check_fill_coverage(widget, primitives, widget_width, widget_height)
 
           # Skip pure containers (empty primitives + has children)
           next if !widget.children.empty? && primitives.empty?
@@ -1297,10 +1300,14 @@ module CrymbleUI
         all_widgets.each do |widget|
           if widget.responds_to?(:has_foreground?) && widget.has_foreground?
             widget_abs = widget.absolute_bounds
-            local_x = PixelSnap.origin(widget_abs.x - layer_offset_x) - layer.scroll_offset.x.to_i
-            local_y = PixelSnap.origin(widget_abs.y - layer_offset_y) - layer.scroll_offset.y.to_i
+            local_x, span_w = paint_span(layer, layer_offset_x, widget_abs.x, widget_abs.width)
+            local_y, span_h = paint_span(layer, layer_offset_y, widget_abs.y, widget_abs.height)
+            local_x -= layer.scroll_offset.x.to_i # snap-exempt: content-space scroll quantization (as production)
+            local_y -= layer.scroll_offset.y.to_i # snap-exempt: content-space scroll quantization (as production)
 
-            widget.foreground_primitives.each do |prim|
+            foreground = DrawPrimitive.scaled_primitives(widget.foreground_primitives, layer.render_scale, span_w, span_h)
+            check_fill_coverage(widget, foreground, span_w, span_h)
+            foreground.each do |prim|
               execute_primitive_with_offset(prim, fresh_backend, local_x.to_f64, local_y.to_f64)
             end
           end
@@ -1358,11 +1365,53 @@ module CrymbleUI
       PixelSnap.span(start, length)
     end
 
+    # THE geometry owner for painting into a layer, per AXIS: where the content range [start, start + len) lands
+    # in `layer`'s buffer - its layer-local device origin and device span - relative to the layer's content
+    # origin `c_axis` (content_rect.position). The caller passes its already-adjusted start and length (the
+    # drag offset, the MAX_WIDGET_SPAN clamp) and keeps its own extra terms (a scroll, a buffer origin).
+    #
+    # Two formulas, deliberately. Unscaled, it DELEGATES to the contract-pinned owners (round_to_layer_pixels,
+    # device_pixel_span), so that path stays bit-identical at every call site. Scaled (Layer#render_scale !=
+    # 1), it snaps both scaled EDGES - siblings sharing an edge share its pixel by construction; the start +
+    # length form does not tile there, and the edge form is not bit-identical at 1 ((a + w - c) and (a - c) + w
+    # differ in the last ulp).
+    def paint_span(layer : Layer, c_axis : Float64, start : Float64, len : Float64) : {Int32, Int32}
+      f = layer.render_scale
+      if f == 1.0
+        {round_to_layer_pixels(start, 0.0, c_axis, 0.0)[0], device_pixel_span(start - c_axis, len)}
+      else
+        left = PixelSnap.origin((start - c_axis) * f)
+        {left, PixelSnap.origin((start + len - c_axis) * f) - left}
+      end
+    end
+
+    # -Ddebug_fill_coverage: a full-area fill must cover the device span the widget is painted into, or a
+    # transparent edge strip shows. A reactive pull-cache faithfully re-serves a geometrically wrong primitive
+    # forever, so only a check at the render boundary sees this class. Checked: a covering fill (FillRect#covers,
+    # from fill_background - it covers by construction, so a report there is a defect in the scaling) and a
+    # hand-written fill from the widget's origin (the fill_rect(bounds.width, bounds.height) this exists to find).
+    # Only the 1-2px ROUNDING signature is reported (covered = the pixels a centre-sampled fill spans from 0), never
+    # a deliberately partial fill (a progress bar - far shorter).
+    private def check_fill_coverage(widget : Widget, primitives : Array(DrawPrimitive), span_w : Int32, span_h : Int32) : Nil
+      {% if flag?(:debug_fill_coverage) %}
+        primitives.each do |prim|
+          next unless prim.is_a?(FillRect) && (prim.covers || (prim.bounds.x == 0.0 && prim.bounds.y == 0.0))
+          cov_w = (prim.bounds.x + prim.bounds.width - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
+          cov_h = (prim.bounds.y + prim.bounds.height - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
+          if (cov_w < span_w && cov_w >= span_w - 2) || (cov_h < span_h && cov_h >= span_h - 2)
+            advice = prim.covers ? "a covering fill (fill_background) falls short of its span - a defect in its scaling" : "use fill_background, not fill_rect(bounds.width, bounds.height)"
+            STDERR.puts "[FILL-COVERAGE] #{widget.class.name.split("::").last}##{widget.path_id}: bg fill covers #{cov_w}x#{cov_h}px but device span is #{span_w}x#{span_h}px → transparent edge strip: #{advice}."
+          end
+        end
+      {% end %}
+    end
+
     # Render a single dirty widget (selective rendering optimization)
     # Uses per-widget texture: widget renders to own backend, then blits to layer
     # Directly renders the widget without tree traversal - O(1) instead of O(n)
-    # `origin`: the layer's content rect, read once per layer by the caller (its position is the render origin).
-    private def render_single_widget(widget : Widget, backend : RenderBackend, origin : Rect, layer : Layer, drag_offset : Vec2) : Nil
+    # `origin`: the layer's content rect, read once per layer by the caller (its position is the render origin);
+    # `extent`: the layer's size in buffer pixels (Layer#size), likewise.
+    private def render_single_widget(widget : Widget, backend : RenderBackend, origin : Rect, extent : Size, layer : Layer, drag_offset : Vec2) : Nil
       offset_x = origin.x
       offset_y = origin.y
       # Instrumentation: count all widgets passed to this method (before any early exits)
@@ -1395,18 +1444,19 @@ module CrymbleUI
       end
       clamped_w = widget_abs.width.clamp(0.0, MAX_WIDGET_SPAN)
       clamped_h = widget_abs.height.clamp(0.0, MAX_WIDGET_SPAN)
-      widget_width = device_pixel_span(adjusted_x - offset_x, clamped_w)
-      widget_height = device_pixel_span(adjusted_y - offset_y, clamped_h)
+      # Layer-local position and device span, per axis, from the one geometry owner (the position is the
+      # DIFFERENCE from the layer origin, converted once: no rounding accumulates through nested widgets)
+      layer_local_x, widget_width = paint_span(layer, offset_x, adjusted_x, clamped_w)
+      layer_local_y, widget_height = paint_span(layer, offset_y, adjusted_y, clamped_h)
+      # A scaled span is clamped as the length was: the driver's texture limit
+      widget_width = {widget_width, MAX_TEXTURE_SPAN}.min
+      widget_height = {widget_height, MAX_TEXTURE_SPAN}.min
 
       # Skip zero-size widgets (no visible content)
       return nil if widget_width <= 0 || widget_height <= 0
 
-      # Calculate layer-local position for visibility check
-      # Round absolute coords relative to root BEFORE subtracting layer offset
-      # This prevents accumulating rounding errors through nested widgets
-      layer_local_x, layer_local_y = round_to_layer_pixels(adjusted_x, adjusted_y, offset_x, offset_y)
-      layer_width = PixelSnap.cover(origin.width)
-      layer_height = PixelSnap.cover(origin.height)
+      layer_width = PixelSnap.cover(extent.width)
+      layer_height = PixelSnap.cover(extent.height)
 
       # Viewport_cache layers: use buffer-relative positioning
       # Widget position in buffer = content position - buffer_origin
@@ -1566,27 +1616,8 @@ module CrymbleUI
       # should be skipped entirely - they don't need widget_backend at all.
       # Their children will be rendered separately.
       # This prevents creating uninitialized textures that could cause artifacts.
-      primitives = widget.get_primitives(widget.bounds)
-
-      {% if flag?(:debug_fill_coverage) %}
-        # INVARIANT (render boundary): a widget's full-area background fill must COVER its
-        # device-pixel backend (widget_width × widget_height). A reactive pull-cache faithfully
-        # re-serves a geometrically-WRONG primitive forever, so this class of bug (a logical-width
-        # bg fill 1px short of the snapped backend → a transparent edge "strip") is invisible to the
-        # cache and only a render-boundary assertion catches it. covered = the pixels a center-filled
-        # fill spans from 0. Flag-gated: zero cost in normal builds.
-        primitives.each do |prim|
-          next unless prim.is_a?(FillRect) && prim.bounds.x == 0.0 && prim.bounds.y == 0.0
-          cov_w = (prim.bounds.width - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
-          cov_h = (prim.bounds.height - 0.5).ceil.to_i # snap-exempt: center-coverage rasterizer model
-          # Only the 1-2px ROUNDING-gap signature (a near-full bg fill that falls 1px short of the
-          # snapped backend), never a deliberately-partial fill (progress bar, etc. — far shorter).
-          if (cov_w < widget_width && cov_w >= widget_width - 2) ||
-             (cov_h < widget_height && cov_h >= widget_height - 2)
-            STDERR.puts "[FILL-COVERAGE] #{widget.class.name.split("::").last}##{widget.path_id}: bg fill covers #{cov_w}x#{cov_h}px but device backend is #{widget_width}x#{widget_height}px → transparent edge strip. Use fill_background, not fill_rect(bounds.width, bounds.height)."
-          end
-        end
-      {% end %}
+      primitives = DrawPrimitive.scaled_primitives(widget.get_primitives(widget.bounds), layer.render_scale, widget_width, widget_height)
+      check_fill_coverage(widget, primitives, widget_width, widget_height)
 
       is_pure_container = !widget.children.empty? && primitives.empty?
       if is_pure_container
@@ -1989,16 +2020,20 @@ module CrymbleUI
       prims = widget.foreground_primitives
       return if prims.empty?
 
-      # Where the widget is painted IN THE BUFFER — the same rule the widget's own primitives
-      # use (`slot_axis`), because this pass draws onto the same buffer. A viewport_cache buffer
-      # holds content space shifted by `buffer_origin` (the composite undoes it with
-      # `scroll_offset - buffer_origin`); omitting that term drew every foreground at the
-      # position the content had when the origin was zero — the Configurator's reference arrows
-      # left behind by a scrolled Config tab. `buffer_origin` is zero off that path (its single
-      # production writer is `recenter_origin!`), so one formula serves both.
+      # Where the widget is painted IN THE BUFFER — the same rule the widget's own primitives use, because this
+      # pass draws onto the same buffer: paint_span (its origin and device span, scaled below a fitted), minus
+      # `buffer_origin`. A viewport_cache buffer holds content space shifted by `buffer_origin` (the composite undoes
+      # it with `scroll_offset - buffer_origin`); omitting that term drew every foreground at the position the
+      # content had when the origin was zero — the Configurator's reference arrows left behind by a scrolled Config
+      # tab. `buffer_origin` is zero off that path (its single production writer is `recenter_origin!`), so one
+      # formula serves both.
       widget_abs = widget.absolute_bounds
-      layer_local_x = slot_axis(widget_abs.x, layer_offset_x, layer.buffer_origin.x)
-      layer_local_y = slot_axis(widget_abs.y, layer_offset_y, layer.buffer_origin.y)
+      layer_local_x, span_w = paint_span(layer, layer_offset_x, widget_abs.x, widget_abs.width)
+      layer_local_y, span_h = paint_span(layer, layer_offset_y, widget_abs.y, widget_abs.height)
+      layer_local_x -= layer.buffer_origin.x.to_i # snap-exempt: whole-by-construction (writer-guarded)
+      layer_local_y -= layer.buffer_origin.y.to_i # snap-exempt: whole-by-construction (writer-guarded)
+      prims = DrawPrimitive.scaled_primitives(prims, layer.render_scale, span_w, span_h)
+      check_fill_coverage(widget, prims, span_w, span_h)
 
       # Execute primitives with offset (primitives are widget-local, layer expects layer-local)
       prims.each do |primitive|
@@ -2104,7 +2139,9 @@ module CrymbleUI
         end
         changed.each(&.mark_needs_render)
         # A selective render is not full_render → render_layer won't re-capture the signature. Record what
-        # the buffer will hold this frame (unchanged siblings + the re-rendered changed widgets = sig).
+        # the buffer will hold this frame (unchanged siblings + the re-rendered changed widgets = sig) - with the
+        # layer bg and the image flag, which the selective refresh deliberately leaves alone; the refresh then
+        # re-writes the changed widgets' entries with what they painted (the same values).
         layer.rendered_content_signature = sig
         layer.signature_has_image = has_image
         layer.signature_background_color = layer.background_color
@@ -2152,8 +2189,53 @@ module CrymbleUI
       {sig, has_image}
     end
 
+    # A selective render keeps a chrome layer's stored signature describing its buffer: each re-rendered widget's
+    # entry takes the primitives it painted. Left stale, the next rebuild compares against pixels that are gone -
+    # one needless re-render per rebuild while a widget flashes, or a GHOST: a widget changed and painted live,
+    # then rebuilt as it was, matches the stale entry, is skipped, and the screen keeps the live change (a hover
+    # left in the frame of a rebuild stayed lit). `rendered` is an ordered subsequence of `walk` (the dirty filter
+    # keeps walk order), so one two-pointer pass finds each entry. The signature is DROPPED (nil: the next rebuild
+    # full-clears) where an entry can't be trusted: a widget that moved (its old pixels stay behind), or one with
+    # same-layer children (its tile covered them; the walk is parent-first and recurses only through collected
+    # widgets, so a collected child follows it directly). A walk that no longer lines up with the signature was
+    # never seen (fast suite + cv-coherency), so it is asserted under -Dverify_bounds; release drops it, and its
+    # path_id is not built per frame (a misaligned entry would still differ at assess's structural_change?).
+    # Never touched: signature_background_color (guard C must still see a bg change); signature_has_image only
+    # ever turns true. A CachePolicy::Never widget regenerates here; it re-renders every frame anyway.
+    private def refresh_rendered_signature(layer : Layer, walk : Array(Widget), rendered : Array(Widget)) : Nil
+      return if rendered.empty?
+      return unless stored = layer.rendered_content_signature
+      return misaligned_signature(layer, "#{walk.size} widgets walked, #{stored.size} stored") if stored.size != walk.size
+      next_rendered = 0
+      walk.each_with_index do |widget, i|
+        break if next_rendered == rendered.size
+        next unless widget.same?(rendered[next_rendered])
+        next_rendered += 1
+        {% if flag?(:verify_bounds) %}
+          if stored[i][0] != widget.path_id
+            return misaligned_signature(layer, "entry #{i} is #{stored[i][0]}, the walk has #{widget.path_id}")
+          end
+        {% end %}
+        bounds = widget.absolute_bounds
+        if stored[i][1] != bounds || walk[i + 1]?.try(&.parent.same?(widget))
+          layer.rendered_content_signature = nil
+          return
+        end
+        primitives = widget.get_primitives(widget.bounds)
+        stored[i] = {stored[i][0], bounds, primitives}
+        layer.signature_has_image = true if primitives.any?(DrawImage)
+      end
+    end
+
+    private def misaligned_signature(layer : Layer, what : String) : Nil
+      {% if flag?(:verify_bounds) %}
+        raise "layer #{layer.id}: its content signature no longer lines up with its widgets (#{what})"
+      {% end %}
+      layer.rendered_content_signature = nil
+    end
+
     # Collect the widgets a chrome (non-viewport_cache) layer renders — the SAME basis as
-    # collect_widgets_to_render(layer, full_render: true) uses, so the capture-side (render_layer) and
+    # collect_widgets_to_render(layer, nil) uses, so the capture-side (render_layer) and
     # assess-side signatures are built over identical sets and can't drift into a false-equal ghost.
     private def collect_layer_content(layer : Layer) : Array(Widget)
       result = [] of Widget
@@ -2301,11 +2383,12 @@ module CrymbleUI
 
     # Collect widgets to render based on render mode (full vs selective)
     # UNIFIED RENDERING: Always use per-widget textures (NEW path only)
-    private def collect_widgets_to_render(layer : Layer, full_render : Bool) : Array(Widget)
+    # `walk` is the selective frame's walk of the layer; nil on a full render.
+    private def collect_widgets_to_render(layer : Layer, walk : Array(Widget)?) : Array(Widget)
       # Pull/SlotBuffer: viewport_cache layers ALWAYS visit every visible cell (no dirty_widgets
       # filtering). The per-slot skip in render_single_widget then decides re-render vs skip by the
       # {rev, buffer_pos} key — correct-by-construction (a change to any cell can't be missed).
-      if full_render || layer.viewport_cache
+      if walk.nil? || layer.viewport_cache
         # Full render: collect widgets recursively from layer.widgets
         all_widgets = [] of Widget
 
@@ -2343,59 +2426,10 @@ module CrymbleUI
 
         all_widgets
       else
-        # Selective render: only dirty widgets, but MUST preserve parent-first order!
-        # CRITICAL: If child renders before parent, it captures wrong (old) background
-        # Solution: collect all widgets, filter to dirty, preserves parent-first order
-        all_widgets = [] of Widget
-        layer.widgets.each do |widget|
-          collect_all_widgets_recursive(widget, all_widgets, layer)
-        end
-        # Filter to dirty widgets OR backend-less widgets within buffer bounds.
-        # Bug 2 fix: After buffer recenter clears widget_backends, widgets that become
-        # visible on subsequent frames need to be rendered even if not marked dirty.
-        # But we must NOT include all backend-less widgets (most are off-screen and never
-        # had a backend) — only those within the current buffer area.
+        # Selective render: only dirty widgets, filtered from the frame's walk so parent-first order is kept (a child
+        # rendered before its parent would capture the wrong, old background).
         dirty_set = layer.dirty_widgets
-        result = if layer.viewport_cache
-                   backend = layer.backend
-                   buf_origin = layer.buffer_origin
-                   buf_w = backend ? backend.width : 0
-                   buf_h = backend ? backend.height : 0
-                   all_widgets.select { |w|
-                     next true if dirty_set.includes?(w)
-                     next false unless w.widget_backend.nil?
-                     # Skip widgets with overflow bounds
-                     next false if w.bounds.width > MAX_WIDGET_SPAN || w.bounds.height > MAX_WIDGET_SPAN
-                     # Check if widget is within buffer bounds — CONSERVATIVE: origin (floor)
-                     # for position, cover (ceil) for extent, so a fractional edge that
-                     # covers a pixel can never be dropped (trunc under-included before).
-                     # NOTE basis: uses w.bounds where the slot path uses absolute_bounds —
-                     # pre-existing, flagged, deliberately unchanged here.
-                     bx = PixelSnap.origin(w.bounds.x) - buf_origin.x.to_i # snap-exempt: whole-by-construction (writer-guarded)
-                     by = PixelSnap.origin(w.bounds.y) - buf_origin.y.to_i # snap-exempt: whole-by-construction (writer-guarded)
-                     bx + PixelSnap.cover(w.bounds.width) > 0 && by + PixelSnap.cover(w.bounds.height) > 0 &&
-                       bx < buf_w && by < buf_h
-                   }
-                 else
-                   all_widgets.select { |w| dirty_set.includes?(w) }
-                 end
-        {% if flag?(:DEBUG_RENDER) %}
-          if layer.viewport_cache
-            puts "    [SELECTIVE_RENDER] all_widgets=#{all_widgets.size} dirty_set=#{dirty_set.size} result=#{result.size}"
-            if all_widgets.size != result.size
-              # Find widgets not in dirty_set
-              missing = all_widgets.reject { |w| dirty_set.includes?(w) || w.widget_backend.nil? }
-              if missing.size > 0
-                puts "      MISSING from dirty_set (#{missing.size} widgets):"
-                missing.first(5).each do |w|
-                  puts "        #{w.class.name.split("::").last}##{w.path_id} obj_id=#{w.object_id}"
-                end
-              end
-            end
-          end
-        {% end %}
-
-        result
+        walk.select { |w| dirty_set.includes?(w) }
       end
     end
 

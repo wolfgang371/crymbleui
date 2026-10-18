@@ -478,7 +478,7 @@ Rendering changes, like layout changes, are **confined to a single layer** and d
 
 - `Widget.mark_needs_render` marks the widget dirty within its layer
 - `Layer.mark_needs_render(widget)` adds widget to dirty set - does NOT notify parent
-- `Layer.mark_needs_full_render` marks all widgets dirty - does NOT propagate to parent
+- `Layer.mark_needs_full_render` empties the dirty set and requests a render - a full one only for a render that ignores the set (a first render, a blit plan); a later mark narrows it to that widget, so a repaint that must survive is `mark_needs_clear_and_render`. Does NOT propagate to parent
 - This isolation prevents expensive cascading re-renders up the layer tree
 
 **Architecture: Independent Layer Rendering**
@@ -666,16 +666,15 @@ class Layer
 
   def mark_needs_layout
     @state = WidgetState::NeedsLayout
-    @dirty_widgets.clear  # Layout = all widgets dirty
-  end
-
-  def widget_dirty?(widget : Widget) : Bool
-    @dirty_widgets.empty? || @dirty_widgets.includes?(widget)
+    @dirty_widgets.clear  # a layout is a full render anyway
   end
 end
 ```
 
-**Key Insight**: Empty `dirty_widgets` set means "all dirty" (full render). Non-empty means "only these widgets dirty" (selective render).
+**Key Insight**: a selective frame renders exactly the widgets in `dirty_widgets`; a full render (NeedsLayout, a
+first render, `needs_clear`) ignores the set. An empty set never means "all": a later `mark_needs_render` makes it
+just that widget. A repaint that must survive later marks is `needs_clear` - which is how a layer covered while it needed a render repaints in full when revealed (its set
+is emptied while covered, so it cannot pin discarded widgets).
 
 ### The Version-Keyed Fast Path
 
@@ -831,7 +830,7 @@ cell keeps its stale slot pixels.
 | size / structure | `mark_needs_layout` (or a `reactive_property … layout: true`) | layout_rev — **persistent** | O(n) layout |
 | position only (drag) | set `layer.bounds` | composite | O(layers) |
 | widget hidden / collapsed | `zero_bounds!` | releases the cache | O(subtree) |
-| DSL rebuild (`app.rebuild`) | — | per-layer **content-staleness**: after layout repopulates `layer.widgets`, the renderer's `assess_rebuild_staleness` marks `mark_needs_clear_and_render` ONLY on a non-overlay / non-`viewport_cache` layer whose `{path_id, absolute_bounds, primitives}` signature changed vs. what it last full-rendered (carried on the reconciled `Layer`); an **unchanged** layer is left Clean → its carried buffer re-blits (0 re-render). Overlays (`skip_rebuild_clear`) refresh in `app.rebuild`; `viewport_cache` layers self-gate via `viewport_body_stale?`. | O(chrome widgets) assess per rebuild; **0** re-render for unchanged layers, O(n) full clear for changed |
+| DSL rebuild (`app.rebuild`) | — | per-layer **content-staleness**: after layout repopulates `layer.widgets`, the renderer's `assess_rebuild_staleness` marks `mark_needs_clear_and_render` ONLY on a non-overlay / non-`viewport_cache` layer whose `{path_id, absolute_bounds, primitives}` signature changed vs. what its buffer holds (carried on the reconciled `Layer`; captured on a full render, refreshed for each widget a selective render paints - a flash step, a hover - and dropped to nil when an entry can't be trusted: a misaligned walk, a moved widget, a widget with same-layer descendants. Not covered: a blit-plan frame, foreground primitives. Entries alias `get_primitives`, so a returned primitive array is never mutated); an **unchanged** layer is left Clean → its carried buffer re-blits (0 re-render). Overlays (`skip_rebuild_clear`) refresh in `app.rebuild`; `viewport_cache` layers self-gate via `viewport_body_stale?`. | O(chrome widgets) assess per rebuild; **0** re-render for unchanged layers, O(n) full clear for changed |
 
 ### Footprint vacate: release the whole subtree
 
@@ -923,7 +922,8 @@ between what the renderer wrote and what the compositor reads.
 
 ## Coordinate Systems
 
-Three coordinate systems that must be kept distinct:
+Three coordinate systems that must be kept distinct - and, below a `fitted`, a fourth that only three walks
+cross (see "A scaled subtree" below):
 
 ### Absolute Coordinates (widget.bounds)
 
@@ -1001,9 +1001,10 @@ wrong. Concretely:
 | drop highlight | converts the WIDGET outward, then clips | `visible_bounds` (`widget.cr`): `viewport_bounds` cut by `ancestor_clip` |
 | combo / multi-combo popups | converts the WIDGET outward | `viewport_bounds` (`popup_host.cr`) — they mount into `Window.overlays`, and the flip-above test compares against the WINDOW height |
 | a layer's content rect | content | `compute_bounds_for_layer` → `absolute_bounds` (never `viewport_bounds`): `Layer#content_rect`, the origin its widgets are painted from - see below |
-| a layer's bounds | converts the LAYER outward | `Layer#bounds` = `content_rect - owner.enclosing_scroll`: where it composites onto the WINDOW |
+| a layer's bounds | converts the LAYER outward | `Layer#bounds` = `(content_rect.position - owner.enclosing_scroll, Layer#size)`: where it composites onto the WINDOW (`size` = `content_rect.size * render_scale`) |
 | a layer's composite clip | window | `owner.ancestor_clip`, through `LayerRenderer#composite_region` - see below |
-| foreground primitives | buffer space | `slot_axis(abs, layer.content_rect, buffer_origin)` — the same rule the widget's own primitives use |
+| foreground primitives | buffer space | `paint_span(layer, content_rect, abs)` minus `buffer_origin` — the same rule the widget's own primitives use (`slot_axis`'s arithmetic, unscaled) |
+| a scaled child (inside a `fitted`) | crosses only by the three walks | `viewport_bounds`, `to_window`, `to_content` apply `scale_for`; its `absolute_bounds` is pre-scale - see "A scaled subtree" |
 | Tab order / arrow navigation | painted | `viewport_bounds`: "the next one down" is a statement about the screen |
 | `VirtualMatrix#drag_ghost_bounds` | asks the placed cells | `viewport_bounds.position + painted_rect(drag box)` - where the box is painted (its visible part) |
 
@@ -1024,8 +1025,8 @@ a panel's stack. Its layer has two rects, and each side of the pipeline uses its
 | | rect | who uses it |
 |---|---|---|
 | `Layer#content_rect` | the owner's rect in CONTENT space - what `compute_bounds_for_layer` returns (`absolute_bounds`-based for every owner; a WindowPanel's and the Window's rects are the same in both spaces, nothing above them scrolls - for a panel asserted under `-Dverify_bounds`; the Window is the root) | RENDER: widgets are painted at `abs - content_rect` (+ `buffer_origin`); the viewport-cache visibility window, the blit-shift slot keys, the sticky blit plans |
-| `Layer#bounds` | `content_rect - owner.enclosing_scroll`: WINDOW space | COMPOSITE: where the buffer is blitted; occlusion; the drop highlight's place |
-| `Layer#size` | the size, the same in both | size-only readers - no scroll walk |
+| `Layer#bounds` | `(content_rect.position - owner.enclosing_scroll, size)`: WINDOW space | COMPOSITE: where the buffer is blitted; occlusion; the drop highlight's place |
+| `Layer#size` | the extent in buffer and window pixels: `content_rect.size * render_scale` (just the content size when unscaled) | readers of the layer's pixel extent - the backend size, the layer clip, culling - no scroll walk |
 
 An ancestor's scroll therefore changes nothing in the buffer - it only moves the composite - and a repaint
 paints the content where it is laid out. Unscrolled, both rects are one, so an unscrolled scene renders exactly
@@ -1065,6 +1066,68 @@ a layer it merely stands on (a grid cell that is a ScrollView stands on the grid
 Pinned by `spec/rendering/scrolled_layer_space_spec.cr` (headless) and `spec/autotest/scrolled_layer_space_autotest.cr`
 (SFML, window and capture); a layer owner INSIDE a grid cell by `spec/widgets/virtual_matrix/layer_owning_cell_spec.cr`
 and the loop's re-collect and re-asks by `spec/rendering/flush_changes_composite_spec.cr`.
+
+### A scaled subtree (`fitted`): one factor, about the child's origin
+
+`fitted { }` (`src/widgets/fitted.cr`) draws its one child uniformly scaled into the box it is given: the child is
+laid out with no limit on either axis (its natural size `N`), and drawn at `f` = the smallest of `max / N` over the
+axes the box bounds (none bounded: 1; a bounded max of 0: 0) into a layer the fitted owns. Nothing inside knows.
+
+The factor has ONE owner, pulled - `Layer#render_scale` asks `owner.compute_scale_for_layer` (1.0 for every other
+owner), as `content_rect` asks `compute_bounds_for_layer`. The centre of the scale is the layer's content origin
+`C` (the child's `absolute_bounds` position, centred in a box larger than the image):
+
+```
+buffer coordinate of a content edge e = (e - C) * f
+window coordinate                     = (C - owner.enclosing_scroll) + (e - C) * f
+Layer#size                            = content_rect.size * f
+Layer#bounds                          = (C - owner.enclosing_scroll, Layer#size)
+```
+
+Painting: every paint path asks `LayerRenderer#paint_span(layer, c, start, len)` per axis for a widget's
+layer-local origin and device span. Unscaled it delegates to `round_to_layer_pixels` / `device_pixel_span`
+(bit-identical to before); scaled it floors both scaled EDGES, so siblings that share an edge share its pixel. The
+widget's primitives are scaled by `f` about its own origin (`DrawPrimitive#scaled` per struct, through
+`DrawPrimitive.scaled_primitives` - the same array at 1.0); a covering fill (`FillRect#covers`, from
+`fill_background`) becomes the device span itself; text is rasterised at `size * f` (crisp), and dropped below one
+pixel.
+
+Mapping: the scale is declared per child, like the shift and the clip - `Widget#scale_for(child)` - and applied by
+the three walks that cross a boundary: `viewport_bounds` (the rect accumulated so far maps about the scaled child's
+position, its size times f), `to_window` (`Widget.scale_about`) and `to_content` (`Widget.unscale_about`; at f == 0
+every point maps to the origin, so a captured drag while the window collapses hands its handler a finite point).
+`Fitted#hit_test` answers nil outside its box and in the letterbox (what lies behind takes the click), and hands
+the child the unscaled point. A descendant's `absolute_bounds` is pre-scale: it means nothing to any ancestor.
+
+`enclosing_scroll` is only the ADDITIVE part of the crossing and asserts it is never asked below a scale. No layer
+owner may stand inside a fitted (its layer would composite at an additive position that does not exist): the
+fitted refuses one on every layout, before laying the child out, naming it, where it is and what to do - and the
+assertion is the backstop if one slips past (its `Layer#bounds` asks `enclosing_scroll`). A viewport_cache layer
+being scaled is asserted at `render_layer`'s entry.
+
+A factor change (`Fitted#apply_scale`) marks the layer for a clear and a full render and releases every surface of
+the subtree, so each widget re-captures its background over the cleared, parent-first buffer at its new device
+size - as a zoom change does. The flat fill a mere size change would give (`render_single_widget`'s size-changed
+branch) lost a transparent child's parent: a hole. A live resize therefore reallocates the subtree's surfaces each
+frame - inherent, the sizes change. The factor is a reconciled property, so a rebuild that keeps it re-scales
+nothing.
+
+Layout: the fitted's size is its constraints applied to `N * f`. In a tight slot (a window's single child, an
+`expanded(fill_area: true)`) it fills and centres the image; in a loose one it takes `N * f` and its parent places
+it, flush at the slot's start. It never skips its own layout (a layer owner), and it fills its binding axis, so an
+ancestor whose extent comes from it fills too and none takes the relaxation skip on a grow of that axis. Its
+minimum intrinsic size is 0 (a scaler has no smallest acceptable size; the inherited default would make a window
+panel floor at the image's height-bound width). `-Dverify_bounds`'s containment check exempts it
+(`Widget#contains_children?`): its child's laid-out rect may exceed it, what is painted does not.
+
+Known limits: popups and dropdowns opened from inside open at natural size (they mount into `Window.overlays`,
+anchored at the scaled `viewport_bounds`); a DrawCircle outline stays 1px; text bearing offsets are computed at
+natural size (~1px at a large factor); a text whose natural width changes moves the factor (keep its length
+constant); Ctrl+zoom inside a filling fitted is cancelled by the fit; nothing that owns a layer inside.
+
+Pinned by `spec/widgets/fitted_spec.cr`, `spec/widgets/fitted_cv_spec.cr` (cached vs immediate under
+`tools/cv-coherency.sh`), and rows in `spec/rendering/window_space_containment_spec.cr` and
+`spec/rendering/scroll_space_sweep_spec.cr`.
 
 ### Widget-Local Coordinates (primitives)
 
@@ -1125,14 +1188,21 @@ So primitive renders at (10, 30) within layer texture
 ```
 non-viewport_cache: buffer position = abs - layer.content_rect
 viewport_cache:     buffer position = abs - layer.content_rect - buffer_origin      # = slot_axis()
+scaled (a fitted):  buffer position = (abs - layer.content_rect) * render_scale     # both EDGES snapped
 ```
+
+The first two are what `LayerRenderer#paint_span` computes for an unscaled layer (it delegates to
+`round_to_layer_pixels` / `device_pixel_span`); the third is its scaled form - see "A scaled subtree (`fitted`)"
+above. A viewport_cache layer is never scaled.
 
 `scroll_offset` does NOT appear here, and that is the point: the buffer stores CONTENT, and the
 COMPOSITE step is what applies the viewport transform (`scroll_offset - buffer_origin`). Painting
 is content space; only compositing knows where the viewport currently is.
 
 Both terms live in one helper, `LayerRenderer#slot_axis(coord, layer_bound, buffer_origin)` — use
-it, do not re-derive it. `buffer_origin` is `Vec2.zero` off the viewport_cache path (its single
+it, do not re-derive it. The paint paths ask `LayerRenderer#paint_span` for the first term (it is `slot_axis`'s
+arithmetic when the layer is unscaled, and the scaled form below a `fitted`) and subtract the buffer origin as
+`slot_axis` does. `buffer_origin` is `Vec2.zero` off the viewport_cache path (its single
 production writer is `recenter_origin!`), so the one call is correct for every layer.
 
 > Written down in 2026-09 because it was NOT written down: `render_foreground_primitives` derived
@@ -1166,8 +1236,9 @@ the rendering core (`src/rendering/`), the headless instruments, the matrix blit
 |-----------------|-----------|-------|-----|
 | DRAW position: glyph-atlas text, texture-blit sprite/layer-composite destinations | `PixelSnap.snap` (half-up, `floor(v+0.5)`) | `src/rendering/pixel_snap.cr` | Whole pixels avoid GPU bilinear blur on the glyph atlas; half-up is TRANSLATION-INVARIANT (`snap(v+n) == snap(v)+n` for integer n), so widget-local (texture) and layer-local (direct) rasterization land on the same device pixel, and the headless and SFML compositors place layers identically. `Float#round`'s ties-to-even is parity-dependent at exact .5 fractions and violated this — text visibly jumped 1px whenever a cell flipped between render paths. |
 | Value WHOLE BY CONSTRUCTION (viewport-cache `buffer_origin`) | `PixelSnap.whole` (asserting cast, exact tolerance) | `pixel_snap.cr` + the single writer (`recenter_origin!`) | Not a rounding: a fractional value is a broken invariant. The buffer-origin quantization itself is a separate, deliberately bespoke owner. |
-| Widget/layer-local ORIGIN | `PixelSnap.origin` (floor) | `round_to_layer_pixels` → PixelSnap | Floor of the DIFFERENCE (never floor terms separately — `floor(a-b) != floor(a)-floor(b)`). Floor equals the old truncation for non-negative coords and, unlike it, stays translation-invariant at negative fractions (top/left-clipped content at fractional zoom). |
-| Backend/texture EXTENT | `PixelSnap.span` (via `device_pixel_span`) | `pixel_snap.cr` | Defined AS `origin(start+len) - origin(start)`, so both edges share origin's floor direction BY CONSTRUCTION — exact sibling tiling, and a 1px widget at a negative fractional start keeps its pixel (truncate-both-edges dropped it). |
+| Widget/layer-local ORIGIN | `PixelSnap.origin` (floor) | `paint_span` → `round_to_layer_pixels` → PixelSnap | Floor of the DIFFERENCE (never floor terms separately — `floor(a-b) != floor(a)-floor(b)`). Floor equals the old truncation for non-negative coords and, unlike it, stays translation-invariant at negative fractions (top/left-clipped content at fractional zoom). |
+| Backend/texture EXTENT | `PixelSnap.span` (via `device_pixel_span`) | `paint_span` → `device_pixel_span` → `pixel_snap.cr` | Defined AS `origin(start+len) - origin(start)`, so both edges share origin's floor direction BY CONSTRUCTION — exact sibling tiling, and a 1px widget at a negative fractional start keeps its pixel (truncate-both-edges dropped it). |
+| Origin and extent below a SCALE (a fitted's layer) | `PixelSnap.origin` of both scaled EDGES: `l = origin((start - c) * f)`, span `origin((start + len - c) * f) - l` | `paint_span` (its scaled branch) | Siblings sharing an edge share its pixel by construction: the start + length form (`origin(l)` plus a span from the scaled length) leaves a background column or an overlap at a fractional factor. Kept apart from the unscaled form on purpose: the edge form is not bit-identical at f = 1 (`(a + w - c)` vs `(a - c) + w` differ in the last ulp). A covering fill becomes this span itself (`FillRect#covers`). |
 | Slot keys (viewport-cache stamp + blit-shift bookkeeping) | `slot_axis` | `layer_renderer.cr` | ONE arithmetic for both sides: `origin(abs - layer_bound) - buffer_origin`. The blit-shift previously re-derived keys with term-wise ties-even rounds, diverging from the stamp whenever widget coords were fractional → mis-classified boundary cells moved slot stamps onto stale pixels. |
 | Culling/visibility BOUND | `PixelSnap.cover` (ceil) | culling sites | Conservative: may over-include, never under-include (`cover(len) >= span(start, len)` for every placement), so edge widgets are not prematurely culled. |
 | Blit destinations — SPLIT BY TARGET | compositor layer→window: `snap` · cell-texture→layer: `origin` | per the target's frame | A cell blitted INTO a layer must land on the render path's slot origin (same `origin` arithmetic) or it jumps 1px between blit-frames and render-frames; the whole-layer composite to the window snaps (half-up) like every draw position. |
@@ -1882,9 +1953,9 @@ end
 **RULE**: Position-only changes DON'T need layout
 
 ```crystal
-# Position change (drag):
-panel.x = new_x
-panel.y = new_y
+# Position change (drag) - the Sources directly: the x=/y= setters are the app's ask and lay out:
+@x.set(new_x)
+@y.set(new_y)
 panel.bounds = Rect.new(new_x, new_y, @width, @height)
 layer.bounds = panel.bounds  # ← Only this!
 # NO mark_needs_layout!
@@ -2321,6 +2392,52 @@ Widget State Machine:
 - Background color architecture prevents selective render bugs
 - Constraint caching = O(path) layout for single dirty widget
 
+## Keyboard and panels
+
+**The panel in front holds the keyboard.** The keyboard's panel is the front WindowPanel, or the keyboard is in
+no panel at all (a widget of the window body, a popup, or nobody).
+
+- **A raise hands over the keyboard.** A raise at event time is `WindowPanel#bring_to_front`: a press in a panel
+  or on its title bar, or Ctrl+Tab. It enters the panel (`FocusManager#enter`) unless the keyboard is already
+  inside. The keyboard goes to the widget that last held it there, else the panel's home widget (`home_focus_id`,
+  the DSL's `window_panel(home_focus:)`), else its first Tab stop, else nobody.
+  - A real press focuses a focusable hit first (`App#handle_mouse_down`), so the press keeps it.
+  - An entry does not scroll: the keyboard is handed back without moving what the user left there.
+  - Each panel remembers its widget (`last_focus_id`) when the keyboard leaves it. The memory is carried across
+    rebuilds.
+- **Opening a panel is a raise too.** That covers a new or reopened panel (`seen_open`, carried across rebuilds)
+  and the launch: `App#install_root` treats the panels open at launch the same way. A rebuild raises them z-only
+  (`raise_z`). Its instances are not laid out yet, so the entry waits for `App#settle_keyboard` in the next
+  `prepare_layout`, and no input runs before it.
+- **Losing the keyboard's panel moves it to the front panel.** When the keyboard's panel closes or vanishes, the
+  panel now in front takes the keyboard (`reconcile_focus` returns true). The same frame enforces the rule: a
+  keyboard that a build or a program put into a panel behind raises that panel - unless a panel opened in the same
+  rebuild, whose entry comes first and wins.
+- **Tab stops.** A Tab stop is focusable, enabled and shown (`Widget#shown_children`: a collapsed TreeNode shows
+  only its header, Tabs only its active page). Tab, Shift+Tab and the arrows move among the Tab stops of the
+  keyboard's panel.
+  - A WindowPanel is a wall for every walk but its own. From a panel, Tab never leaves it; from the window body,
+    Tab never enters one.
+  - From nobody, Tab and the arrows enter the front panel.
+  - The focused widget still gets the key first: a VirtualMatrix keeps Tab for its cursor. F6 / Shift+F6 walk the
+    same Tab stops without asking it - the way from a grid to its panel's other parts.
+- **Keys go to the keyboard's panel.** Every panel shortcut goes to the keyboard's panel: the front one when
+  nobody holds the keyboard, none for a widget of the window body or a popup. Enter and Space first press a
+  focused widget that `takes_activation_keys?` (Button, Checkbox, tab header, section header). A dialog's Enter
+  shortcut (Ok) therefore acts from its text field, not from a focused Cancel.
+- **Ctrl+Tab rotates.** Ctrl+Tab closes open popups and menus, then rotates the open panels in z-order; this is a
+  rotation, not a most-recent order. Forward raises the bottom panel. Backward (`send_to_back`) sends the front
+  panel back and raises the one beneath. With one open panel, Ctrl+Tab raises it, which is the way into it from
+  the window body. The raised panel takes the keyboard.
+- **F6 walks the panel's parts.** F6 / Shift+F6 (no Ctrl, Alt or Super) close open popups and menus, then move to the
+  next / previous Tab stop of the keyboard's panel - of the window body from a widget there; from nobody into the
+  front panel - before the focused widget sees the key, as Ctrl+Tab. With a modifier F6 stays the widget's and the
+  app's.
+- **Nested panels are out of scope.** A panel inside a panel is its own Tab scope. Raise, z order and the
+  rotation stay per sibling set, and `find_topmost_panel` compares z across depths.
+
+Specs: `spec/input/focus_scope_spec.cr`.
+
 ## Proxy Focus
 
 Proxy focus is the mechanism by which a container widget (currently VirtualMatrix) delegates keyboard events and focus visuals to a child widget without transferring real FocusManager focus. The container retains focus ownership for grid-level navigation while child widgets (TextInput, Button, etc.) behave as if focused.
@@ -2361,7 +2478,8 @@ VirtualMatrix's `on_key_down` dispatches events in two phases:
    - Tab/Shift+Tab → `move_cursor(:tab)` round-robin + `snap_to_cursor`; the
      matrix consumes Tab and stays focused (spreadsheet semantics). Tab dispatch
      is owned by `FocusManager#handle_tab_key`: the focused widget gets first
-     dibs, and only widgets that decline cause focus to cycle.
+     dibs, and only widgets that decline cause focus to cycle - within the
+     keyboard's panel ("Keyboard and panels").
 
 Text input (`on_text_input`) is always forwarded to the proxy widget if one exists.
 

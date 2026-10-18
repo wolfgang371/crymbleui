@@ -71,6 +71,11 @@ module CrymbleUI
       # backend the whole suite ever makes, and the suite makes a great many.
       @@census : Array(TestRenderBackend)? = nil
 
+      # TEXT LOG - an opt-in record of every draw_text this process makes: {text, size}. Lets a spec tell
+      # the size a glyph was RASTERISED at from the pixels it left (a stretched image and a text drawn at
+      # the final size can share an ink height). Off (nil) by default; a spec arms it with `[] of ...`.
+      class_property text_log : Array({String, Float64})? = nil
+
       def self.census_start : Nil
         @@census = [] of TestRenderBackend
       end
@@ -425,6 +430,7 @@ module CrymbleUI
       def draw_text(text : String, position : Vec2, color : Color, size : Float64)
         assert_live("draw_text")
         @draw_text_count += 1
+        @@text_log.try(&.<<({text, size}))
 
         # Pitch comes from the FONT, not from a second copy of the ratio here: the two must
         # agree or every horizontal pixel claim in the suite is measured against a width the

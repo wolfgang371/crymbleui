@@ -78,20 +78,40 @@ module CrymbleUI
       end
     end
 
-    # Where the layer is composited, in WINDOW space: its content rect minus the shift its owner's ancestors
-    # paint it with (Widget#enclosing_scroll) - the same rect when nothing above scrolls.
-    def bounds : Rect
-      rect = content_rect
-      if owner = @owner_widget
-        s = owner.enclosing_scroll
-        rect = Rect.new(rect.x - s.x, rect.y - s.y, rect.width, rect.height) unless s.x == 0.0 && s.y == 0.0
+    # The factor this layer's content is drawn at - pulled from its owner like content_rect
+    # (compute_scale_for_layer: 1.0 for every owner but a fitted). The content rect's origin is the centre of
+    # the scale: a content edge e lies at buffer coordinate (e - content_rect.position) * render_scale.
+    def render_scale : Float64
+      if (owner = @owner_widget) && owner.responds_to?(:compute_scale_for_layer)
+        owner.compute_scale_for_layer(self)
+      else
+        1.0
       end
-      rect
     end
 
-    # Its size - the same in both spaces, so a reader of the size alone takes no scroll walk.
+    # Where the layer is composited, in WINDOW space: its content rect's origin minus the shift its owner's
+    # ancestors paint it with (Widget#enclosing_scroll), at its `size` - the same rect when nothing above
+    # scrolls or scales.
+    def bounds : Rect
+      rect = content_rect
+      x, y = rect.x, rect.y
+      if owner = @owner_widget
+        s = owner.enclosing_scroll
+        x, y = x - s.x, y - s.y
+      end
+      Rect.new(Vec2.new(x, y), extent_of(rect))
+    end
+
+    # Its extent in buffer and window pixels: the content rect's size times render_scale (just that size,
+    # unscaled). A reader of the size alone takes no scroll walk.
     def size : Size
-      content_rect.size
+      extent_of(content_rect)
+    end
+
+    # The one rule for the layer's pixel extent: a content rect's size at render_scale (x 1.0 is exact).
+    private def extent_of(rect : Rect) : Size
+      f = render_scale
+      Size.new(rect.width * f, rect.height * f)
     end
 
     # Setter: updates cached_bounds (used for drag ghost layer and initial creation)
@@ -222,8 +242,11 @@ module CrymbleUI
     @rendered_content_rev : UInt64 = 0
 
     # Cheap-rebuild staleness (non-viewport_cache / chrome layers). The {path_id, absolute_bounds,
-    # primitives} of the widgets this layer last FULL-rendered — captured in render_layer, and, because
-    # the Layer rides the @[Reconcile] carry, surviving a rebuild. After a rebuild, assess_rebuild_staleness
+    # primitives} of the widgets this layer's buffer shows — captured by a full render in render_layer,
+    # refreshed for each widget a selective render paints (refresh_rendered_signature; nil when an entry can't
+    # be trusted), and, because the Layer rides the @[Reconcile] carry, surviving a rebuild. A blit-plan frame
+    # and foreground primitives are outside it. Entries alias the widgets' get_primitives arrays, so a
+    # returned primitive array must never be mutated. After a rebuild, assess_rebuild_staleness
     # rebuilds a fresh signature over the layer's (now new-instance) widgets and compares: equal ⇒ the
     # carried buffer is still correct ⇒ SKIP (the whole point); differ / nil / image-bearing ⇒ full clear
     # (structure or content moved — no ghost). Version keys can't do this: a rebuild resets every widget's
@@ -610,15 +633,16 @@ module CrymbleUI
       # NOTE: Do NOT propagate to parent layer - rendering is independent per layer
     end
 
-    # Mark entire layer as needing full re-render
-    # EXPENSIVE - use only when necessary (layout changes, etc.)
-    # Full re-render stays within this layer - compositor handles layer changes
+    # Request a render of the layer with its dirty set emptied. Stays within this layer - compositor handles layer
+    # changes. The empty set reads "all" only to a render that does not filter by it (a blit plan, a first render): a chrome
+    # layer's selective frame renders just the set, and any later mark_needs_render narrows it to that widget. A
+    # repaint that must survive later marks is needs_clear (mark_needs_clear_and_render).
     def mark_needs_full_render
       {% if flag?(:DEBUG_RENDER) %}
         puts "[LAYER #{@id}] mark_needs_full_render called (clearing dirty_widgets)"
       {% end %}
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
-      @dirty_widgets.clear # Empty set means "all dirty"
+      @dirty_widgets.clear
       @render_rev &+= 1 # move the pull aggregate so the version-keyed trigger wakes (see @render_rev)
       # NOTE: Do NOT propagate to parent layer - rendering is independent per layer
     end
@@ -630,7 +654,7 @@ module CrymbleUI
         puts "[LAYER #{@id}] mark_needs_layout called (clearing dirty_widgets for full re-render)"
       {% end %}
       @state = WidgetState::NeedsLayout
-      @dirty_widgets.clear # Layout change = all widgets dirty (full re-render)
+      @dirty_widgets.clear # a layout is a full render anyway
       @resize_shift = nil  # a full re-layout supersedes any pending resize blit-shift
       @render_rev &+= 1 # move the pull aggregate so the version-keyed trigger wakes (see @render_rev).
       # Redundant for every CURRENT caller (each is preceded by a widget-level layout mark that moves
@@ -644,7 +668,7 @@ module CrymbleUI
     # Unlike mark_needs_layout: does NOT force sibling validation or disable viewport culling.
     def mark_needs_clear_and_render
       @state = WidgetState::NeedsRender if @state == WidgetState::Clean
-      @dirty_widgets.clear # Empty set = render all widgets
+      @dirty_widgets.clear # the clear makes it a full render; the set is not read
       @needs_clear = true
       @resize_shift = nil  # a full clear+render supersedes any pending resize blit-shift
       @clear_rev &+= 1 # make the clear visible to frame_aggregate_rev
@@ -687,12 +711,6 @@ module CrymbleUI
     # content). A pure panel drag trips NONE of these → skip → the unconditional composite repositions it.
     def viewport_body_stale? : Bool
       needs_render? || needs_clear || size_changed? || !resize_shift.nil? || content_rev != @rendered_content_rev
-    end
-
-    # Check if widget is dirty (needs re-rendering)
-    # If dirty_widgets is empty, all widgets are dirty
-    def widget_dirty?(widget : Widget) : Bool
-      @dirty_widgets.empty? || @dirty_widgets.includes?(widget)
     end
 
     # Mark layer as clean (rendering complete)

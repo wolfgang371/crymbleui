@@ -104,17 +104,16 @@ describe CrymbleUI::FocusManager do
       result.should be_nil
     end
 
-    it "returns nil when only one panel" do
+    # Ctrl+Tab with one open panel raises it - from the window body or from nobody, it is the way into the panel.
+    it "returns the one panel when only one is open" do
       fm = CrymbleUI::FocusManager.new
 
       root = CrymbleUI::VStack.new
       panel1 = create_test_panel("Panel 1", "panel1", 1)
       root.add_child(panel1)
 
-      # With only one panel, cycling should return nil since there's nothing to cycle to
-      result = fm.cycle_panel(forward: true, root: root)
-
-      result.should be_nil
+      fm.cycle_panel(forward: true, root: root).should be(panel1)
+      fm.cycle_panel(forward: false, root: root).should be(panel1)
     end
 
     it "skips closed panels" do

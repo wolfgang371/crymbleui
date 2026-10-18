@@ -135,7 +135,7 @@ class ResizeBugAutotest < CrymbleUI::App
       if p = panel
         log("Panel: pos=(#{p.x},#{p.y}) size=(#{p.width},#{p.height})")
         log("Panel resizing?: #{p.resizing?}")
-        log("Panel @resize_start_bounds: #{p.resize_start_bounds}")
+        log("Panel @press_start_bounds: #{p.press_start_bounds}")
         log("Panel @resize_edge: #{p.resize_edge}")
         log("Panel @resize_start_pos: #{p.resize_start_pos}")
       end

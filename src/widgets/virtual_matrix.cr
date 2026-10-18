@@ -2621,7 +2621,9 @@ module CrymbleUI
       if layer = widget.render_layer
         layer.widgets.delete(widget) if off_layer
         # A sticky layer's blit plan names the textures of the cells standing on it, and this one's is about to
-        # be freed: the plan is void, and the layer renders in full instead.
+        # be freed: the plan is void, and the layer renders instead. Not durably in full: a later cell mark narrows
+        # mark_needs_full_render's empty set (see Layer#mark_needs_full_render); the cell update that follows a
+        # detach has healed it where measured.
         if layer.blit_plan
           layer.blit_plan = nil
           layer.blit_plan_render_widgets = nil

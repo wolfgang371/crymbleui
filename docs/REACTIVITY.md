@@ -141,7 +141,9 @@ left in the macros — it fires only on an explicit, rare override; the theme-fo
 
 The rule of thumb is **Source-back what renders.** A field never read while painting doesn't earn a `Source`:
 a managed object uses `reconcile_property`; core widget *state* (`enabled`/`focus_highlighted`)
-keeps an explicit `mark_needs_render` — a structural gate, not paint content; and hot per-frame fields stay
+keeps an explicit `mark_needs_render` — a structural gate, not paint content (a rebuild carries
+`focus_highlighted` onto the fresh instance without it: a mark from `copy_state_from` escalates to a full layout of
+the layer); and hot per-frame fields stay
 plain ivars for speed (next section).
 
 **The one time you reach for a bare `Source(T)`** is reactive state that *isn't* a widget field — a global or

@@ -72,6 +72,12 @@ module CrymbleUI
       absolute_bounds
     end
 
+    # Pull-based scale: the factor `layer`'s content is drawn at, about its content rect's origin
+    # (Layer#render_scale). 1.0 - only a fitted scales what it holds.
+    def compute_scale_for_layer(layer : Layer) : Float64
+      1.0
+    end
+
     # Layer-owning widgets must not skip layout.
     # Pull-based bounds handles position/size, but perform_layout also:
     # - Populates layer.widgets (renderer needs correct widget references)

@@ -69,13 +69,19 @@ module CrymbleUI
         # Notify overlays of click for click-outside-to-close behavior
         # Called by App on mouse_down events
         def notify_overlays_of_click(point : Vec2)
+            close_popups_where { |popup| !popup.bounds.contains_point(point) }
+        end
+
+        # Close every open popup (Ctrl+Tab does, before it moves the keyboard to another panel)
+        def close_popups : Nil
+            close_popups_where { true }
+        end
+
+        private def close_popups_where(& : Popup -> Bool) : Nil
             # A copy: closing an overlay removes it from @overlays, and walking the live list then
             # skipped the next one - a click outside two open popups closed only the first.
             @overlays.dup.each do |overlay|
-                # Check if click is outside overlay bounds
-                if overlay.is_a?(Popup) && !overlay.bounds.contains_point(point)
-                    overlay.on_click_outside
-                end
+                overlay.on_click_outside if overlay.is_a?(Popup) && yield overlay
             end
         end
 
@@ -297,14 +303,27 @@ module CrymbleUI
         # panels never cover either system surface. Without the statusbar
         # exclusion, maximizing a panel filled to the very bottom of the
         # window and the statusbar disappeared underneath.
+        # Before the window's first layout it answers what that layout gives at the size the window asks for (an
+        # app placing panels during its first build has nothing else to measure); the first layout may override
+        # that size - a renderer of another size. A window laid out at 0x0 answers its asked size too.
         def panel_area_bounds : Rect
-            menubar = children.find { |c| c.is_a?(MenuBar) }
-            statusbar = children.find { |c| c.is_a?(StatusBar) }
-            top = @bounds.y
-            bottom = @bounds.y + @bounds.height
-            top += menubar.bounds.height if menubar
-            bottom -= statusbar.bounds.height if statusbar
-            Rect.new(@bounds.x, top, @bounds.width, bottom - top)
+            frame = laid_out? ? @bounds : Rect.new(0.0, 0.0, @width.to_f64, @height.to_f64)
+            top = frame.y + bar_height(children.find(&.is_a?(MenuBar)))
+            bottom = frame.y + frame.height - bar_height(children.find(&.is_a?(StatusBar)))
+            Rect.new(frame.x, top, frame.width, bottom - top)
+        end
+
+        # Zero bounds mean never laid out - Widget#mark_needs_layout reads them the same way.
+        private def laid_out? : Bool
+            !(@bounds.width == 0.0 && @bounds.height == 0.0)
+        end
+
+        # A bar's laid-out height, or before the first layout its own measure at the asked width (a StatusBar's text
+        # measures 0 high while no font is installed).
+        private def bar_height(bar : Widget?) : Float64
+            return 0.0 unless bar
+            return bar.bounds.height if laid_out?
+            bar.measure(BoxConstraints.loose(Size.new(@width.to_f64, @height.to_f64))).height
         end
 
         # Expose root layer for widget state propagation

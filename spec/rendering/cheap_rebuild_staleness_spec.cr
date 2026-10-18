@@ -165,6 +165,7 @@ describe "cheap rebuild — per-layer content staleness" do
     app = StaticStackApp.new
     app.build_tree
     renderer.settle_rendering(app)
+    CrymbleUI::Widget.focus_manager.focused_widget.try(&.id).should eq("row_0") # at rest, the keyboard in the panel
 
     lr.reset_frame_counters
     app.request_rebuild # identical tree — nothing changed
@@ -303,5 +304,350 @@ describe "cheap rebuild — intra-layer selective render (milestone 2)" do
     # painted its fill over (erased) the child.
     center_pixel(renderer, app.find("cell").not_nil!).should eq(CELL_RED)
     renderer.exceptions_caught.should eq 0
+  end
+end
+
+# ── The keyboard holder, and a layer's signature after a selective render ──────────────────────────────
+# A rebuild that changes nothing re-renders nothing whoever holds the keyboard, and a chrome layer's stored
+# signature describes what its buffer shows after any full or selective render (a flash step, a hover).
+
+# One clock for every timer of the app (as Driver#advance keeps it): each step fires every due timer once.
+private class AppClock
+  def initialize(@renderer : CrymbleUI::Testing::TestRenderer, @app : CrymbleUI::App)
+    @now = Time.instant
+  end
+
+  def step(span : Time::Span) : Nil
+    @now += span
+    @renderer.scheduler.run_expired_timers(@now)
+    @renderer.render_frame(@app)
+  end
+
+  def flash_step : Nil
+    step(CrymbleUI::FocusFlashController::FLASH_HALF_MS.milliseconds)
+  end
+end
+
+private def focused : CrymbleUI::Widget
+  CrymbleUI::Widget.focus_manager.focused_widget.not_nil!
+end
+
+private def edge_pixel(renderer, widget)
+  b = widget.absolute_bounds
+  renderer.backend.get_pixel((b.x + 3).to_i, (b.y + b.height / 2).to_i)
+end
+
+private def rect_pixels(renderer, widget)
+  b = widget.absolute_bounds
+  renderer.backend.get_pixels(b.x.to_i, b.y.to_i, b.width.to_i, b.height.to_i)
+end
+
+# Four cells always built red; a spec turns some green LIVE (not by rebuild) to make the buffer differ from the
+# last full render.
+class FourCellApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window, panel = panel_window
+    vstack = CrymbleUI::VStack.new(spacing: 4.0, padding: 8.0)
+    4.times { |i| vstack.add_child(SolidCell.new(CELL_RED, id: "c#{i}")) }
+    panel.add_child(vstack)
+    window
+  end
+end
+
+# ContainerFillApp with an id on the container, so a spec can change its fill live.
+class LiveFillApp < CrymbleUI::App
+  property alt : Bool = false
+
+  def build : CrymbleUI::Widget
+    window, panel = panel_window
+    vstack = CrymbleUI::VStack.new(id: "stack", spacing: 0.0, padding: 24.0, background_color: @alt ? STACK_BG2 : STACK_BG1)
+    vstack.add_child(SolidCell.new(CELL_RED, id: "cell"))
+    panel.add_child(vstack)
+    window
+  end
+end
+
+class FieldApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window("Field", 400, 200) do
+      window_panel("P", x: 20.0, y: 20.0, width: 300.0, height: 140.0, id: "panel") do
+        vstack(spacing: 4.0) do
+          text_input(id: "field", width: 200.0)
+          button("Ok", id: "ok") { }
+        end
+      end
+    end
+  end
+end
+
+# A button whose click rebuilds - focus arrives in the same frame as a rebuild.
+class ClickRebuildApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window("Click", 400, 320) do
+      window_panel("P", x: 20.0, y: 20.0, width: 300.0, height: 260.0, id: "panel") do
+        vstack(spacing: 4.0) do
+          3.times { |i| button("B#{i}", id: "row_#{i}") { request_rebuild } }
+        end
+      end
+    end
+  end
+end
+
+class ScrolledButtonApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window("Scroll", 400, 320) do
+      window_panel("P", x: 20.0, y: 20.0, width: 300.0, height: 260.0, id: "panel") do
+        scroll_view(id: "sv", max_height: 200.0) do
+          4.times { |i| button("S#{i}", id: "s_#{i}") { } }
+        end
+      end
+    end
+  end
+end
+
+class ManyButtonsApp < CrymbleUI::App
+  def build : CrymbleUI::Widget
+    window("Many", 900, 900) do
+      window_panel("P", x: 0.0, y: 0.0, width: 880.0, height: 880.0, id: "panel") do
+        vstack(spacing: 0.0) do
+          20.times do |r|
+            hstack(spacing: 0.0) { 10.times { |c| button("#{r}.#{c}", id: "b_#{r}_#{c}") { } } }
+          end
+        end
+      end
+    end
+  end
+end
+
+private def subtree_size(widget : CrymbleUI::Widget) : Int32
+  widget.children.sum { |c| 1 + subtree_size(c) }
+end
+
+describe "cheap rebuild — the keyboard holder and selective renders" do
+  it "a no-op rebuild re-renders nothing while a button holds the keyboard, flash ON; the flash goes on" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = StaticStackApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    focused.id.should eq("row_0")
+    focused.focus_highlighted?.should be_true
+    on = edge_pixel(renderer, focused)
+
+    lr.reset_frame_counters
+    app.request_rebuild
+    renderer.render_frame(app)
+    lr.frame_widget_count.should eq 0 # before: 5 - the carried flash marked the fresh button, its panel re-laid out
+    edge_pixel(renderer, focused).should eq(on)
+
+    lr.reset_frame_counters
+    clock.flash_step
+    lr.frame_widget_count.should eq 1
+    focused.focus_highlighted?.should be_false
+    edge_pixel(renderer, focused).should_not eq(on) # the flash flips on screen after the skipped rebuild
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a no-op rebuild re-renders nothing in the flash's OFF phase; the flash goes on" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = StaticStackApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    on = edge_pixel(renderer, focused)
+    clock.flash_step
+    focused.focus_highlighted?.should be_false
+    off = edge_pixel(renderer, focused)
+    off.should_not eq(on)
+
+    lr.reset_frame_counters
+    app.request_rebuild
+    renderer.render_frame(app)
+    lr.frame_widget_count.should eq 0 # before: 1 - the stored signature still held the ON button
+    edge_pixel(renderer, focused).should eq(off)
+
+    clock.flash_step
+    edge_pixel(renderer, focused).should eq(on)
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a widget changed and rendered between rebuilds, then rebuilt as it was, shows the rebuilt state" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(220, 160)
+    app = TwoCellApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    cell = app.find("cell_a").as(SolidCell)
+    cell.color = CELL_GREEN
+    cell.mark_needs_render
+    renderer.render_frame(app)
+    center_pixel(renderer, cell).should eq(CELL_GREEN)
+
+    app.request_rebuild # builds it red again
+    renderer.render_frame(app)
+    rebuilt = app.find("cell_a").as(SolidCell)
+    center_pixel(renderer, rebuilt).should eq(rebuilt.color) # before: green - the stored red matched the rebuilt red
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "the mouse leaving a hovered button in the frame of a rebuild leaves it plain" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = StaticStackApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    # Nobody holds the keyboard: a carried flash would re-render the whole panel at the rebuild and hide this.
+    CrymbleUI::Widget.focus_manager.clear_focus
+    app.request_rebuild
+    renderer.settle_rendering(app)
+    row = app.find("row_1").not_nil!
+    plain = edge_pixel(renderer, row)
+    b = row.absolute_bounds
+    renderer.mouse_move(b.x + 3, b.y + b.height / 2)
+    renderer.render_frame(app)
+    edge_pixel(renderer, row).should_not eq(plain)
+
+    renderer.mouse_move(390.0, 315.0) # off the panel
+    app.request_rebuild
+    renderer.render_frame(app)
+    edge_pixel(renderer, app.find("row_1").not_nil!).should eq(plain) # before: still hovered
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "two widgets rendered in one selective frame, both rebuilt back, both show their rebuilt state" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(240, 220)
+    app = FourCellApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    %w(c1 c3).each do |id|
+      cell = app.find(id).as(SolidCell)
+      cell.color = CELL_GREEN
+      cell.mark_needs_render
+    end
+    renderer.render_frame(app)
+
+    app.request_rebuild
+    renderer.render_frame(app)
+    %w(c0 c1 c2 c3).each do |id|
+      cell = app.find(id).as(SolidCell)
+      center_pixel(renderer, cell).should eq(cell.color) # before: c1 and c3 stayed green
+    end
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a focused TextInput: a no-op rebuild in the caret's hidden phase re-renders nothing and keeps it hidden" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 200)
+    app = FieldApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    field = focused.as(CrymbleUI::TextInput)
+    field.id.should eq("field")
+    field.draws_edit_caret?.should be_true
+    clock.step(CrymbleUI::TextInput::CURSOR_BLINK_INTERVAL)
+    field.cursor_visible.should be_false
+    seen = rect_pixels(renderer, field)
+
+    lr.reset_frame_counters
+    app.request_rebuild
+    renderer.render_frame(app)
+    lr.frame_widget_count.should eq 0 # before: the flash's mark escalated, or the stale entry re-rendered the field
+    rebuilt = focused.as(CrymbleUI::TextInput)
+    rebuilt.cursor_visible.should be_false
+    rect_pixels(renderer, rebuilt).should eq(seen)
+    renderer.exceptions_caught.should eq 0
+  end
+
+  # Guards: green today, each RED under the wrong fix named.
+
+  it "a selective render, then a rebuild removing a row, leaves no ghost of the row" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = StaticStackApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    clock.flash_step # a selective render of row_0
+    last = app.find("row_3").not_nil!
+    filled = center_pixel(renderer, last)
+    lb = last.absolute_bounds
+
+    app.labels = ["Alpha", "Beta", "Gamma"]
+    app.request_rebuild
+    renderer.render_frame(app)
+    renderer.backend.get_pixel((lb.x + lb.width / 2).to_i, (lb.y + lb.height / 2).to_i).should_not eq(filled)
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a container repainted live over its child, then rebuilt that way, has its child repainted (guard A)" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(220, 160)
+    app = LiveFillApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    app.find("stack").as(CrymbleUI::VStack).background_color = STACK_BG2 # its tile covers its child
+    renderer.render_frame(app)
+
+    app.alt = true # the rebuild builds what the buffer holds for the container
+    app.request_rebuild
+    renderer.render_frame(app)
+    cell = app.find("cell").as(SolidCell)
+    center_pixel(renderer, cell).should eq(cell.color) # wrong fix: the container's entry refreshed - skip
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "focus arriving with a rebuild in the same frame shows on the first frame" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = ClickRebuildApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    on = edge_pixel(renderer, focused) # row_0, ON
+    row = app.find("row_2").not_nil!
+    plain = edge_pixel(renderer, row)
+    b = row.absolute_bounds
+    renderer.mouse_move(b.x + 3, b.y + b.height / 2)
+    renderer.mouse_down(b.x + 3, b.y + b.height / 2)
+    renderer.mouse_up(b.x + 3, b.y + b.height / 2) # the click rebuilds
+    renderer.mouse_move(390.0, 315.0)              # no hover tint on the pixel read
+    renderer.render_frame(app)
+
+    focused.id.should eq("row_2")
+    focused.focus_highlighted?.should be_true
+    on.should_not eq(plain)
+    edge_pixel(renderer, focused).should eq(on) # wrong fix: the flag not carried and not marked - OFF
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a focused button in a scroll view keeps its flash phase across no-op rebuilds and keeps flashing" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(400, 320)
+    app = ScrolledButtonApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    focused.id.should eq("s_0")
+    seen = [] of CrymbleUI::Color?
+    2.times do
+      before = edge_pixel(renderer, focused)
+      phase = focused.focus_highlighted?
+      app.request_rebuild
+      renderer.render_frame(app)
+      edge_pixel(renderer, focused).should eq(before) # wrong fix: the flag dropped - the phase skips
+      focused.focus_highlighted?.should eq(phase)
+      seen << before
+      clock.flash_step
+    end
+    seen.uniq.size.should eq 2 # both phases were on screen
+    renderer.exceptions_caught.should eq 0
+  end
+
+  it "a flash step walks the panel's layer once" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(900, 900)
+    app = ManyButtonsApp.new
+    app.build_tree
+    renderer.settle_rendering(app)
+    clock = AppClock.new(renderer, app)
+    panel = app.find("panel").not_nil!
+
+    lr.reset_frame_counters
+    lr.collect_widgets_visits = 0
+    clock.flash_step
+    lr.frame_widget_count.should eq 1
+    lr.collect_widgets_visits.should be <= subtree_size(panel) # before: twice - the dirty filter and the foreground pass
   end
 end

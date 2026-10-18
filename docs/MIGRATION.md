@@ -4,6 +4,96 @@ Breaking changes for code built on CrymbleUI, newest first. See `docs/REACTIVITY
 
 ---
 
+## A panel the user never moved keeps its bottom inside the window; `user_moved` is `user_moved_x` (1.8.0)
+
+A WindowPanel's y is now fitted like its x: unless the user moved it vertically, it is the app's ask (the
+build's `y:`, or the last `y=` / `move_to` from code), shifted up so the bottom stays inside the panel area,
+the top winning for a panel taller than the window (the height itself is not capped). See ARCHITECTURE.md
+"A panel lies inside its window". What an app or its specs may notice:
+
+- A panel asked low in a short window opens higher than its `y:`; it lifts when the window loses height or
+  its content grows past the bottom, and returns to its `y:` when there is room. A bottom-edge resize past
+  the window makes it hop up on release.
+- Panels asked at different `y:` can share one y in a short window (their x is fitted too): an app that
+  cascades panels may want to step only as far as the window allows.
+- `WindowPanel#user_moved` is renamed `user_moved_x`, beside the new `user_moved_y` (set by a drag that
+  changed y, or a top handle). A spec that set `user_moved = true` for a "dragged" premise sets the flag of
+  the axis it means.
+- `y=` from code is an ask (as `x=` is): writing back the current value changes nothing.
+
+---
+
+## The panel in front holds the keyboard, and Tab stays inside it (1.8.0)
+
+Keyboard focus follows the front WindowPanel: whatever raises a panel - a press in it or on its title bar,
+Ctrl+Tab, a panel the app opens or reopens, the panel open at launch - hands it the keyboard (its last widget,
+else `home_focus`, else its first Tab stop). See LAYER_RENDERING_ARCHITECTURE.md "Keyboard and panels". What
+an app or its specs may notice:
+
+- Tab, Shift+Tab and the arrows no longer leave a WindowPanel, nor enter one from the window body. Inside a panel
+  a grid keeps Tab for its cursor; Ctrl+Tab is the way out of the panel (not to the panel's other widgets).
+- F6 / Shift+F6 walk the panel's parts - its Tab stops, whatever holds the keyboard: the way out of a grid. Taken
+  before the widget, as Ctrl+Tab; an app's own F6 without a modifier no longer reaches it (Ctrl+F6, Alt+F6 do).
+- Any raise moves the keyboard, and a press anywhere in a panel moves it there. Code that raised a panel and
+  expected the keyboard to stay behind focuses after the raise. A build-time focus into a panel behind raises
+  that panel - unless a panel opened in the same rebuild: the opening entry wins, over a build-time focus on a body
+  widget or into a panel behind, and so does the launch.
+- `Button#focus_on_click = false` keeps the keyboard where it is only within the button's own panel: a press in a
+  panel behind still raises it, and the raised panel takes the keyboard.
+- The panel open at launch holds the keyboard after the first frame. A spec that asserted "nothing focused" -
+  or a button's untinted pixels - clears it first (`Widget.focus_manager.clear_focus`).
+- Every panel shortcut follows the keyboard's panel: a widget of the window body no longer triggers the front
+  panel's Enter / Escape / other shortcuts. When nobody holds the keyboard they go to the front panel, as before.
+  A list open in a dialog takes Escape (it closes the list, not the dialog).
+- Enter and Space press a focused Button, Checkbox, tab or section header first (`Widget#takes_activation_keys?`),
+  before the panel's Enter shortcut.
+- Disabled widgets, the widgets under a collapsed TreeNode and the inactive pages of Tabs are no Tab stops
+  (`Widget#shown_children`).
+- `window_panel(home_focus: "id")` names where the keyboard lands in a panel with no memory of one.
+- Ctrl+Tab with one open panel enters it; Ctrl+Shift+Tab is the true reverse of Ctrl+Tab (it no longer flips the
+  top two). Ctrl+Tab closes open popups and menus first.
+- A WindowPanel without an id is no longer raised at every rebuild; a reopened panel (`open`, `toggle`, a build
+  flipping `closed:`) is raised and takes the keyboard.
+- `Widget#on_focus` no longer scrolls the widget into view - `FocusManager#focus(widget, reveal = true)` does
+  (`Widget#scroll_into_view`, public, was the private `request_scroll_into_view`). An override of `on_focus` that
+  relied on `super` for the scroll needs nothing; one that called `request_scroll_into_view` calls
+  `scroll_into_view`.
+- `FocusManager#reconcile_focus` returns a Bool; `FocusManager#cycle_panel` raises a single open panel instead of
+  returning nil.
+- The test Driver's acts focus a widget that takes focus on a click before raising its panel, as a press does;
+  `focus_cell` / `cell_text` raise the grid's panel. New: `press_title(panel_id)`, `close_panel(panel_id)`.
+
+---
+
+## A render scale (`fitted { }`): primitives scale, and `Layer#size` is the scaled extent
+
+`fitted { }` draws its subtree at a factor, through the existing renderer. Two consequences for code outside the
+library:
+
+- `DrawPrimitive#scaled(f : Float64) : DrawPrimitive?` is ABSTRACT. A primitive struct defined outside crymbleui
+  must implement it: every position and extent multiplied by `f` (about the widget's origin), nil when nothing is
+  left to draw. The library's own copy themselves and set the scaled fields:
+
+  ```crystal
+  def scaled(f : Float64) : DrawPrimitive?
+    copy = self
+    copy.bounds = DrawPrimitive.scale_rect(@bounds, f)
+    copy
+  end
+  ```
+
+- `Layer#size` is the layer's extent in buffer and window pixels: `content_rect.size * render_scale`. It equals
+  `content_rect.size` for every layer but a fitted's. Code that wants the layer's pixel extent reads `size`;
+  `content_rect.size` is the content-space size (unscaled). `Layer#bounds` is `(content_rect.position -
+  owner.enclosing_scroll, size)`.
+- A full-area background is `fill_background(bounds, color)` (it marks the fill `covers`, so a scaled widget's
+  background fills its device span exactly); a hand-written `fill_rect(Rect.new(0, 0, bounds.width,
+  bounds.height), ...)` still works, but can leave an edge column below a fitted.
+- `Widget#enclosing_scroll` asserts it is never asked inside a fitted: cross with `to_window` / `to_content` /
+  `viewport_bounds`, which scale.
+
+---
+
 ## One input model for a grid: the non-interactive mode, `SimpleMatrix` and the DSL `matrix` are gone
 
 A grid had two input models: the default, where the grid takes every press and forwards it to the cell under its

@@ -343,9 +343,6 @@ module CrymbleUI
             # Determine background color based on hover/open state
             bg_color = (hovered || @open) ? hover_color : background_color
 
-            # Background rect (leave space at bottom for menubar border)
-            bg_rect = Rect.new(0.0, 0.0, bounds.width, bounds.height - MenuBar::BORDER_WIDTH)
-
             # Border rect (bottom border, 1px high)
             border_rect = Rect.new(0.0, 0.0 + bounds.height - MenuBar::BORDER_WIDTH, bounds.width, MenuBar::BORDER_WIDTH)
 
@@ -363,8 +360,8 @@ module CrymbleUI
             text_position = Vec2.new(text_x, text_y)
 
             primitives do
-                # Draw background
-                fill_rect(bg_rect, bg_color)
+                # Background over the whole widget; the border strip below paints its last row
+                fill_background(bounds, bg_color)
 
                 # Draw bottom border
                 fill_rect(border_rect, border_color)

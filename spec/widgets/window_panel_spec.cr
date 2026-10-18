@@ -478,18 +478,19 @@ describe CrymbleUI::WindowPanel do
     end
 
     describe "#constrain_to_window_bounds" do
-        it "keeps panel within window bounds" do
+        it "moves a panel the app placed past the bottom up inside" do
             panel = CrymbleUI::WindowPanel.new("Test", 500.0, 500.0, 200.0, 150.0)
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
 
-            # Panel at 500, 500 is within bounds - should not change
+            # Its bottom (650) would leave the window: lifted to 600 - 150; x fits as it is
             panel.constrain_to_window_bounds(window_bounds)
             panel.x.should eq(500.0)
-            panel.y.should eq(500.0)
+            panel.y.should eq(450.0)
         end
 
         it "constrains panel dragged too far right" do
             panel = CrymbleUI::WindowPanel.new("Test", 1000.0, 100.0, 200.0, 150.0)
+            panel.user_moved_x = true # the user dragged it there
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
 
             # Panel would be mostly off-screen to the right
@@ -502,6 +503,7 @@ describe CrymbleUI::WindowPanel do
 
         it "constrains panel dragged too far left" do
             panel = CrymbleUI::WindowPanel.new("Test", -300.0, 100.0, 200.0, 150.0)
+            panel.user_moved_x = true # the user dragged it there
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
 
             # Panel would be mostly off-screen to the left
@@ -510,6 +512,24 @@ describe CrymbleUI::WindowPanel do
             # Should be constrained to keep MIN_VISIBLE_MARGIN visible
             expected_min_x = 0.0 - 200.0 + CrymbleUI::WindowPanel::MIN_VISIBLE_MARGIN
             panel.x.should eq(expected_min_x)
+        end
+
+        it "moves a panel the app placed past the right edge fully inside" do
+            panel = CrymbleUI::WindowPanel.new("Test", 1000.0, 100.0, 200.0, 150.0)
+            panel.constrain_to_window_bounds(CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0))
+            panel.x.should eq(600.0)
+        end
+
+        it "moves a panel the app placed past the left edge to the left edge" do
+            panel = CrymbleUI::WindowPanel.new("Test", -300.0, 100.0, 200.0, 150.0)
+            panel.constrain_to_window_bounds(CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0))
+            panel.x.should eq(0.0)
+        end
+
+        it "measures from the window's left edge, wherever it is" do
+            panel = CrymbleUI::WindowPanel.new("Test", 0.0, 100.0, 200.0, 150.0)
+            panel.constrain_to_window_bounds(CrymbleUI::Rect.new(50.0, 0.0, 800.0, 600.0))
+            panel.x.should eq(50.0)
         end
 
         it "constrains panel dragged above window" do
@@ -523,19 +543,18 @@ describe CrymbleUI::WindowPanel do
             panel.y.should eq(0.0)
         end
 
-        it "constrains panel dragged below window" do
+        # A panel the user dragged below keeps its title bar inside: window_panel_window_fit_spec, "a vertical drag".
+        it "moves a panel the app placed below the window up inside" do
             panel = CrymbleUI::WindowPanel.new("Test", 100.0, 700.0, 200.0, 150.0)
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
 
-            # Panel would be mostly off-screen below window
             panel.constrain_to_window_bounds(window_bounds)
 
-            # Should be constrained to keep title bar visible
-            expected_max_y = 600.0 - panel.title_bar_height
-            panel.y.should eq(expected_max_y)
+            panel.y.should eq(600.0 - 150.0)
         end
 
         it "updates bounds when position changes" do
+            # An app-placed panel: moved fully inside (x 600)
             panel = CrymbleUI::WindowPanel.new("Test", 1000.0, 100.0, 200.0, 150.0)
             window_bounds = CrymbleUI::Rect.new(0.0, 0.0, 800.0, 600.0)
 

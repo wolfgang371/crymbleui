@@ -265,6 +265,24 @@ module CrymbleUI
             @@sibling_overlap_warnings += 1
         end
 
+        # CONTAINMENT diagnostic - children found outside their parent by the -Dverify_bounds check in
+        # Widget#layout. Zero in an un-flagged build; a spec asserts zero without scraping STDERR.
+        @@containment_warnings : Int32 = 0
+
+        def self.containment_warnings : Int32
+            @@containment_warnings
+        end
+
+        def self.reset_containment_warnings : Nil
+            @@containment_warnings = 0
+        end
+
+        # Through a class method, as the other counters: a class variable written from an instance method of a
+        # SUBCLASS is that subclass's own copy.
+        def self.increment_containment_warnings : Nil
+            @@containment_warnings += 1
+        end
+
         # Measure text dimensions using global font
         # This is a pure geometry query - no rendering required
         # Can be called during measure() phase
@@ -510,16 +528,28 @@ module CrymbleUI
         # handlers get the opposite conversion, done once in App (`to_content`).
         #
         # ONE walk, like `absolute_bounds`: sum the chain and subtract what each parent shifts its
-        # child by, so this costs the same as the position it corrects.
+        # child by, so this costs the same as the position it corrects. A parent that SCALES its child
+        # (scale_for - a fitted) maps the rect accumulated so far about that child's origin: below a scale,
+        # absolute_bounds is in a pre-scale space no ancestor understands, and this is the way out.
         def viewport_bounds : Rect
             Widget.increment_absolute_bounds_count # one per step of the walk, as absolute_bounds counts
             x = @bounds.x
             y = @bounds.y
+            w = @bounds.width
+            h = @bounds.height
             shifting = !Layer.overlay?(self) # nothing above an overlay shifts it (it places itself in window space)
             node : Widget = self
             current = @parent
             while current
                 Widget.increment_absolute_bounds_count
+                if shifting && (f = current.scale_for(node)) != 1.0
+                    # x, y are relative to `current` here; node.bounds is the scaled child's place in it
+                    p = Widget.scale_about(Vec2.new(x, y), node.bounds.position, f)
+                    x = p.x
+                    y = p.y
+                    w *= f
+                    h *= f
+                end
                 x += current.bounds.x
                 y += current.bounds.y
                 if shifting
@@ -531,7 +561,7 @@ module CrymbleUI
                 node = current
                 current = current.parent
             end
-            Rect.new(x, y, @bounds.width, @bounds.height)
+            Rect.new(x, y, w, h)
         end
 
         # Does this widget rank the layer owners painted into its layers (composite_rank)? Most do not, and the
@@ -616,10 +646,34 @@ module CrymbleUI
             Vec2.zero
         end
 
-        # The shift a point must cross between this widget's space and the window's: the sum of
+        # How much THIS widget SCALES the given child when painting it: the child's subtree is drawn
+        # uniformly scaled by this factor about the child's own content origin (a fitted). Default 1.0.
+        # Declared per child, like paint_shift_for and clip_for - the only declaration of a scale; the walks
+        # below (viewport_bounds, to_window, to_content) apply it without naming a class.
+        def scale_for(child : Widget) : Float64
+            1.0
+        end
+
+        # A point p, scaled by f about c: where p is painted when what holds it is drawn at f about c.
+        def self.scale_about(p : Vec2, c : Vec2, f : Float64) : Vec2
+            Vec2.new(c.x + (p.x - c.x) * f, c.y + (p.y - c.y) * f)
+        end
+
+        # The inverse of scale_about. At f == 0 a collapsed image maps every point to its origin: no NaN or
+        # infinity reaches a handler (a captured drag while the window collapses).
+        def self.unscale_about(p : Vec2, c : Vec2, f : Float64) : Vec2
+            return c if f == 0.0
+            Vec2.new(c.x + (p.x - c.x) / f, c.y + (p.y - c.y) / f)
+        end
+
+        # The ADDITIVE part of the crossing between this widget's space and the window's: the sum of
         # `paint_shift_for` along the parent chain, up to the first overlay (a popup places itself in window
-        # space: nothing above it shifts it). `to_window` subtracts it, `to_content` adds it back, and they are
-        # inverses, so there is no third rule to get wrong; a layer's window position is its content rect minus it.
+        # space: nothing above it shifts it). A layer's window position is its content rect minus it.
+        #
+        # Below a SCALE (scale_for != 1) no additive shift describes the crossing, so this must never be asked
+        # there: it asserts so. That is the backstop behind a fitted's refusal of a layer owner inside it - such
+        # an owner's Layer#bounds asks this and fails loud instead of compositing silently in the wrong place.
+        # Points cross with to_window / to_content, rects with viewport_bounds: those scale.
         def enclosing_scroll : Vec2
             x = 0.0
             y = 0.0
@@ -627,6 +681,9 @@ module CrymbleUI
             current = @parent
             while current && !Layer.overlay?(node)
                 Widget.increment_absolute_bounds_count
+                assert(current.scale_for(node) == 1.0,
+                    "enclosing_scroll asked of #{path_id}, below the scale of #{current.class.name.split("::").last}" \
+                    "##{current.path_id}: a scaled space has no additive shift (cross with to_window / to_content)")
                 shift = current.paint_shift_for(node)
                 x += shift.x
                 y += shift.y
@@ -638,17 +695,44 @@ module CrymbleUI
 
         # A point of MINE, placed on the window. Use it for anything that leaves the widget tree:
         # an overlay, a menu position, a ghost - they are drawn by the window, not by the scroller.
+        # Innermost step first: each parent scales its child about the child's origin (scale_for), then
+        # shifts it (paint_shift_for).
         def to_window(point : Vec2) : Vec2
-            s = enclosing_scroll
-            Vec2.new(point.x - s.x, point.y - s.y)
+            x = point.x
+            y = point.y
+            node : Widget = self
+            current = @parent
+            while current && !Layer.overlay?(node)
+                Widget.increment_absolute_bounds_count
+                if (f = current.scale_for(node)) != 1.0
+                    p = Widget.scale_about(Vec2.new(x, y), node.absolute_bounds.position, f)
+                    x = p.x
+                    y = p.y
+                end
+                shift = current.paint_shift_for(node)
+                x -= shift.x
+                y -= shift.y
+                node = current
+                current = current.parent
+            end
+            Vec2.new(x, y)
         end
 
         # A window point, brought into MY space - the space `bounds` and `absolute_bounds` live in.
         # This is what a widget's mouse handlers are given, so `point - absolute_bounds` is correct
-        # without anyone having to think about scrolling.
+        # without anyone having to think about scrolling or scaling. The inverse of to_window: the
+        # outermost step first, each undone (the shift added back, then the scale undone).
         def to_content(point : Vec2) : Vec2
-            s = enclosing_scroll
-            Vec2.new(point.x + s.x, point.y + s.y)
+            parent = @parent
+            return point if parent.nil? || Layer.overlay?(self)
+            Widget.increment_absolute_bounds_count
+            q = parent.to_content(point)
+            shift = parent.paint_shift_for(self)
+            q = Vec2.new(q.x + shift.x, q.y + shift.y)
+            if (f = parent.scale_for(self)) != 1.0
+                q = Widget.unscale_about(q, absolute_bounds.position, f)
+            end
+            q
         end
 
         # The render pass in which this widget's pixels were last put INTO its layer's buffer —
@@ -1200,6 +1284,13 @@ module CrymbleUI
             children.empty?
         end
 
+        # Do this widget's children lie within its bounds? The -Dverify_bounds containment check asks. A
+        # widget that draws a child SCALED (a fitted) answers false: its child's laid-out rect may exceed it,
+        # but what is painted does not.
+        def contains_children? : Bool
+            true
+        end
+
         # Override to clip children rendering to a specific rect
         # Used by containers like Popup, WindowPanel that need to prevent children overflow
         # Renderer will automatically push/pop clip around children rendering
@@ -1379,11 +1470,14 @@ module CrymbleUI
               # `measure` but advance their cursor by each child's post-layout bounds, so a child whose
               # laid-out extent exceeds its measured one no longer overlaps its sibling — it escapes the
               # PARENT instead, where a siblings-only check cannot see it.
-              @children.each do |child|
-                if child.bounds.right > @bounds.width + 0.5 || child.bounds.bottom > @bounds.height + 0.5
-                  STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} child " \
-                              "#{child.class.name.split("::").last}##{child.path_id} #{child.bounds} " \
-                              "overflows parent #{@bounds.size}"
+              if contains_children?
+                @children.each do |child|
+                  if child.bounds.right > @bounds.width + 0.5 || child.bounds.bottom > @bounds.height + 0.5
+                    Widget.increment_containment_warnings
+                    STDERR.puts "[BOUNDS] #{self.class.name}##{path_id} child " \
+                                "#{child.class.name.split("::").last}##{child.path_id} #{child.bounds} " \
+                                "overflows parent #{@bounds.size}"
+                  end
                 end
               end
             {% end %}
@@ -1546,6 +1640,12 @@ module CrymbleUI
             # Transfer focus if old widget had it (applies to all focusable widgets)
             # This ensures flash animation continues on the new widget after rebuild
             if old_widget.focused?
+                # Carry the flash phase as state, so the transfer's marking setter finds it equal: a render mark on a
+                # fresh (NeedsLayout) instance escalates to a layout of its whole layer (docs/ARCHITECTURE.md, "carries
+                # state"). Fresh only - a rendered, kept instance needs the mark. old's flag is the controller's phase.
+                if cache_policy != CachePolicy::Never && @primitives_node.nil? && @cached_primitives.nil?
+                    @focus_highlighted = old_widget.focus_highlighted?
+                end
                 Widget.focus_manager?.try &.transfer_focus(old_widget, self)
             end
 
@@ -1912,14 +2012,19 @@ module CrymbleUI
             focusable?
         end
 
-        # Called when widget gains keyboard focus
-        def on_focus
-            # Request scroll-into-view from any parent ScrollView
-            request_scroll_into_view
+        # Whether Enter and Space, with this widget focused, press it - before its panel's shortcuts (a dialog's
+        # Enter = Ok). A button, a checkbox, a tab or section header: what Tab reached is what Enter acts on.
+        def takes_activation_keys? : Bool
+            false
         end
 
-        # Request parent ScrollView (if any) to scroll this widget into view
-        private def request_scroll_into_view
+        # Called when widget gains keyboard focus. Scrolling it into view is FocusManager#focus's, not this hook's:
+        # a keyboard handed back to a panel must not move what the user left there.
+        def on_focus
+        end
+
+        # Ask the nearest ScrollView above to bring this widget into view
+        def scroll_into_view
             current = @parent
             while current
                 if current.responds_to?(:scroll_to_visible)
@@ -2120,6 +2225,22 @@ module CrymbleUI
             WindowPanel.all_in_tree(self)
         end
 
+        # The nearest WindowPanel above this widget (itself excluded); nil in the window body or a popup
+        def find_panel : WindowPanel?
+            current = @parent
+            while current
+                return current.as(WindowPanel) if current.is_a?(WindowPanel)
+                current = current.parent
+            end
+            nil
+        end
+
+        # The children the user sees - what Tab and the arrows walk into. A container that keeps hidden children
+        # (a collapsed TreeNode, the inactive pages of Tabs) answers only the shown ones.
+        def shown_children : Array(Widget)
+            @children
+        end
+
         # Find ancestor Window
         def find_window : Window?
             current = @parent
@@ -2242,6 +2363,13 @@ module CrymbleUI
         def release_subtree : Nil
             release_own
             @children.each(&.release_subtree)
+        end
+
+        # Every widget of this subtree releases its surfaces (free_own_surfaces), keeping its pull node and slot:
+        # each re-captures its background and re-renders at its next paint (a fitted's factor change).
+        def free_subtree_surfaces : Nil
+            free_own_surfaces
+            @children.each(&.free_subtree_surfaces)
         end
 
         # This widget's own GPU surfaces, RELEASED, not just unlinked: under SFML the payload is a driver

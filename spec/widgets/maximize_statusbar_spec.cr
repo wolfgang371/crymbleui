@@ -26,6 +26,17 @@ private class MaxApp < CrymbleUI::App
 end
 
 describe "Maximized panel must not cover statusbar" do
+  # An app placing panels during a build asks the window before it was ever laid out: it answers what its first
+  # layout at its declared size gives, bars included - not an empty rect.
+  it "a window not yet laid out reports the panel area its first layout gives" do
+    renderer = CrymbleUI::Testing::TestRenderer.new(800, 600) # the declared size
+    app = MaxApp.new
+    app.build_tree
+    before = app.root.as(CrymbleUI::Window).panel_area_bounds
+    renderer.settle_rendering(app)
+    before.should eq(app.root.as(CrymbleUI::Window).panel_area_bounds)
+  end
+
   it "panel_area_bounds excludes statusbar height" do
     app = MaxApp.new
     app.build_tree

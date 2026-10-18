@@ -302,13 +302,10 @@ module CrymbleUI
             label_x = 0.0 + padding + check_width  # Leave space for checkmark
             label_y = vcentered_text_y(height, font_scale)
 
-            # Local bounds rect for background
-            local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
-
             primitives do
                 # Draw hover background if hovered
                 if hovered
-                    fill_rect(local_bounds, hover_color)
+                    fill_background(bounds, hover_color)
                 end
 
                 # Checkable items render the REAL checkbox (box + state mark) via the

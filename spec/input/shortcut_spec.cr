@@ -54,6 +54,26 @@ describe CrymbleUI::Shortcut do
         end
     end
 
+    # Punctuation keys by their character or name.
+    describe ".parse punctuation" do
+        it "parses Ctrl+. and Ctrl+Period as the period key" do
+            CrymbleUI::Shortcut.parse("Ctrl+.").key.should eq(SF::Keyboard::Period)
+            CrymbleUI::Shortcut.parse("Ctrl+Period").key.should eq(SF::Keyboard::Period)
+            CrymbleUI::Shortcut.parse("Ctrl+.").ctrl.should be_true
+        end
+
+        it "parses Ctrl+, and Ctrl+Comma as the comma key" do
+            CrymbleUI::Shortcut.parse("Ctrl+,").key.should eq(SF::Keyboard::Comma)
+            CrymbleUI::Shortcut.parse("Ctrl+Comma").key.should eq(SF::Keyboard::Comma)
+        end
+
+        it "displays Ctrl+. as Ctrl+." do
+            {% unless flag?(:darwin) %}
+                CrymbleUI::Shortcut.parse("Ctrl+.").to_display_string.should eq("Ctrl+.")
+            {% end %}
+        end
+    end
+
     describe "#to_display_string" do
         it "displays ^N as Ctrl+N on Linux" do
             shortcut = CrymbleUI::Shortcut.parse("^N")

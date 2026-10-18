@@ -67,4 +67,5 @@ crystal spec -Dcache_validation -Dverify_bounds \
   spec/layout/subtree_relaxation_skip_spec.cr \
   spec/layout/vstack_spec.cr \
   spec/layout/hstack_spec.cr \
-  spec/layout/flow_spec.cr
+  spec/layout/flow_spec.cr \
+  spec/widgets/fitted_cv_spec.cr

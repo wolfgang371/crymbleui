@@ -132,6 +132,10 @@ describe "WindowPanel Chrome Rendering" do
 
       constraints = CrymbleUI::BoxConstraints.tight(CrymbleUI::Size.new(400.0, 300.0))
       renderer.render_frame(app)
+      # Its default fill, not its focus tint: nobody holds the keyboard (the panel open at launch would
+      # hand it to the button).
+      CrymbleUI::Widget.focus_manager.clear_focus
+      renderer.render_frame(app)
 
       backend = renderer.backend
 

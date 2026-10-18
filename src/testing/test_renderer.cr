@@ -127,6 +127,9 @@ module CrymbleUI
       # size, so nothing is stale).
       def resize(width : Int32, height : Int32)
         @backend = TestRenderBackend.new(width, height)
+        # As SFML's Resized handler: the root is marked at once, which moves the pull trigger, so
+        # render_frame_if_needed sees the resize too. Before the first frame there is nothing to mark.
+        @app.try(&.root).try(&.mark_needs_layout)
       end
 
       # Reset all performance counters

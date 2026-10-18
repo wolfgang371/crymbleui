@@ -102,6 +102,10 @@ module CrymbleUI
       true
     end
 
+    def takes_activation_keys? : Bool
+      true
+    end
+
     def trigger_click
       on_click
     end
@@ -181,6 +185,11 @@ module CrymbleUI
     # DSL children (excludes the internal header widget)
     def dsl_children : Array(Widget)
       @children.size > 1 ? @children[1..] : [] of Widget
+    end
+
+    # The header, and the children only while expanded
+    def shown_children : Array(Widget)
+      expanded ? @children : [@header_widget.as(Widget)]
     end
 
     # Measure header + children (if expanded)

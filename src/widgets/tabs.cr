@@ -110,6 +110,10 @@ module CrymbleUI
       true
     end
 
+    def takes_activation_keys? : Bool
+      true
+    end
+
     def trigger_click
       on_click
     end
@@ -187,7 +191,7 @@ module CrymbleUI
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       primitives do
-        fill_rect(Rect.new(0.0, 0.0, bounds.width, bounds.height), Theme.current.panel_border)
+        fill_background(bounds, Theme.current.panel_border)
       end
     end
   end
@@ -244,6 +248,13 @@ module CrymbleUI
 
     private def active_page : Widget?
       pages[active]?
+    end
+
+    # The strip, the active page and the frame - the hidden pages stay built (their shortcuts fire) but are no
+    # Tab stops.
+    def shown_children : Array(Widget)
+      hidden = pages.reject(&.same?(active_page))
+      @children.reject { |c| hidden.any?(&.same?(c)) }
     end
 
     def measure(constraints : BoxConstraints) : Size

@@ -37,6 +37,8 @@ module CrymbleUI
       # Time.instant, and a lagging clock would miss them.
       @now : Time::Instant
       @reports : Array(String)? = nil # set only inside expect_reported
+      # Per panel id, the x of press_title's previous press - the next one lands far from it.
+      @title_presses = {} of String => Float64
 
       def initialize(@app : App, width : Int32 = 1200, height : Int32 = 800)
         @renderer = TestRenderer.new(width, height)
@@ -123,7 +125,8 @@ module CrymbleUI
         @app.drag_manager.drop_refusal(target, source, data).nil?
       end
 
-      # Focus the widget, then type `text` into it as SFML delivers typing.
+      # Focus the widget, then type `text` into it as SFML delivers typing. It PUTS the keyboard there - for a spec
+      # about the widget; a spec about where the app leaves the keyboard clicks, then types with `type(text)`.
       def type(id : String, text : String) : Nil
         widget = focusable(id, "type")
         act(widget) do
@@ -132,8 +135,15 @@ module CrymbleUI
         end
       end
 
+      # Type `text` to whatever holds the keyboard - where the app put it (a click, a dialog opening), never the
+      # Driver. Raises when nothing holds it: typing into nothing would pass over what a spec meant to check.
+      def type(text : String) : Nil
+        raise ArgumentError.new("nothing holds the keyboard - click where the text should go first") unless Widget.focus_manager.focused_widget
+        reported { @renderer.deliver(@app, Keys.typed(text)) }
+      end
+
       # A key or chord - "Enter", "Escape", "Ctrl+S", "Ctrl+Shift+Z" - with SFML's key names
-      # (SF::Keyboard::Key). `on:` focuses that widget first.
+      # (SF::Keyboard::Key). `on:` PUTS the keyboard on that widget first; without it the keys go to whatever holds it.
       def press(chord : String, on id : String? = nil) : Nil
         events = chord_events(chord)
         if id
@@ -198,6 +208,32 @@ module CrymbleUI
         settle
       end
 
+      # Press a panel's title bar for real (press and release through the app's mouse path): the panel comes to
+      # the front as a user's press brings it. The point is a spot of the bar clear of the resize bands and both
+      # buttons where the press reaches the bar (not a leading widget, not another panel) - the one farthest from this panel's previous press, so two
+      # presses never make the double-click that maximizes it. Raises when no spot of the bar is uncovered.
+      def press_title(panel_id : String) : Nil
+        panel = panel(panel_id)
+        y = panel.y + panel.title_bar_height / 2.0
+        left = panel.x + WindowPanel::RESIZE_HANDLE_SIZE
+        right = panel.maximize_button_rect.x
+        spots = (left.ceil.to_i...right.floor.to_i).step(2).map { |x| Vec2.new(x.to_f, y) }.select { |at| uncovered?(panel, at) }
+        raise ArgumentError.new("the title bar of \"#{panel_id}\" is covered") if spots.empty?
+        last = @title_presses[panel_id]?
+        at = last ? spots.max_by { |spot| (spot.x - last).abs } : spots.first
+        @title_presses[panel_id] = at.x
+        press_at(panel, at)
+      end
+
+      # Press a panel's close button for real. Raises when it is covered or the panel cannot be closed.
+      def close_panel(panel_id : String) : Nil
+        panel = panel(panel_id)
+        raise ArgumentError.new("\"#{panel_id}\" has no close button") unless panel.closeable
+        at = panel.close_button_rect.center
+        raise ArgumentError.new("the close button of \"#{panel_id}\" is covered") unless uncovered?(panel, at)
+        press_at(panel, at)
+      end
+
       # Let `seconds` pass for the app's timers, then settle.
       def advance(seconds : Float64) : Nil
         @now = {@now, Time.instant}.max + seconds.seconds
@@ -208,7 +244,8 @@ module CrymbleUI
       # === Grids and file browsers (VirtualMatrix) ===
 
       # Focus the matrix on one cell, bringing it into view - an off-screen cell has no widget until
-      # the matrix materializes it.
+      # the matrix materializes it. It PUTS the keyboard on the grid - for a spec about the grid; a spec about
+      # where a click leaves the keyboard uses click_cell, then type(text).
       def focus_cell(matrix_id : String, row : Int32, col : Int32) : Nil
         cell_widget(matrix_id, row, col)
       end
@@ -292,9 +329,12 @@ module CrymbleUI
       class Refusal < ArgumentError
       end
 
-      # `at`: where the press lands - popups are dismissed by position.
+      # `at`: where the press lands - popups are dismissed by position. In App#handle_mouse_down's order: the
+      # popups close, the widget takes the keyboard when a press would give it, the menus close, its panel
+      # comes to the front.
       private def act(widget : Widget, at : Vec2 = widget.viewport_bounds.center, &) : Nil
         @app.dismiss_popups(at)
+        Widget.focus_manager.focus(widget) if widget.takes_focus_on_click?
         @app.dismiss_menus(widget)
         widget.bring_containing_panel_to_front
         reported { yield }
@@ -400,6 +440,28 @@ module CrymbleUI
         widget
       end
 
+      private def panel(id : String) : WindowPanel
+        widget = find(id)
+        widget.as?(WindowPanel) || raise ArgumentError.new("\"#{id}\" is a #{widget.class.name}, not a WindowPanel")
+      end
+
+      # `at` in the panel's parent space (where its x and y are): does a press there reach the panel - the panel
+      # itself (its buttons, a draggable bar) or its chrome (a fixed bar)?
+      private def uncovered?(panel : WindowPanel, at : Vec2) : Bool
+        hit = @app.root.try(&.hit_test(window_point(panel, at)))
+        !hit.nil? && (hit.same?(panel) || (hit.is_a?(WindowPanel::Chrome) && hit.parent.same?(panel)))
+      end
+
+      private def window_point(panel : WindowPanel, at : Vec2) : Vec2
+        panel.parent.not_nil!.to_window(at)
+      end
+
+      private def press_at(panel : WindowPanel, at : Vec2) : Nil
+        point = window_point(panel, at)
+        reported { @renderer.deliver(@app, Keys.click_at(point.x.round.to_i, point.y.round.to_i)) }
+        settle
+      end
+
       private def matrix(id : String) : VirtualMatrix
         widget = find(id)
         widget.as?(VirtualMatrix) || raise ArgumentError.new("\"#{id}\" is a #{widget.class.name}, not a VirtualMatrix")
@@ -409,10 +471,11 @@ module CrymbleUI
       # never by the cursor, which place_cursor clamps into range.
       private def cell_widget(matrix_id : String, row : Int32, col : Int32) : Widget
         vm = matrix(matrix_id)
-        Widget.focus_manager.focus(vm)
-        vm.set_cursor_from_cell({row, col})
-        vm.snap_to_cursor
-        settle
+        act(vm) do
+          Widget.focus_manager.focus(vm)
+          vm.set_cursor_from_cell({row, col})
+          vm.snap_to_cursor
+        end
         vm = matrix(matrix_id)
         vm.active_cells[vm.get_top_left_cell({row, col})]? ||
           raise ArgumentError.new("\"#{matrix_id}\" has no cell at #{row},#{col}")

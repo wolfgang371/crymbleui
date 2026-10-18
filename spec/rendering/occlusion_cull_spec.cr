@@ -140,8 +140,8 @@ describe "Occlusion culling" do
     # The skip path bypasses render_layer, and @dirty_widgets is only emptied by that method's
     # clear_render_state. Left alone, an occluded layer accumulates every widget ever marked on it
     # and keeps whole dead generations alive: measured 28 -> 90 MB of heap over a few hundred
-    # rebuilds, while GPU memory fell. An empty set also means "all dirty" (Layer#widget_dirty?),
-    # which is the right disposition for a layer that has been invisible for a while.
+    # rebuilds, while GPU memory fell. What it named is repainted on reveal by a full clear and render
+    # (needs_clear) - see hidden_layer_reveal_spec.
     renderer = CrymbleUI::Testing::TestRenderer.new(500, 400)
     app = OcclusionApp.new
     app.build_tree

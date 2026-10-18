@@ -157,17 +157,14 @@ module CrymbleUI
         def to_primitives(bounds : Rect) : Array(DrawPrimitive)
             text = format_text
 
-            # Use full widget bounds for background (prevents artifacts when text shrinks)
-            # Don't use dynamic text width - when text shrinks, background must still cover old pixels
-            local_bounds = Rect.new(0.0, 0.0, bounds.width, bounds.height)
-
             # Position text with padding (widget-local coordinates)
             text_x = 0.0 + PADDING_H
             text_y = 0.0 + PADDING_V
 
             primitives do
-                # Fully opaque background covering full widget bounds
-                fill_rect(local_bounds, background_color)
+                # The whole widget, not the text's width: when the text shrinks, the background must still cover
+                # the old pixels.
+                fill_background(bounds, background_color)
 
                 # Text
                 draw_text(text, Vec2.new(text_x, text_y), text_color, font_scale)

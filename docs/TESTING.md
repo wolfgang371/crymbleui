@@ -37,14 +37,21 @@ it opens no window.
 
 ## Trigger semantics
 
-An act runs what real input runs AROUND a handler and skips only finding the widget by position:
+An act runs what real input runs AROUND a handler, in `App#handle_mouse_down`'s order, and skips only
+finding the widget by position:
 
 1. close the popups a click at the widget's centre would close (`App#dismiss_popups`) - for
    `drag_cell`, at the cell it presses;
-2. close open menus unless the widget is inside an overlay surface (`App#dismiss_menus`);
-3. bring the containing panel to front;
-4. call the handler (`trigger_click`, `trigger_right_click`, `DragManager#drag_onto`, typing);
-5. settle - render until nothing changes (a requested rebuild is applied by the first frame).
+2. give the widget the keyboard when a press would (`takes_focus_on_click?`: a TextInput, a Button or
+   Checkbox unless `focus_on_click = false`);
+3. close open menus unless the widget is inside an overlay surface (`App#dismiss_menus`);
+4. bring the containing panel to front - which hands it the keyboard unless the keyboard is already
+   inside (step 2 put it there for a focusable widget);
+5. call the handler (`trigger_click`, `trigger_right_click`, `DragManager#drag_onto`, typing);
+6. settle - render until nothing changes (a requested rebuild is applied by the first frame).
+
+`focus_cell` and `cell_text` reveal a cell through the same act, so the grid's panel comes to the front
+too.
 
 The Driver's lookup covers what a user can see: the window's tree, then its overlays (popups,
 context menus). The app's own lookups (`App#find`, `Widget#find_by_id`, `find_all`) stay tree-only on
@@ -82,9 +89,12 @@ to a subtree.
 | `drag(id, onto: id)` | the Draggable and the DropTarget at or ABOVE each id, as real input finds a draggable from the widget under the mouse; the drop lands at the target's centre; raises with the reason when refused ("\"shut\" is not shown") |
 | `can_drop?(id, onto: id)` | whether that drag would land - for asserting a refusal |
 | `type(id, text)` | raises unless the widget can take focus, and for a widget inside a grid (the grid keeps the focus and hands keys to its cursor cell: `focus_cell`); focuses it, then types as SFML delivers typing |
-| `press(chord, on: id?)` | `"Enter"`, `"Escape"`, `"Ctrl+S"`, `"Ctrl+Shift+Z"`; `on:` focuses first, refused as for `type` |
+| `type(text)` | to whatever holds the keyboard - where the app put it (a click, a dialog opening), never the Driver; raises when nothing holds it. `type(id, text)`, `press(on:)` and `focus_cell` PUT the keyboard there: for a spec about that widget. A spec about where the app leaves the keyboard - "click the cell, type" - clicks (`click`, `click_cell`), then `type(text)` |
+| `press(chord, on: id?)` | `"Enter"`, `"Escape"`, `"Ctrl+S"`, `"Ctrl+Shift+Z"`; `on:` focuses first, refused as for `type`; without it, to whatever holds the keyboard |
 | `keys(events)` | raw events built with `Testing::Keys`, when `type`/`press` cannot say it |
 | `hover(id)` | the app's real hover path at the widget's centre |
+| `press_title(panel_id)` | a real press and release on a WindowPanel's title bar: the panel comes to the front and takes the keyboard. The point is a spot of the bar clear of the resize bands and both buttons where the press reaches the bar, the one farthest from this panel's previous press - two presses never make the double-click that maximizes it. Raises when the whole bar is covered |
+| `close_panel(panel_id)` | a real press on a WindowPanel's close button; raises when it is covered or the panel is not closeable |
 | `advance(seconds)` | lets time pass for the app's timers (accumulates; never behind the real clock) - including those its `on_start` started, which the first frame runs |
 
 `press` takes SFML's key names (`SF::Keyboard::Key`): `Enter`, `Escape`, `Tab`, `Space`,

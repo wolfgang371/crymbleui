@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/testing/driver"
+require "../../src/widgets/popup"
 
 # INPUT NEVER REACHES A GRID WHOSE CELLS ARE ABOUT TO BE REPLACED - covered or not.
 #
@@ -145,16 +146,20 @@ private def grid(ui) : CrymbleUI::VirtualMatrix
   ui.find("grid").as(CrymbleUI::VirtualMatrix)
 end
 
-# The front panel over the back grid's content, the back panel's title bar left free.
+# An opaque popup over the back grid's content, the back panel's title bar left free. A popup, not the front
+# panel: the panel holding the keyboard is always the front one, so no panel covers the grid being typed into.
 private def cover(ui) : Nil
   back = ui.find("back").viewport_bounds
-  front = ui.find("front").as(CrymbleUI::WindowPanel)
-  front.x = back.x - 10.0
-  front.y = back.y + 30.0
-  front.width = back.width + 20.0
-  front.height = back.height
-  front.bring_to_front
+  popup = CrymbleUI::Popup.new(width: back.width + 20.0, height: back.height,
+    background_color: CrymbleUI::Color.new(40, 40, 40, 255), id: "cover")
+  popup.target_x = back.x - 10.0
+  popup.target_y = back.y + 30.0
+  window = ui.app.root.not_nil!.as(CrymbleUI::Window)
+  window.add_overlay(popup)
+  window.mark_needs_layout
   ui.settle
+  cover = ui.find("cover").viewport_bounds
+  raise "instrument: the popup does not cover the back grid" unless cover.x <= back.x && cover.right >= back.right
 end
 
 # One frame whose counters describe that frame (TestRenderer never resets them).

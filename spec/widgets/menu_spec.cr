@@ -105,11 +105,13 @@ describe CrymbleUI::Menu do
             background = primitives[0].as(CrymbleUI::FillRect)
 
             # Widget-local coordinates: origin is (0,0)
-            # Background should be full bounds minus border height at bottom
+            # Background covers the whole widget (fill_background - no transparent edge strip at a fractional
+            # size); the border strip is painted over its last row
             background.bounds.x.should eq(0.0)
             background.bounds.y.should eq(0.0)
             background.bounds.width.should eq(60.0)
-            background.bounds.height.should eq(27.0)  # 28 - 1 (BORDER_WIDTH)
+            background.bounds.height.should eq(28.0)
+            background.covers.should be_true
             background.color.should eq(bg_color)
         end
 

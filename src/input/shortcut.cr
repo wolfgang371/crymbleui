@@ -106,6 +106,10 @@ module CrymbleUI
                 SF::Keyboard::Equal
             when "-", "minus", "hyphen"
                 SF::Keyboard::Hyphen
+            when ".", "period"
+                SF::Keyboard::Period
+            when ",", "comma"
+                SF::Keyboard::Comma
             when "numpad+", "numpadadd"
                 SF::Keyboard::Add
             when "numpad-", "numpadsubtract"
@@ -189,6 +193,10 @@ module CrymbleUI
             case key
             when SF::Keyboard::Space
                 "Space"
+            when SF::Keyboard::Period
+                "."
+            when SF::Keyboard::Comma
+                ","
             when SF::Keyboard::Enter
                 "Enter"
             when SF::Keyboard::Escape

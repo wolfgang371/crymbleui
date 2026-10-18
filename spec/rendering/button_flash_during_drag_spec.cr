@@ -20,7 +20,10 @@ describe "Button Flash During Panel Drag" do
     window.add_child(panel)
     app.root_widget = window
 
-    # Initial render
+    # Initial render. The subject is where the button draws, not its focus tint: nobody holds the keyboard
+    # (the panel open at launch would hand it to the button).
+    renderer.render_frame(app)
+    CrymbleUI::Widget.focus_manager.clear_focus
     renderer.render_frame(app)
 
     # Get panel layer backend for pixel testing
@@ -44,6 +47,7 @@ describe "Button Flash During Panel Drag" do
     # Start drag on panel title bar
     # Use app's mouse handling (tracks mouse_down_widget for drag)
     app.handle_mouse_down(CrymbleUI::Vec2.new(150.0, 115.0))
+    CrymbleUI::Widget.focus_manager.clear_focus # the press hands the panel the keyboard; no focus tint
     renderer.render_frame(app)
 
     # Drag panel 200px to the right (far enough to avoid overlap with old position)

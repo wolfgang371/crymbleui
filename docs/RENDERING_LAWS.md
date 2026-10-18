@@ -1,6 +1,6 @@
 # Rendering laws
 
-Governs: src/rendering/, src/core/layer.cr, src/core/layer_owner.cr, src/core/widget.cr, src/core/app.cr, src/core/drag_manager.cr, src/widgets/scroll_view.cr, src/widgets/popup, src/widgets/menu.cr, src/layout/
+Governs: src/rendering/, src/core/layer.cr, src/core/layer_owner.cr, src/core/widget.cr, src/core/app.cr, src/core/drag_manager.cr, src/widgets/scroll_view.cr, src/widgets/fitted.cr, src/widgets/popup, src/widgets/menu.cr, src/layout/
 
 The invariants a change to the render path must hold, each with the symbol that enforces it and
 the section of `LAYER_RENDERING_ARCHITECTURE.md` that explains WHY. Read this file before touching
@@ -13,7 +13,8 @@ The long doc is reference; this file is the contract.
 |---|---|---|
 | CONTENT | the laid-out position, summed up the parent chain | `absolute_bounds` |
 | WINDOW | where the widget is actually PAINTED | `viewport_bounds`, `to_window(point)` |
-| BUFFER | position inside a layer's texture | `slot_axis(abs, layer.content_rect, buffer_origin)` |
+| BUFFER | position inside a layer's texture | `LayerRenderer#paint_span(layer, c, start, len)` per axis; a viewport-cache slot key `slot_axis(abs, layer.content_rect, buffer_origin)` |
+| below a SCALE | a fitted's subtree: content space drawn at a factor about the scaled child's origin - an `absolute_bounds` there means nothing to any ancestor | `viewport_bounds`, `to_window`, `to_content` - nothing else crosses |
 
 - **A widget whose parent scrolls keeps its laid-out bounds; the pixels move instead.** A
   ScrollView composites its layer shifted; a VirtualMatrix paints its cells shifted. The parent
@@ -23,14 +24,33 @@ The long doc is reference; this file is the contract.
 - **Anything that meets the CURSOR or leaves the widget tree uses WINDOW space** — drag ghost,
   drop highlight, drop-target hit test, popup/menu anchors, a layer's composite position
   (`Layer#bounds`), Tab order and arrow navigation.
-- **A layer is painted in its owner's CONTENT space and composited in WINDOW space.** The owner
-  states the content rect (`compute_bounds_for_layer` → `absolute_bounds`, never `viewport_bounds`:
-  `Layer#content_rect`, the render origin); the layer derives where it composites
-  (`Layer#bounds = content_rect - owner.enclosing_scroll`). So an ancestor's scroll moves the
-  composite and leaves the buffer alone, and a repaint paints the content where it is laid out.
-  Render sites read `content_rect`, composite sites `bounds`, size-only readers `Layer#size`.
-  Enforced by `spec/rendering/layer_content_space_lint_spec.cr` (textual: no `viewport_bounds` in
-  a `compute_bounds_for_layer`) and `spec/rendering/scrolled_layer_space_spec.cr`.
+- **A layer is painted in its owner's CONTENT space, at its owner's factor, about its content-rect
+  origin, and composited in WINDOW space.** The owner states the content rect
+  (`compute_bounds_for_layer` → `absolute_bounds`, never `viewport_bounds`: `Layer#content_rect`, its
+  position `C` the render origin) and the factor (`compute_scale_for_layer` → `Layer#render_scale`
+  `f`: 1.0 for every owner but a fitted, PULLED like the rect - a fitted answers a carried property,
+  so a reconciled layer and a fresh instance agree before the next layout). A content edge `e` lies at
+  buffer coordinate `(e - C) * f` and at window coordinate `(C - owner.enclosing_scroll) + (e - C) * f`.
+  The layer derives both: `Layer#size`, its extent in BUFFER and WINDOW pixels, is
+  `content_rect.size * f`; `Layer#bounds` is `(C - owner.enclosing_scroll, size)`. So an ancestor's
+  scroll moves the composite and leaves the buffer alone, and a repaint paints the content where it
+  is laid out. Render sites read `content_rect`, composite sites `bounds`, readers of the layer's
+  pixel extent `Layer#size` - never `content_rect.size`, which is unscaled. Enforced by
+  `spec/rendering/layer_content_space_lint_spec.cr` (textual: no `viewport_bounds` in a
+  `compute_bounds_for_layer`), `spec/rendering/scrolled_layer_space_spec.cr` and
+  `spec/widgets/fitted_spec.cr`.
+- **Below a scale, only `viewport_bounds` / `to_window` / `to_content` cross the boundary.** A parent
+  that draws a child scaled declares it per child (`Widget#scale_for`, default 1.0 - a fitted), like
+  the shift and the clip, and those three walks apply it (`Widget.scale_about` / `unscale_about`; at
+  f == 0 every point maps to the origin, so no NaN reaches a handler). `enclosing_scroll` is only the
+  ADDITIVE part of the crossing, and asserts it is never asked below a scale: the backstop behind a
+  fitted's refusal of any layer owner inside it, whose `Layer#bounds` would ask and must fail loud,
+  never composite silently in the wrong place. At most one factor on a chain: no layer owner inside a
+  fitted (a fitted is one), so no fitted in a fitted. A factor change clears the fitted's layer and
+  releases every surface of its subtree, so each widget re-captures over the cleared, parent-first
+  buffer - never the flat fill a mere size change gives (a transparent child's parent showed through
+  as a hole). Known limits, stated: popups and dropdowns opened from inside open at natural size; a
+  DrawCircle outline stays 1px; text bearing offsets are computed at natural size.
 - **A layer composites clipped by every scroller around it**: `owner.ancestor_clip`, the
   intersection of each ancestor's `Widget#clip_for(child)` - declared per child, like the shift (a
   ScrollView clips its content, not its scrollbars; a VirtualMatrix a cell to the layer painting
@@ -70,7 +90,9 @@ The long doc is reference; this file is the contract.
   again inside a widget (VirtualMatrix used to, and converted twice).
 - **Painting uses BUFFER space and `scroll_offset` does NOT appear in it** — the buffer stores
   content, shifted by `buffer_origin`; the COMPOSITE applies `scroll_offset - buffer_origin`. One
-  helper, `LayerRenderer#slot_axis`; do not re-derive it (the foreground pass did, and painted
+  geometry owner per axis, `LayerRenderer#paint_span` (origin and device span of a content range,
+  for every paint path: the widget texture, both immediate passes, the foreground), and one slot-key
+  helper, `LayerRenderer#slot_axis`; do not re-derive either (the foreground pass did, and painted
   every decoration 100px off).
 - Enforced by `spec/rendering/window_space_containment_spec.cr` (cursor-facing files must not
   touch `absolute_bounds`) and `spec/rendering/scroll_space_sweep_spec.cr` (the invariant across
@@ -117,6 +139,8 @@ The long doc is reference; this file is the contract.
 
 - **`buffer_origin` has ONE production writer**, `Layer#recenter_origin!`; it is whole by
   construction and every reader may assume that. It is `Vec2.zero` off the viewport_cache path.
+- **A viewport_cache layer is never scaled** (asserted at `render_layer`'s entry): its origin,
+  recenter, slot keys and sampling have no scaled form. Only reachable if a fitted's refusal failed.
 - **A viewport_cache layer's buffer is viewport + 2x cache_extent.** A grow that still fits keeps
   its backend; only a viewport too big for the buffer needs a new one.
 - **The per-slot skip is the buffer's own claim**: `slot_fresh?(buffer_pos)` means the buffer
@@ -133,6 +157,14 @@ The long doc is reference; this file is the contract.
   clip extents. Sizes, vector fills and content-space values stay raw BY POLICY. Ad-hoc
   `.round/.to_i/.floor/.ceil` on coordinates fails `spec/rendering/pixel_snap_lint_spec.cr`, whose
   file table a new render-path file must join.
+- **A scaled layer snaps EDGES.** `paint_span` keeps two formulas on purpose: unscaled it delegates
+  to the contract-pinned `round_to_layer_pixels` / `device_pixel_span` (bit-identical); scaled it
+  floors both scaled edges, so siblings sharing an edge share its pixel (the start + length form
+  leaves a background column at a fractional factor). A covering fill (`FillRect#covers`, set by
+  `fill_background`) becomes the device span itself (`DrawPrimitive.scaled_primitives`), covering by
+  construction, and `-Ddebug_fill_coverage` checks covering fills and hand-written fills from the widget
+  origin on every paint path. A text scaled
+  below one pixel is dropped (`DrawText#scaled`).
 - **Clipping**: the layer pushes its own clip; a widget that needs one pushes and pops within its
   own paint. Never leave a clip on the backend across widgets.
 
@@ -148,5 +180,5 @@ The long doc is reference; this file is the contract.
 
 Give it one named owner in the same arc. Every defect in this file's history was a rule written
 in two places where one copy was wrong: the placement arithmetic (fixed by `centred_in`), the
-compound axis (`StickyMath.compound_axis`), the paint position (`slot_axis`), the screen-to-content
+compound axis (`StickyMath.compound_axis`), the paint position (`paint_span`, with `slot_axis` for the slot key), the screen-to-content
 conversion (`to_content`).

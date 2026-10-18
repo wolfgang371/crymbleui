@@ -43,7 +43,7 @@ module CrymbleUI
       fill = Theme.current.drag_ghost
       primitives do
         # Opaque themed fill — see-through is the layer's job (GHOST_OPACITY), not the fill alpha
-        fill_rect(Rect.new(0, 0, bounds.width, bounds.height), fill)
+        fill_background(bounds, fill)
 
         # Border: a darker shade of the same themed fill
         draw_rect(Rect.new(0, 0, bounds.width, bounds.height), fill.darken(BORDER_DARKEN), 2.0)
@@ -75,7 +75,7 @@ module CrymbleUI
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
       primitives do
-        fill_rect(Rect.new(0, 0, bounds.width, bounds.height), Theme.current.drag_ghost)
+        fill_background(bounds, Theme.current.drag_ghost)
       end
     end
   end

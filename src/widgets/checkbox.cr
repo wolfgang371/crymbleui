@@ -179,11 +179,16 @@ module CrymbleUI
     end
 
     # false: a click acts without taking the keyboard from where it is (a text field the app keeps
-    # typing into). Tab still reaches it. Set it each build, like the label.
+    # typing into) - within its own panel: a click in a panel behind still raises it, and the raised
+    # panel takes the keyboard. Tab still reaches it. Set it each build, like the label.
     property focus_on_click : Bool = true
 
     def takes_focus_on_click? : Bool
       focus_on_click
+    end
+
+    def takes_activation_keys? : Bool
+      true
     end
 
     # Generate primitives for rendering
