@@ -3,7 +3,7 @@
 A crymble-ui app builds in two flavours from the same source: the **desktop** one (`shards build`, SFML) and the
 **web** one (`bin/crymble-web build`): a static web page whose WebAssembly module is the same Crystal, drawing on
 an HTML canvas. The app does not change, and nothing in it is compiled conditionally: the flavour is a property
-of the build, decided inside crymble-ui. The README's "In a browser" section is the quick start; this page is the
+of the build, decided inside crymble-ui. The README's "Building for the browser" section is the quick start; this page is the
 model.
 
 ## How it fits together

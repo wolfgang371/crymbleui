@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-try%20it%20in%20your%20browser-2ea44f)](https://wolfgang371.github.io/crymbleui/)
 
-**Version 1.9.3**
+**Version 1.9.4**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -15,9 +15,13 @@ Declarative and reactive.
 Its name is a pun of Crystal and nimble :smiley:
 
 Desktop apps with an SFML 3.0 backend, for Linux and Windows (Windows needed slight patching of SFML, included
-here) - and the same app, unchanged, as a web page running in the browser (WebAssembly; see [In a browser](#in-a-browser)).
+here) - and the same app, unchanged, as a web page running in the browser (WebAssembly; see [Building for the browser](#building-for-the-browser)).
 
-**[Try the showcase in your browser](https://wolfgang371.github.io/crymbleui/)** - nothing to install (a desktop browser with mouse and keyboard; tested in Chromium).
+**Try it in your browser** - nothing to install (a desktop browser with mouse and keyboard; tested in Chromium):
+
+- [the showcase](https://wolfgang371.github.io/crymbleui/) - this repository's widgets, scrolling, layers and drag and drop
+- [Minesweeper](https://wolfgang371.github.io/minesweeper/) - a small app of its own, crymble-ui as a shard; [its repository](https://github.com/wolfgang371/minesweeper) is the one to start from
+- [Embrace](https://h3o.de/demo) - a large desktop app for structured data, unchanged
 
 CrymbleUI is fully AI generated.
 
@@ -31,7 +35,8 @@ Currently is has:
 
 [**H3O Embrace**](https://github.com/holistic3fficientsolutions/embrace) is built entirely on
 CrymbleUI: a data application whose grid is one big `VirtualMatrix`, with pinned headers, content
-sizing and live editing over tables of thousands of records.
+sizing and live editing over tables of thousands of records - and, built for the web, it runs in the
+browser too: [h3o.de/demo](https://h3o.de/demo).
 
 It is worth naming because most of this library's harder machinery exists for it. The virtual
 matrix, the sticky row and column layers, content auto-sizing, the viewport cache and the
@@ -126,7 +131,7 @@ and many more in examples/
 ### v1.9.0
 
 #### In a browser
-Any crymble-ui app also builds, unchanged, as a static web page: the same Crystal compiled to WebAssembly, drawing on an HTML canvas through a second backend that paints the desktop's pixels. `bin/crymble-web` (installed by `shards install`) sets up the toolchain once, builds a page per target and serves it to try. No line of the app changes; see [In a browser](#in-a-browser) and [docs/WEB.md](docs/WEB.md).
+Any crymble-ui app also builds, unchanged, as a static web page: the same Crystal compiled to WebAssembly, drawing on an HTML canvas through a second backend that paints the desktop's pixels. `bin/crymble-web` (installed by `shards install`) sets up the toolchain once, builds a page per target and serves it to try. No line of the app changes; see [Building for the browser](#building-for-the-browser) and [docs/WEB.md](docs/WEB.md).
 
 ---
 
@@ -2571,17 +2576,13 @@ Run a specific tutorial:
 ./bin/tutorial-05
 # etc.
 ```
-## In a browser
+## Building for the browser
 
 Since crymble-ui v1.9.0, any crymble-ui app also builds, unchanged, as a static web page: the same Crystal,
 compiled to WebAssembly, drawing on an HTML canvas. No line of the app changes and nothing is conditionally compiled -
 crymble-ui brings a second backend and a build tool, `bin/crymble-web`, which `shards install` puts into your app's
-`bin/`. The app runs in the visitor's browser tab only; there is no server side. Running in a browser today:
-
-- [the showcase](https://wolfgang371.github.io/crymbleui/) - this repository's widgets, scrolling, layers and drag and drop;
-- [Minesweeper](https://wolfgang371.github.io/minesweeper/) - a small app of its own that uses crymble-ui as a
-  shard; [its repository](https://github.com/wolfgang371/minesweeper) is the one to start from;
-- [Embrace](https://h3o.de/demo) - a large desktop app for structured data, unchanged.
+`bin/`. The app runs in the visitor's browser tab only; there is no server side. The apps already running in a
+browser are listed at the top.
 
 From your app's root (Linux x86_64 build host; [docs/WEB.md](docs/WEB.md) lists what the toolchain needs):
 

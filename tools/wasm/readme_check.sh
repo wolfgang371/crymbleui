@@ -1,7 +1,7 @@
 #!/bin/bash
 # The README's web commands, run the way an app author runs them: a scratch app made of the README's own pieces -
 # its Installation stanza (with only the source swapped from GitHub to this checkout), its Quick Start program -
-# then `shards install` and every command of the "In a browser" section, in order. Run from crymble-ui's root.
+# then `shards install` and every command of the "Building for the browser" section, in order. Run from crymble-ui's root.
 set -euo pipefail
 
 CUI=$PWD
@@ -21,7 +21,7 @@ block() { # LANG [AFTER-HEADING]
 }
 stanza=$(block yaml)
 program=$(block crystal "## Quick Start")
-commands=$(block bash "## In a browser")
+commands=$(block bash "## Building for the browser")
 [ -n "$stanza" ] && [ -n "$program" ] && [ -n "$commands" ] || fail "README.md lacks a block this check reads"
 echo "$stanza" | grep -q 'github: wolfgang371/crymbleui' || fail "the Installation stanza changed shape: $stanza"
 
