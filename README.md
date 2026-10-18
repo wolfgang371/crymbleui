@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-try%20it%20in%20your%20browser-2ea44f)](https://wolfgang371.github.io/crymbleui/)
 
-**Version 1.9.2**
+**Version 1.9.3**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -2576,7 +2576,12 @@ Run a specific tutorial:
 Since crymble-ui v1.9.0, any crymble-ui app also builds, unchanged, as a static web page: the same Crystal,
 compiled to WebAssembly, drawing on an HTML canvas. No line of the app changes and nothing is conditionally compiled -
 crymble-ui brings a second backend and a build tool, `bin/crymble-web`, which `shards install` puts into your app's
-`bin/`. The app runs in the visitor's browser tab only; there is no server side.
+`bin/`. The app runs in the visitor's browser tab only; there is no server side. Running in a browser today:
+
+- [the showcase](https://wolfgang371.github.io/crymbleui/) - this repository's widgets, scrolling, layers and drag and drop;
+- [Minesweeper](https://wolfgang371.github.io/minesweeper/) - a small app of its own that uses crymble-ui as a
+  shard; [its repository](https://github.com/wolfgang371/minesweeper) is the one to start from;
+- [Embrace](https://h3o.de/demo) - a large desktop app for structured data, unchanged.
 
 From your app's root (Linux x86_64 build host; [docs/WEB.md](docs/WEB.md) lists what the toolchain needs):
 
@@ -2588,8 +2593,8 @@ bin/crymble-web serve hello          # try it: http://127.0.0.1:8765/
 
 `bin/crymble-web build` without arguments builds every target in your `shard.yml`. The folder `bin/web/<target>/`
 is the whole site: copy it to any static web server. Visitors need a current desktop browser (Chrome, Edge,
-Firefox or Safari - WebAssembly exception handling) with a mouse and a keyboard; files the app saves live in the
-tab and are gone when it closes. [docs/WEB.md](docs/WEB.md) explains the architecture, the page an app can bring
+Firefox or Safari - WebAssembly exception handling; tested in Chromium so far) with a mouse and a keyboard;
+files the app saves live in the tab and are gone when it closes. [docs/WEB.md](docs/WEB.md) explains the architecture, the page an app can bring
 along, the differences to the desktop, and how the result is checked.
 ## Documentation
 

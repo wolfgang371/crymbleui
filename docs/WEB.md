@@ -154,6 +154,16 @@ can do that without the toolchain.
 Node 18 or newer; playwright-core (pinned in `tools/wasm/package.json`, `npm ci`) with its Chromium
 (`npx playwright-core install chromium-headless-shell`) or any Chrome binary as `CRYMBLE_CHROMIUM`.
 
+## Apps built with it
+
+- the showcase (`examples/showcase_demo.cr`), published with each release - see "Publishing the showcase";
+- [Minesweeper](https://github.com/wolfgang371/minesweeper), live at https://wolfgang371.github.io/minesweeper/ - a
+  small app in a repository of its own, with crymble-ui as a shard dependency. Start a web build of your own app
+  from it: its `shard.yml` (a target, and the `repository:` the page links as its source), its README section
+  and its Pages publishing are all a third-party app needs;
+- [Embrace](https://github.com/holistic3fficientsolutions/embrace), live at https://h3o.de/demo - a large app
+  (AGPL), framed by a page of its own site; its `web/build.sh` builds a page to publish only from a public release.
+
 ## Browsers
 
 Tested: Chromium (headless, by the checks above). Not yet tested by hand: Firefox, Safari, a GPU-backed Chrome.
