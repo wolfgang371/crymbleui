@@ -217,7 +217,7 @@ enum CachePolicy
 end
 ```
 
-In practice, `Dynamic` is the default for all widgets. `Static` is currently unused by any widget. `Never` is declared by the two widgets that must regenerate every frame: `CursorOverlayWidget` (the cursor highlight band in `VirtualMatrix`) and `SimpleGhostWidget` (the drag-ghost preview). All other widgets inherit `Dynamic`.
+In practice, `Dynamic` is the default for all widgets. `Static` is currently unused by any widget. `Never` is declared by the widgets that must regenerate every frame: `CursorOverlayWidget` (the cursor highlight band in `VirtualMatrix`) and the drag ghosts, `GhostWidget` (the default, with its label) and `SimpleGhostWidget` (a custom preview's). All other widgets inherit `Dynamic`.
 
 ### Cache Invalidation Rules
 
@@ -824,7 +824,7 @@ The primitive-based pipeline is fully in place. The durable shape it settled int
 
 - **DrawPrimitive infrastructure**: a `DrawPrimitive` base with concrete structs (`FillRect`, `DrawText`, …) and the `PrimitiveBuilder` DSL mixin. Every widget implements `to_primitives(bounds)`; the old `render(context)`/`PaintContext` path is gone.
 - **Backend-only renderer**: `SFMLRenderer` executes primitives and knows nothing about widgets.
-- **Cache policies**: a `CachePolicy` enum (`Never`/`Dynamic`/`Static`) on `Widget`, with `Dynamic` the default. `Never` is declared by the two widgets that must regenerate every frame: `CursorOverlayWidget` (cursor highlight bands in `VirtualMatrix`) and `SimpleGhostWidget` (drag-ghost preview). `Static` is currently unused by any widget. All other widgets inherit `Dynamic`. There is no ad-hoc per-widget cache-skipping (`is_a?(Popup)` checks) — policy plus the version-keyed node decide everything.
+- **Cache policies**: a `CachePolicy` enum (`Never`/`Dynamic`/`Static`) on `Widget`, with `Dynamic` the default. `Never` is declared by the widgets that must regenerate every frame: `CursorOverlayWidget` (cursor highlight bands in `VirtualMatrix`) and the drag ghosts, `GhostWidget` and `SimpleGhostWidget`. `Static` is currently unused by any widget. All other widgets inherit `Dynamic`. There is no ad-hoc per-widget cache-skipping (`is_a?(Popup)` checks) — policy plus the version-keyed node decide everything.
 
 **Optional optimizations not all enabled by default**: texture caching for expensive widgets, dirty-rectangle tracking, batched primitive rendering, GPU acceleration via alternate backends.
 

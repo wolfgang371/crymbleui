@@ -11,18 +11,34 @@ module CrymbleUI
   # see-through comes from the ghost layer's opacity (GHOST_OPACITY), never the fill alpha:
   # a semi-transparent fill on the transparent-black RT layer would premultiply over black
   # and darken to muddy grey (Theme.current.drag_ghost is opaque, so this holds).
+  #
+  # Its label is the payload's display_text - which can be longer than the source's own text - drawn at the font scale
+  # the source shows its text at (DragManager passes its first Text's), centred, and always wholly inside: the ghost
+  # is the source + 12, widened and heightened to the label + LABEL_PADDING around it where the label needs more.
   class GhostWidget < Widget
     include PrimitiveBuilder
 
     # Border = the themed fill darkened; 0.3 -> 70% HSV value (Color#darken(a) scales value by 1-a).
     BORDER_DARKEN = 0.3
 
-    @width : Float64
-    @height : Float64
-    @display_text : String?
+    # Room around the label, each side
+    LABEL_PADDING = 6.0
 
-    def initialize(@width : Float64, @height : Float64, @display_text : String? = nil)
+    getter size : Size
+    @display_text : String?
+    @label_size : Size # the label's box: its measured width x its block's ink extent
+
+    # Measured once: the ghost keeps its size and its label's place for the whole drag.
+    def initialize(source : Size, @display_text : String?, @font_scale : Int32)
       super(id: nil)
+      font_size = FontSizing.calculate_size(@font_scale)
+      @label_size = if text = @display_text
+                      Size.new(Widget.measure_text(text, font_size).width, TextLines.block_extent(TextLines.count(text), font_size))
+                    else
+                      Size.new(0.0, 0.0)
+                    end
+      @size = Size.new({source.width + 12.0, @label_size.width + 2 * LABEL_PADDING}.max,
+        {source.height + 12.0, @label_size.height + 2 * LABEL_PADDING}.max)
     end
 
     # Re-rendered every frame (the drag position drives it, not the reactive system) — same as
@@ -32,11 +48,11 @@ module CrymbleUI
     end
 
     def measure(constraints : BoxConstraints) : Size
-      Size.new(@width, @height)
+      @size
     end
 
     def perform_layout(constraints : BoxConstraints, position : Vec2)
-      @bounds = Rect.new(position, Size.new(@width, @height))
+      @bounds = Rect.new(position, @size)
     end
 
     def to_primitives(bounds : Rect) : Array(DrawPrimitive)
@@ -48,9 +64,10 @@ module CrymbleUI
         # Border: a darker shade of the same themed fill
         draw_rect(Rect.new(0, 0, bounds.width, bounds.height), fill.darken(BORDER_DARKEN), 2.0)
 
-        # Display text if provided (themed so it stays readable on the themed fill)
+        # The label, centred (themed so it stays readable on the themed fill)
         if text = @display_text
-          draw_text(text, Vec2.new(5, 5), Theme.current.text_default, 0)
+          at = Vec2.new((bounds.width - @label_size.width) / 2.0, (bounds.height - @label_size.height) / 2.0)
+          draw_text(text, at, Theme.current.text_default, @font_scale)
         end
       end
     end
@@ -355,28 +372,27 @@ module CrymbleUI
         source.as(Draggable).create_ghost_preview
       end
 
-      if custom_preview
-        ghost_w = bounds.width
-        ghost_h = bounds.height
-      else
-        # Default ghost has extra padding for text
-        ghost_w = bounds.width + 12.0
-        ghost_h = bounds.height + 12.0
-      end
+      # A custom preview takes the source's size; the default ghost answers its own (room for its label), labelling
+      # itself as the source shows its text
+      ghost_widget, ghost_size = if custom_preview
+                                   {custom_preview, bounds.size}
+                                 else
+                                   scale = source.find_all(&.is_a?(Text)).first?.try(&.as(Text).font_scale) || 0
+                                   ghost = GhostWidget.new(bounds.size, @state.data.try(&.display_text).presence, scale)
+                                   {ghost, ghost.size}
+                                 end
 
       # Create overlay layer for ghost (transparent background)
       layer = Layer.new(
         "drag_ghost",
-        Rect.new(ghost_x, ghost_y, ghost_w, ghost_h),
+        Rect.new(Vec2.new(ghost_x, ghost_y), ghost_size),
         z_index: GHOST_Z_INDEX,
         background_color: Color.new(0, 0, 0, 0)
       )
       layer.opacity = GHOST_OPACITY
 
-      # Use custom preview or default GhostWidget
-      ghost_widget = custom_preview || GhostWidget.new(ghost_w, ghost_h, @state.data.try(&.display_text))
       ghost_widget.perform_layout(
-        BoxConstraints.tight(Size.new(ghost_w, ghost_h)),
+        BoxConstraints.tight(ghost_size),
         Vec2.new(ghost_x, ghost_y)
       )
 

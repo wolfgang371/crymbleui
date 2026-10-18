@@ -242,11 +242,11 @@ class ShowcaseDemo < CrymbleUI::App
           hstack(spacing: 10.0) do
             draggable(data: CrymbleUI::TextDragData.new("Text A")) do
               hstack(padding: 6.0, background_color: CrymbleUI::Color.new(100, 150, 200, 255)) do
-                text("Text", color: CrymbleUI::Color.new(255, 255, 255, 255), font_scale: -1)
+                text("Text A", color: CrymbleUI::Color.new(255, 255, 255, 255), font_scale: -1)
               end
             end
 
-            draggable(data: CrymbleUI::WidgetDragData.new(CrymbleUI::Button.new("W"))) do
+            draggable(data: CrymbleUI::WidgetDragData.new(CrymbleUI::Button.new("Widget"))) do
               hstack(padding: 6.0, background_color: CrymbleUI::Color.new(200, 150, 100, 255)) do
                 text("Widget", color: CrymbleUI::Color.new(50, 50, 50, 255), font_scale: -1)
               end
