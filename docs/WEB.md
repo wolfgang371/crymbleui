@@ -157,8 +157,9 @@ Node 18 or newer; playwright-core (pinned in `tools/wasm/package.json`, `npm ci`
 ## Browsers
 
 Tested: Chromium (headless, by the checks above). Not yet tested by hand: Firefox, Safari, a GPU-backed Chrome.
-The README's "Try it live" link stays off (`LIVE_DEMO` in scripts/generate-readme.cr) until the showcase is
-published and a manual Firefox and Safari pass is recorded here.
+The showcase is live at https://wolfgang371.github.io/crymbleui/ (since v1.9.0) and the README links it, naming the
+browsers it is tested in (`LIVE_DEMO_TESTED` in scripts/generate-readme.cr) - widen that once a manual Firefox and
+Safari pass is recorded here.
 
 ## Publishing the showcase
 
@@ -166,5 +167,5 @@ published and a manual Firefox and Safari pass is recorded here.
 release push, `scripts/publish.sh` runs `.publish.after-push.sh`, which asks, builds the site from the release
 commit (its page names the release tag) and force-pushes it as a single orphan commit to the public remote's
 `gh-pages` branch - the page always shows the latest release. Once, by hand: GitHub > Settings > Pages > serve the
-`gh-pages` branch. Then try the URL in Chrome, Firefox and Safari, record the result under "Browsers", and set
-`LIVE_DEMO = true` in scripts/generate-readme.cr so the next release's README links it.
+`gh-pages` branch. A machine that publishes needs the toolchain (`bin/crymble-web setup`); without it the hook
+says so and leaves `gh-pages` as it was - run `.publish.after-push.sh <tag>` by hand after the setup.

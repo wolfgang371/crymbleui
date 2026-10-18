@@ -6,7 +6,7 @@
 [![Crystal](https://img.shields.io/badge/made%20with-Crystal-black?logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version 1.9.0**
+**Version 1.9.1**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -112,7 +112,9 @@ crystal run src/hello.cr
 
 ## Examples
 
-![Screenshot](screenshots/showcase.png)
+[![Screenshot](screenshots/showcase.png)](https://wolfgang371.github.io/crymbleui/)
+
+[Try the showcase in your desktop browser](https://wolfgang371.github.io/crymbleui/) (mouse and keyboard; tested in Chromium; ~1.5 MB download)
 
 and many more in examples/
 ## In a browser (since crymble-ui v1.9.0)
