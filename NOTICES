@@ -1,0 +1,11 @@
+Third-party software in this build of showcase_demo
+
+Crystal standard library 1.22.0, with crymble-ui's wasm patch - Apache License 2.0 (https://github.com/crystal-lang/crystal)
+crymble-ui - MIT License
+Boehm-Demers-Weiser garbage collector 8.2.8 - MIT-style license (https://github.com/ivmai/bdwgc)
+wasi-libc (wasi-sdk 25) - Apache-2.0 WITH LLVM-exception / MIT
+browser_wasi_shim - MIT OR Apache-2.0 (vendor/browser_wasi_shim/LICENSE-*)
+Google Cousine-Regular font (version 1.21, modified) - Apache License 2.0;
+  one glyph (U+21BA) from DejaVu Sans Mono - Bitstream Vera license
+
+crymble-web build: release - for publication
