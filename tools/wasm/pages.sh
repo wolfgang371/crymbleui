@@ -1,10 +1,11 @@
 #!/bin/bash
-# The showcase as a GitHub Pages site: builds showcase_demo for the web and writes the site to bin/pages/ (the page,
-# the module, its scripts, NOTICES, and .nojekyll so Pages serves the files as they are). Publishing is a separate,
-# deliberate step - docs/WEB.md ("Publishing the showcase") says how. Run from crymble-ui's root.
+# The showcase as a GitHub Pages site: builds showcase_demo for the web - a release build, LLVM-optimized as a page to
+# publish is - and writes the site to bin/pages/ (the page, the module, its scripts, NOTICES, and .nojekyll so Pages
+# serves the files as they are). Publishing is a separate, deliberate step - docs/WEB.md ("Publishing the showcase")
+# says how. Run from crymble-ui's root.
 set -euo pipefail
 
-bin/crymble-web build showcase_demo
+bin/crymble-web build showcase_demo --release
 rm -rf bin/pages
 cp -r bin/web/showcase_demo bin/pages
 touch bin/pages/.nojekyll

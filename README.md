@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-try%20it%20in%20your%20browser-2ea44f)](https://wolfgang371.github.io/crymbleui/)
 
-**Version 1.10.0**
+**Version 1.11.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -2592,8 +2592,10 @@ bin/crymble-web build src/hello.cr   # bin/web/hello/: index.html, hello.wasm, t
 bin/crymble-web serve hello          # try it: http://127.0.0.1:8765/
 ```
 
-`bin/crymble-web build` without arguments builds every target in your `shard.yml`. The folder `bin/web/<target>/`
-is the whole site: copy it to any static web server. Visitors need a current desktop browser (Chrome, Edge,
+`bin/crymble-web build` without arguments builds every target in your `shard.yml`; it is quick to compile (-O0), for
+trying things out. A site to publish is built with `--release` (LLVM-optimized: several times faster in the browser,
+about 40% smaller, about 1.7 times longer to compile). The folder `bin/web/<target>/` is the whole site: copy it to
+any static web server. Visitors need a current desktop browser (Chrome, Edge,
 Firefox or Safari - WebAssembly exception handling; tested in Chromium and Firefox so far) with a mouse and a keyboard;
 files the app saves live in the tab and are gone when it closes. [docs/WEB.md](docs/WEB.md) explains the architecture, the page an app can bring
 along, the differences to the desktop, and how the result is checked.

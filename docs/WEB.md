@@ -47,7 +47,13 @@ bin/crymble-web build [TARGET...|FILE.cr]   # bin/web/<target>/ - all shard.yml 
 bin/crymble-web build ... --release         # a release build: LLVM-optimized, flag?(:release) set
 bin/crymble-web build ... --local           # marks the page "local build - not for publication"
 bin/crymble-web serve [TARGET] [PORT]       # http://127.0.0.1:8765/
+bin/crymble-web publishable TARGET|DIR...   # fails unless each site is a release build without --local
 ```
+
+Only a release build is for publication. Any other - the quick -O0 default, or `--local` - says so in its page's
+bar ("-O0 build - not for publication") and in a line of `NOTICES`; `publishable` reads that line, and every script
+that publishes a page calls it first: the showcase's (`.publish.after-push.sh`), Minesweeper's, Embrace's
+`web/build.sh`.
 
 `bin/web/<target>/` is the whole site: `index.html`, `<target>.wasm`, `crymble-web.js`, `crymble.js`, `vendor/`
 (browser_wasi_shim), `NOTICES`. Serve it from any static web server (the module is `application/wasm`).

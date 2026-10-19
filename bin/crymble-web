@@ -8,12 +8,16 @@
 #                                               bin/web/<target>/ for shard.yml targets (all when none named);
 #                                               a FILE.cr builds that main file as target FILE
 #   bin/crymble-web serve [TARGET] [PORT]       serve bin/web/<target>/ on http://127.0.0.1:PORT (default 8765)
+#   bin/crymble-web publishable TARGET|DIR...   fails unless each built site (bin/web/<target>/, or DIR) is for
+#                                               publication: a --release build without --local
 #
 # The output is a folder of static files: index.html (the app's own web/index.html if it has one, else a generic
-# page), crymble-web.js + crymble.js + vendor/ (the page's side), <target>.wasm, NOTICES. --local marks the page
-# as a local build (for trying it out; not a publication). --release is a release build: Crystal's --release (LLVM's
-# optimizer, one module) with flag?(:release) set - what an app shows or skips in a release build; without it the
-# build is -O0, quick to compile. Every build is optimized after linking too, by wasm-opt.
+# page), crymble-web.js + crymble.js + vendor/ (the page's side), <target>.wasm, NOTICES. --release is a release
+# build: Crystal's --release (LLVM's optimizer, one module) with flag?(:release) set - what an app shows or skips in a
+# release build; without it the build is -O0, quick to compile. Every build is optimized after linking too, by
+# wasm-opt. Only a release build is for publication: any other (-O0, or --local - a build to try out) says on its
+# page that it is not, and a line of NOTICES says which it is - what `publishable` reads, so a publishing script
+# cannot ship a trial build.
 set -euo pipefail
 
 die() { echo "crymble-web: $*" >&2; exit 1; }
@@ -29,6 +33,9 @@ else
 fi
 HOME_DIR=${CRYMBLE_WASM_HOME:-$HOME/.cache/crymble-wasm}
 SDK=$HOME_DIR/wasi-sdk
+
+# NOTICES' line for a build to publish (`publishable` looks for it; any other build has its own line instead)
+FOR_PUBLICATION="crymble-web build: release - for publication"
 
 toolchain_ready() { [ -x "$HOME_DIR/crystal/.build/crystal" ] && [ -x "$SDK/bin/wasm-ld" ] && [ -f "$HOME_DIR/lib/libgc.a" ]; }
 
@@ -101,7 +108,12 @@ build_target() {
   cp "$CUI/web/crymble-web.js" "$CUI/web/crymble.js" "$out/"
   cp -r "$CUI/web/vendor" "$out/"
 
-  # NOTICES: everything this folder ships or the module links
+  # What keeps the build from publication, if anything
+  local trial=""
+  [ ${#release[@]} -gt 0 ] || trial="-O0"
+  [ "$local_build" = 1 ] && trial="local${trial:+ $trial}"
+
+  # NOTICES: everything this folder ships or the module links, and what the build is
   {
     echo "Third-party software in this build of $target"
     echo
@@ -133,6 +145,12 @@ build_target() {
       [ -n "$licence" ] || die "$target: shard $shard declares no license (lib/$shard/shard.yml)"
       echo "$shard - $licence"
     done
+    echo
+    if [ -n "$trial" ]; then
+      echo "crymble-web build: $trial build - not for publication"
+    else
+      echo "$FOR_PUBLICATION"
+    fi
   } > "$out/NOTICES"
 
   # The page: the app's own web/index.html, else a generic one - placeholders filled in either
@@ -144,7 +162,7 @@ build_target() {
   cui_version=$(awk '$1 == "version:" {print $2; exit}' "$CUI/shard.yml")
   cui_commit=$(revision "$CUI")
   built=$(date -u +%Y-%m-%d)
-  [ "$local_build" = 1 ] && banner="local build - not for publication"
+  [ -n "$trial" ] && banner="$trial build - not for publication"
   # the app and the crymble-ui it was built with (just one when the app is crymble-ui's own example)
   local versions="$name $version ($commit)"
   [ "$CUI" = "$PWD" ] || versions="$versions, crymble-ui $cui_version ($cui_commit)"
@@ -212,10 +230,22 @@ case "$cmd" in
     echo "crymble-web: http://127.0.0.1:$port/ (Ctrl+C stops)"
     exec python3 -m http.server "$port" --bind 127.0.0.1 -d "bin/web/$target"
     ;;
+  publishable)
+    [ $# -gt 0 ] || die "publishable: name the sites (TARGET or DIR)"
+    for site in "$@"; do
+      dir=$site
+      [ -d "$dir" ] || dir=bin/web/$site
+      [ -f "$dir/NOTICES" ] || die "$site: no $dir/NOTICES - not a crymble-web site"
+      # crymble-web's own line; an app may add its lines after it (Embrace's web/build.sh does)
+      grep -Fqx -- "$FOR_PUBLICATION" "$dir/NOTICES" && continue
+      what=$(grep -m1 '^crymble-web build: ' "$dir/NOTICES" || echo "built by a crymble-web before 1.11")
+      die "$site is not for publication ($what) - build it with --release, without --local"
+    done
+    ;;
   "" | -h | --help | help)
     usage
     ;;
   *)
-    die "unknown command '$cmd' (setup, build, serve)"
+    die "unknown command '$cmd' (setup, build, serve, publishable)"
     ;;
 esac
