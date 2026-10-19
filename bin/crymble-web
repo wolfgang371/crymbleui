@@ -11,9 +11,9 @@
 #
 # The output is a folder of static files: index.html (the app's own web/index.html if it has one, else a generic
 # page), crymble-web.js + crymble.js + vendor/ (the page's side), <target>.wasm, NOTICES. --local marks the page
-# as a local build (for trying it out; not a publication). --release compiles with flag?(:release) set - what an
-# app shows or skips in a release build - but not with LLVM's optimization (LLVM 18 emits invalid wasm exception
-# handling when it optimizes); every build is optimized after linking, by wasm-opt.
+# as a local build (for trying it out; not a publication). --release is a release build: Crystal's --release (LLVM's
+# optimizer, one module) with flag?(:release) set - what an app shows or skips in a release build; without it the
+# build is -O0, quick to compile. Every build is optimized after linking too, by wasm-opt.
 set -euo pipefail
 
 die() { echo "crymble-web: $*" >&2; exit 1; }
@@ -64,7 +64,7 @@ build_target() {
   rm -rf "$out"
   mkdir -p "$out"
 
-  # Cross-compile (-O0: LLVM 18 cannot optimize wasm exception handling; wasm-opt does it after the link). The
+  # Cross-compile (optimized by LLVM only for --release; the patch's stub step keeps that valid wasm). The
   # compiler asks pkg-config at compile time and for link flags - the shim answers for the toolchain's libraries
   # only, so nothing of the host's -dev packages leaks into the wasm program.
   local cross
@@ -93,6 +93,7 @@ build_target() {
     --export=_initialize --export=crymble_init --export=crymble_tick --export=crymble_gc --export=crymble_heap_mb \
     --export=crymble_font --export=crymble_shortcuts --export=crymble_shortcuts_revision --export=malloc --export=free \
     || die "$target: the link failed"
+  # Never --traps-never-happen / --ignore-implicit-traps: the compiler's stubs for mismatched calls are traps.
   "$HOME_DIR/binaryen/bin/wasm-opt" -O2 --strip-debug --all-features "$work/linked.wasm" -o "$out/$target.wasm" \
     || die "$target: wasm-opt failed"
 
@@ -170,6 +171,7 @@ case "$cmd" in
     ;;
   build)
     toolchain_ready || die "no toolchain yet - run 'bin/crymble-web setup' first (once; a few minutes, ~1 GB)"
+    "$CUI/tools/wasm/setup.sh" --check
     local_build=0
     release=()
     names=()
@@ -177,7 +179,7 @@ case "$cmd" in
     for a in "$@"; do
       case "$a" in
         --local) local_build=1 ;;
-        --release) release=(-Drelease) ;;
+        --release) release=(--release -Drelease) ;;
         -*) die "unknown option $a" ;;
         *.cr) files+=("$a") ;;
         *) names+=("$a") ;;

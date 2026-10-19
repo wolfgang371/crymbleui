@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-try%20it%20in%20your%20browser-2ea44f)](https://wolfgang371.github.io/crymbleui/)
 
-**Version 1.9.4**
+**Version 1.10.0**
 
 A nice and fast GUI framework for Crystal.
 Declarative and reactive.
@@ -17,7 +17,7 @@ Its name is a pun of Crystal and nimble :smiley:
 Desktop apps with an SFML 3.0 backend, for Linux and Windows (Windows needed slight patching of SFML, included
 here) - and the same app, unchanged, as a web page running in the browser (WebAssembly; see [Building for the browser](#building-for-the-browser)).
 
-**Try it in your browser** - nothing to install (a desktop browser with mouse and keyboard; tested in Chromium):
+**Try it in your browser** - nothing to install (a desktop browser with mouse and keyboard; tested in Chromium and Firefox):
 
 - [the showcase](https://wolfgang371.github.io/crymbleui/) - this repository's widgets, scrolling, layers and drag and drop
 - [Minesweeper](https://wolfgang371.github.io/minesweeper/) - a small app of its own, crymble-ui as a shard; [its repository](https://github.com/wolfgang371/minesweeper) is the one to start from
@@ -122,7 +122,7 @@ crystal run src/hello.cr
 
 [![Screenshot](screenshots/showcase.png)](https://wolfgang371.github.io/crymbleui/)
 
-[Try the showcase in your desktop browser](https://wolfgang371.github.io/crymbleui/) (mouse and keyboard; tested in Chromium; ~1.5 MB download)
+[Try the showcase in your desktop browser](https://wolfgang371.github.io/crymbleui/) (mouse and keyboard; tested in Chromium and Firefox; ~1.5 MB download)
 
 and many more in examples/
 
@@ -2594,7 +2594,7 @@ bin/crymble-web serve hello          # try it: http://127.0.0.1:8765/
 
 `bin/crymble-web build` without arguments builds every target in your `shard.yml`. The folder `bin/web/<target>/`
 is the whole site: copy it to any static web server. Visitors need a current desktop browser (Chrome, Edge,
-Firefox or Safari - WebAssembly exception handling; tested in Chromium so far) with a mouse and a keyboard;
+Firefox or Safari - WebAssembly exception handling; tested in Chromium and Firefox so far) with a mouse and a keyboard;
 files the app saves live in the tab and are gone when it closes. [docs/WEB.md](docs/WEB.md) explains the architecture, the page an app can bring
 along, the differences to the desktop, and how the result is checked.
 ## Documentation

@@ -44,7 +44,7 @@ model.
 ```bash
 bin/crymble-web setup                       # once (Linux x86_64)
 bin/crymble-web build [TARGET...|FILE.cr]   # bin/web/<target>/ - all shard.yml targets when none is named
-bin/crymble-web build ... --release         # with flag?(:release) set, as a release build of the app is
+bin/crymble-web build ... --release         # a release build: LLVM-optimized, flag?(:release) set
 bin/crymble-web build ... --local           # marks the page "local build - not for publication"
 bin/crymble-web serve [TARGET] [PORT]       # http://127.0.0.1:8765/
 ```
@@ -56,22 +56,46 @@ bin/crymble-web serve [TARGET] [PORT]       # http://127.0.0.1:8765/
 3 minutes from an empty cache): wasi-sdk 25 (clang, wasm-ld, wasi-libc), Binaryen 123 (wasm-opt), Crystal 1.22.0
 with `tools/wasm/crystal-1.22.0-wasm.patch` built against the host's LLVM 18, and the C libraries Crystal links,
 built for wasm32: Boehm GC 8.2.8, zlib 1.3.1, libxml2 2.13.8, PCRE2 10.42. Every download is pinned by SHA-256;
-each step is skipped while what it was built from is unchanged. The host needs LLVM 18 development files
+each step is skipped while what it was built from is unchanged; `setup.sh --check` (which `build`, `spec.sh` and
+an app's own checks call first) refuses a toolchain built from anything else, naming the stale steps. Apps whose
+crymble-ui versions carry different patches rebuild a shared toolchain in turn - give each its own
+`CRYMBLE_WASM_HOME` to avoid it. The host needs LLVM 18 development files
 (`llvm-config-18`), a C++ compiler, cmake, git, curl, pkg-config, python3 (the build fills the page, `serve` serves it), the development files of libpcre2-8, libffi and
 zlib, and a Crystal >= 1.20 to build the compiler with.
 
 **The patch** (its header lists each change and why): wasm exceptions (stock 1.22 exits on `raise`), struct
 returns from C, Boehm as wasm32's collector (stock: no collection at all) with its static data registered as roots,
-finalizer callbacks that return void, and three WASI file-system fixes. Boehm is built with `ALL_INTERIOR_POINTERS`
+finalizer callbacks that return void, three WASI file-system fixes, what an LLVM-optimized build needs (below),
+and layout numbers computed from complete types. Stock Crystal fixes `sizeof`, `alignof`, `instance_sizeof`,
+`instance_alignof` and `offsetof` while it types the program, through a typer that caches each layout: a field typed
+by a generic module whose including struct does not exist yet is laid out as a pointer, so `dup` copies too few bytes
+(Embrace's reference cells lost their link to their table - the tab crashed on Enter). The patch folds them after
+typing, and inside a type argument (which needs the number while typing) through a fresh typer; every folded number
+is checked against the final layout before and after codegen, a difference a compile error naming the expression.
+Native builds use the stock compiler and stay exposed until upstream Crystal fixes it (an issue is to be filed).
+Boehm is built with `ALL_INTERIOR_POINTERS`
 (an `Array#shift`ed buffer is reachable only through an interior pointer) and `ALWAYS_SMALL_CLEAR_STACK`.
 
-**Linking**: the compile runs `-O0` (LLVM 18 emits invalid wasm exception handling when it optimizes); wasm-opt
-`-O2` optimizes the linked module. So `--release` is the release FLAG only (`-Drelease`: what an app shows or skips
-in a release build, `flag?(:release)`), not Crystal's `--release`, which would also turn LLVM's optimizer on. The compiler asks pkg-config for library versions at compile time - a shim
+**Optimizing**: `--release` compiles with Crystal's `--release` (LLVM `-O3`, one module) and `-Drelease` (what an app
+shows or skips in a release build, `flag?(:release)`); a build without it is `-O0`, quick to compile. wasm-opt `-O2`
+optimizes every linked module. Two things in the patch make the optimized build valid wasm. `__crystal_raise` is
+never inlined: inlined into a rescue body, its `llvm.wasm.throw` would become an invoke, which LLVM forbids. And
+after the optimizer, a direct call whose type differs from its callee's with a struct or array parameter or return
+calls a stub whose body is `unreachable`: the optimizer makes such calls out of the branch of a proc call that never
+runs for the proc at hand (the closure-data branch on a plain function, or the other one on a closure's), and LLVM's
+WebAssembly backend - which adapts such calls without aggregates, and gives the ones it cannot adapt this very stub -
+emits invalid wasm with one. A call with fewer arguments would read a missing one natively too; one with more is
+harmless natively and traps here; neither runs for a proc Crystal builds. Never run wasm-opt with
+`--traps-never-happen` or `--ignore-implicit-traps`: the stubs are traps.
+
+**Linking**: the compiler asks pkg-config for library versions at compile time - a shim
 (`tools/wasm/shims/pkg-config`) answers with the toolchain's, so nothing of the host's `-dev` packages leaks in.
 An app whose `@[Link]` names a library the toolchain has no wasm build of fails to build, by name.
 
-**Size**: a crymble-ui app is about 3.5 MB of wasm, 1.4 MB gzipped.
+**Size and speed**: a crymble-ui app is about 2.1 MB of wasm, 0.8 MB gzipped, as a release (3.6 MB, 1.4 MB at
+`-O0`). Measured 2026-10-18 (headless, median of 5), release against `-O0`: crymble-ui's own frame work 2.6 to 5.9
+times faster (tutorial-22's scrolling, the soak's ticks), Embrace's domain specs 2.5 times; a release compile of
+Embrace takes 165 s against 92 s.
 
 ## The page
 
@@ -129,12 +153,21 @@ which answers per flavour. An app under a copyleft licence decides its own sourc
 `tools/wasm/check.sh` (from crymble-ui's root, after `source setup.sh`, with `DISPLAY` set), before a push that
 touches the web flavour (CREDO):
 
-1. `spec.sh` - the patch's suite, the web flavour's own spec and a garbage-collection soak, under Node's WASI:
-   exceptions, struct returns, the file-system fixes, the toolchain's library versions, a planted failure and
-   error the runner must report, the event round trip (crymble.js's event and key tables against crymble-ui's
+1. `spec.sh` - first `setup.sh --check` (and that it refuses a stale stamp), then the patch's suite, the web
+   flavour's own spec and a garbage-collection soak under Node's WASI, every part built twice - at `-O0` and as a
+   release - and each module validated and optimized by wasm-opt as builds ship: exceptions (re-raise, ensure on
+   return/break/next, raises in closures, `rescue A | B` and `else`, nested frames with union locals), struct
+   returns, a closure called with a union argument directly and in a rescue body (the release build must stub at
+   least one call and one invoke - else the optimizer no longer makes the mismatch these test), layout numbers
+   typed before a generic module's struct exists (`dup`, `sizeof` of a struct, `alignof`, `offsetof` of a struct,
+   a class and a tuple, abstract-struct and tuple fields, type arguments and a constant - which must stay a static
+   literal in the IR), a layout number fixed inside a type argument too early that must stop the build with the
+   check's error, the file-system fixes, the toolchain's library versions, a planted failure and error the runner
+   must report, the event round trip (crymble.js's event and key tables against crymble-ui's
    enums, every field of every event kind), the web `backend_notices`, and 2000 ticks with collections between
    them (heap flat, finalizers run, data intact).
-2. builds tutorial-22, tutorial-07, tutorial-24 and showcase_demo, unchanged.
+2. builds tutorial-22, tutorial-07, tutorial-24 and showcase_demo, unchanged - steps 2 to 4 run at `-O0` and then
+   with `--release`, what is published.
 3. `conformance.sh` - one program (`tools/wasm/conformance/conformance.cr`) in both flavours, each case read back
    and compared by `diff.mjs`; every RenderBackend drawing method has a case, enumerated by a macro. Its first
    file-system calls are a file dialog's (list a folder, stat each entry) - in the page those once made wasi-libc
@@ -145,7 +178,8 @@ touches the web flavour (CREDO):
    with collections (heap and live canvases flat, canvases made and freed), typing, AltGr, Ctrl+C to the system
    clipboard, an external paste, keys claimed or left to the browser, the leave guard, a viewport resize, a late
    image, the shortcut note, the source link, and the unsupported-browser messages.
-5. `readme_check.sh` - the README's commands in a scratch app made of the README's own stanza and Quick Start.
+5. `readme_check.sh` - the README's commands in a scratch app made of the README's own stanza and Quick Start
+   (the README builds without `--release`: `-O0`).
 
 Each check was shown failing with its piece broken. The stock compiler type-checks the web flavour
 (`crystal build --no-codegen --cross-compile --target wasm32-unknown-wasi -Dwithout_mt -Dwithout_main`), so CI
@@ -166,10 +200,11 @@ Node 18 or newer; playwright-core (pinned in `tools/wasm/package.json`, `npm ci`
 
 ## Browsers
 
-Tested: Chromium (headless, by the checks above). Not yet tested by hand: Firefox, Safari, a GPU-backed Chrome.
+Tested: Chromium (headless, by the checks above); Firefox by hand (2026-10). Not yet tested: Safari, a GPU-backed
+Chrome.
 The showcase is live at https://wolfgang371.github.io/crymbleui/ (since v1.9.0) and the README links it, naming the
-browsers it is tested in (`LIVE_DEMO_TESTED` in scripts/generate-readme.cr) - widen that once a manual Firefox and
-Safari pass is recorded here.
+browsers it is tested in (`LIVE_DEMO_TESTED` in scripts/generate-readme.cr) - widen that as each manual pass is
+recorded here.
 
 ## Publishing the showcase
 

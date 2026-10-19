@@ -4,7 +4,7 @@
 #
 # Into ${CRYMBLE_WASM_HOME:-$HOME/.cache/crymble-wasm}:
 #   wasi-sdk/      clang, wasm-ld and the wasm32-wasi sysroot (libc, crt1-reactor.o, pthread/dl stubs)
-#   binaryen/      wasm-opt (LLVM 18 cannot optimize wasm with exceptions; the build optimizes after linking)
+#   binaryen/      wasm-opt (optimizes every linked module)
 #   crystal/       Crystal 1.22.0 + crystal-1.22.0-wasm.patch, built against the system's LLVM 18
 #   lib/           the C libraries Crystal's standard library links, built for wasm32: libgc (Boehm), libz,
 #                  libxml2 (with the accessor shim inside), libpcre2-8; cpp_tag.o
@@ -17,7 +17,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOME_DIR=${CRYMBLE_WASM_HOME:-$HOME/.cache/crymble-wasm}
 STAMPS=$HOME_DIR/.stamps
 DOWNLOADS=$HOME_DIR/downloads
-mkdir -p "$STAMPS" "$DOWNLOADS" "$HOME_DIR/lib"
 
 WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
 WASI_SDK_SHA=52640dde13599bf127a95499e61d6d640256119456d1af8897ab6725bcf3d89c
@@ -44,6 +43,27 @@ LLVM_CONFIG=$(command -v llvm-config-18 || true)
 [ -n "$LLVM_CONFIG" ] || [ ! -x /usr/lib/llvm-18/bin/llvm-config ] || LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config
 [ -n "$LLVM_CONFIG" ] || die "needs LLVM 18 development files (llvm-config-18; e.g. the llvm-18-dev package)"
 case "$("$LLVM_CONFIG" --version)" in 18.*) ;; *) die "$LLVM_CONFIG is not LLVM 18";; esac
+
+# --- what each step is built from: its stamp's key -----------------------------------------------------------
+XML_KEY="$LIBXML2_SHA $(sha256sum "$HERE/shims/xmlshim.c" "$HERE/shims/dupstub.h" | cut -c1-16 | tr -d '\n')"
+GC_KEY="$BDWGC_SHA $(sha256sum "$HERE"/shims/gcroots.c "$HERE"/shims/setjmp.h "$HERE"/shims/emscripten/stack.h | cut -c1-16 | tr -d '\n')"
+TAG_KEY=$(sha256sum "$HERE/shims/cpp_tag.s" | cut -c1-16)
+CRYSTAL_KEY="$CRYSTAL_COMMIT $(sha256sum "$PATCH" | cut -c1-16) $("$LLVM_CONFIG" --version)"
+
+# done_with KEY NAME: true if step NAME was completed from KEY
+done_with() { [ -f "$STAMPS/$2" ] && [ "$(cat "$STAMPS/$2")" = "$1" ]; }
+
+# setup.sh --check: exit 0 if every step is built from what this crymble-ui needs, else name the stale ones (every
+# step below is listed here)
+if [ "${1:-}" = --check ]; then
+  stale=()
+  for step in "wasi-sdk $WASI_SDK_SHA" "binaryen $BINARYEN_SHA" "pcre2 $WASM_LIBS_SHA" "zlib $ZLIB_SHA" \
+    "libxml2 $XML_KEY" "bdwgc $GC_KEY" "cpp_tag $TAG_KEY" "crystal $CRYSTAL_KEY"; do
+    done_with "${step#* }" "${step%% *}" || stale+=("${step%% *}")
+  done
+  [ ${#stale[@]} = 0 ] && exit 0
+  die "the toolchain in $HOME_DIR is not what this crymble-ui builds with (${stale[*]}) - run bin/crymble-web setup"
+fi
 for tool in g++ cmake git curl crystal pkg-config; do
   command -v "$tool" > /dev/null || die "needs $tool"
 done
@@ -51,9 +71,9 @@ for pc in libpcre2-8 libffi zlib; do
   pkg-config --exists "$pc" || die "needs the development files of $pc (e.g. libpcre2-dev, libffi-dev, zlib1g-dev)"
 done
 
+mkdir -p "$STAMPS" "$DOWNLOADS" "$HOME_DIR/lib"
+
 # --- helpers -------------------------------------------------------------------------------------------------
-# done_with KEY NAME: true if step NAME was completed from KEY
-done_with() { [ -f "$STAMPS/$2" ] && [ "$(cat "$STAMPS/$2")" = "$1" ]; }
 stamp() { echo "$1" > "$STAMPS/$2"; }
 
 # fetch URL SHA256 -> prints the verified local path
@@ -102,7 +122,6 @@ if ! done_with "$ZLIB_SHA" zlib; then
     rm -f "$HOME_DIR/lib/libz.a" && "$SDK/bin/llvm-ar" rcs "$HOME_DIR/lib/libz.a" *.o)
   stamp "$ZLIB_SHA" zlib
 fi
-XML_KEY="$LIBXML2_SHA $(sha256sum "$HERE/shims/xmlshim.c" "$HERE/shims/dupstub.h" | cut -c1-16 | tr -d '\n')"
 if ! done_with "$XML_KEY" libxml2; then
   say "libxml2 2.13.8"
   rm -rf "$BUILD/libxml2" && mkdir -p "$BUILD/libxml2"
@@ -119,7 +138,6 @@ if ! done_with "$XML_KEY" libxml2; then
   "$SDK/bin/llvm-ar" rs "$HOME_DIR/lib/libxml2.a" "$BUILD/xmlshim.o"
   stamp "$XML_KEY" libxml2
 fi
-GC_KEY="$BDWGC_SHA $(sha256sum "$HERE"/shims/gcroots.c "$HERE"/shims/setjmp.h "$HERE"/shims/emscripten/stack.h | cut -c1-16 | tr -d '\n')"
 if ! done_with "$GC_KEY" bdwgc; then
   say "Boehm GC 8.2.8"
   rm -rf "$BUILD/bdwgc" && mkdir -p "$BUILD/bdwgc"
@@ -135,14 +153,12 @@ if ! done_with "$GC_KEY" bdwgc; then
   rm -f "$HOME_DIR/lib/libgc.a" && "$SDK/bin/llvm-ar" rcs "$HOME_DIR/lib/libgc.a" "$BUILD/gc.o" "$BUILD/gcroots.o"
   stamp "$GC_KEY" bdwgc
 fi
-TAG_KEY=$(sha256sum "$HERE/shims/cpp_tag.s" | cut -c1-16)
 if ! done_with "$TAG_KEY" cpp_tag; then
   "$SDK/bin/clang" --target=wasm32-wasi -mexception-handling -c "$HERE/shims/cpp_tag.s" -o "$HOME_DIR/lib/cpp_tag.o"
   stamp "$TAG_KEY" cpp_tag
 fi
 
 # --- Crystal 1.22.0 + the patch ------------------------------------------------------------------------------
-CRYSTAL_KEY="$CRYSTAL_COMMIT $(sha256sum "$PATCH" | cut -c1-16) $("$LLVM_CONFIG" --version)"
 if ! done_with "$CRYSTAL_KEY" crystal; then
   say "Crystal $CRYSTAL_TAG + the wasm patch (a few minutes)"
   rm -rf "$HOME_DIR/crystal"

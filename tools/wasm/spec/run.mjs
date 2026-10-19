@@ -23,8 +23,11 @@ if (mode === 'command') {
   x.soak_init();
   const heap = [];
   let bad = 0;
+  let tickMs = 0; // the app's own work only - the collections between ticks are Boehm's, the same at every level
   for (let t = 0; t < 2000; t++) {
+    const t0 = performance.now();
     x.soak_tick(t);
+    tickMs += performance.now() - t0;
     x.soak_gc();
     if ((t + 1) % 200 === 0) {
       heap.push(x.soak_heap_kb());
@@ -34,6 +37,7 @@ if (mode === 'command') {
   const finalized = x.soak_finalized();
   const growth = Math.max(...heap.slice(1)) - Math.min(...heap.slice(1));
   console.log(`soak: heap KB per 200 ticks ${heap.join(' ')}; finalizers run ${finalized}; rows check ${bad || 'ok'}`);
+  console.log(`soak: 2000 ticks in ${tickMs.toFixed(1)} ms`);
   const ok = bad === 0 && finalized > 0 && growth <= 2048;
   console.log(ok ? 'soak: PASS' : 'soak: FAIL');
   process.exitCode = ok ? 0 : 1;

@@ -1,4 +1,5 @@
-Crystal 1.22.0 for wasm32-wasi: exceptions, struct returns, Boehm GC, WASI file system fixes.
+Crystal 1.22.0 for wasm32-wasi: exceptions, struct returns, Boehm GC, WASI file system fixes, optimized builds,
+layout numbers.
 
 A derivative of Crystal (https://github.com/crystal-lang/crystal, Apache License 2.0). Applies to tag 1.22.0
 (commit 39f3f4d08f70c3678b579f85dc6f8b7be69c7956) with `git apply`; tools/wasm/setup.sh does that.
@@ -7,6 +8,16 @@ What it changes, and why:
 - codegen/exception.cr, codegen/codegen.cr, raise.cr, compiler.cr, llvm/: wasm32 takes the funclet exception path
   MSVC takes (one catch-all catchpad; llvm.wasm.get.exception yields the thrown Crystal Exception, raise is
   llvm.wasm.throw) with LLVM's -wasm-enable-eh and +exception-handling. Stock 1.22: `raise` on wasm32 exits(1).
+  __crystal_raise is @[NoInline]: inlined into a rescue body, its call of llvm.wasm.throw would become an invoke,
+  which LLVM forbids (at -O1 and above the compiler died in instruction selection) - as __cxa_throw keeps it in C++.
+- compiler.cr, llvm/lib_llvm/core.cr: after the optimizer (wasm32 only), a direct call or invoke whose function type
+  differs from its callee's with an aggregate parameter or return on either side calls an internal stub of its
+  own type whose body is `unreachable` instead. The optimizer makes such calls out of the branch of a proc call
+  that never runs for the proc at hand (closure data on a plain function, or none on a closure's); LLVM's
+  WebAssembly backend adapts mismatched calls without aggregates (WebAssemblyFixFunctionBitcasts - this stub is
+  the one it gives calls it cannot adapt) but emits invalid wasm with one. A call with fewer arguments reads a
+  missing one natively too; one with more is harmless natively and traps here - neither runs for a proc Crystal
+  builds. CRYMBLE_WASM_STUB_REPORT=1 prints how many calls and invokes were retargeted.
 - codegen/abi/wasm32.cr: a C function returning a struct returns it through a hidden pointer (StructRet), as
   clang does. Stock 1.22: ByVal there, so the call site never allocates the slot - the compiler crashes on any
   C function that returns a struct.
@@ -20,6 +31,17 @@ What it changes, and why:
 - crystal/system/wasi/file.cr: File.delete uses the unix implementation (stock: NotImplementedError).
 - crystal/system/wasi/dir.cr: a refill that comes back empty ends the listing (stock: an empty directory on a
   runtime without "." and ".." listed one entry with an empty name - FileUtils.rm_r recursed forever).
+- codegen/codegen.cr, codegen/llvm_typer.cr, semantic/main_visitor.cr, semantic/cleanup_transformer.cr, compiler.cr:
+  sizeof, alignof, instance_sizeof, instance_alignof and offsetof are folded once every type is complete - by the
+  cleanup transformer - and while typing only inside a type argument (which needs the number then). Stock 1.22 folds
+  them while typing through the program's LLVMTyper, which caches each layout: a field typed by a generic module
+  whose including struct does not exist yet is laid out as a pointer, so `dup` (instance_sizeof) copies too few
+  bytes and sizeof is too small - for later folds too. Any target: the stock compiler prints 0 for
+  `Cell.new(Impl(Int32).new(1, 2), 42)` duplicated by a proc typed first, Impl(T) a struct of two Int64 including
+  Iface(T), Cell's field typed Iface(Int32). Folds go through a fresh typer with its own LLVM context AND its own
+  data layout: the target machine's is shared and caches struct layouts by address, so a freed context's struct
+  would hand its layout to one codegen creates later at that address (objects allocated too small). Every fold is
+  checked against the final layout before and after codegen; a difference is a compile error naming the expression.
 - spec/expectations.cr: expect_raises works on wasm32 (the stub that skipped it is gone).
 
 diff --git a/src/compiler/crystal/codegen/abi/wasm32.cr b/src/compiler/crystal/codegen/abi/wasm32.cr
@@ -38,10 +60,160 @@ index 2927024..82ab52f 100644
        ArgType.direct(rty)
      end
 diff --git a/src/compiler/crystal/codegen/codegen.cr b/src/compiler/crystal/codegen/codegen.cr
-index b4b1355..0bea152 100644
+index b4b1355..1993d38 100644
 --- a/src/compiler/crystal/codegen/codegen.cr
 +++ b/src/compiler/crystal/codegen/codegen.cr
-@@ -303,6 +303,7 @@ module Crystal
+@@ -174,44 +174,137 @@ module Crystal
+       @llvm_typer ||= LLVMTyper.new(self, LLVM::Context.new)
+     end
+ 
+-    def size_of(type)
++    # Every layout number (sizeof, alignof, instance_sizeof, instance_alignof, offsetof) is computed here, through
++    # the typer given. `llvm_typer` caches each type's layout the first time it is asked - while typing, a
++    # generic module's including struct may not exist yet, so a module-typed field is laid out as a pointer and
++    # the cached layout stays too small. Folds therefore use a fresh typer (`with_fresh_layout_typer`), at a time the
++    # layout is complete: inside type arguments while typing (they need a number then), everywhere else in the
++    # cleanup transformer. `check_layout_folds` recomputes them all against the final types.
++    def size_of(type, typer = llvm_typer)
+       if type.void?
+         # We need `sizeof(Void)` to be 1 because doing
+         # `Pointer(Void).malloc` must work like `Pointer(UInt8).malloc`,
+         # that is, consider Void like the size of a byte.
+         1_u64
+       else
+-        llvm_typer.size_of(llvm_typer.llvm_type(type))
++        typer.size_of(typer.llvm_type(type))
+       end
+     end
+ 
+-    def instance_size_of(type)
+-      llvm_typer.size_of(llvm_typer.llvm_struct_type(type))
++    def instance_size_of(type, typer = llvm_typer)
++      typer.size_of(typer.llvm_struct_type(type))
+     end
+ 
+-    def align_of(type)
++    def align_of(type, typer = llvm_typer)
+       if type.void?
+         # We need `alignof(Void)` to be 1 because it is effectively the smallest
+         # possible alignment for any type.
+         1_u32
+       else
+-        llvm_typer.align_of(llvm_typer.llvm_type(type))
++        typer.align_of(typer.llvm_type(type))
+       end
+     end
+ 
+-    def instance_align_of(type)
+-      llvm_typer.align_of(llvm_typer.llvm_struct_type(type))
++    def instance_align_of(type, typer = llvm_typer)
++      typer.align_of(typer.llvm_struct_type(type))
+     end
+ 
+-    def offset_of(type, element_index)
++    def offset_of(type, element_index, typer = llvm_typer)
+       return 0_u64 if type.extern_union? || type.is_a?(StaticArrayInstanceType)
+-      llvm_typer.offset_of(llvm_typer.llvm_type(type), element_index)
++      typer.offset_of(typer.llvm_type(type), element_index)
+     end
+ 
+-    def instance_offset_of(type, element_index)
++    def instance_offset_of(type, element_index, typer = llvm_typer)
+       # extern unions and static arrays must be value types, which always use
+       # the above `offset_of` instead
+-      llvm_typer.offset_of(llvm_typer.llvm_struct_type(type), element_index + 1)
++      typer.offset_of(typer.llvm_struct_type(type), element_index + 1)
++    end
++
++    # The type a layout node (sizeof, alignof, instance_sizeof, instance_alignof, offsetof) measures, once typed
++    def layout_operand(node : ASTNode) : Type?
++      case node
++      when SizeOf, AlignOf, InstanceSizeOf, InstanceAlignOf then node.exp.type?
++      when OffsetOf                                         then node.offsetof_type.type?
++      else                                                       raise "BUG: #{node.class_desc} is not a layout number"
++      end
++    end
++
++    # Whether a typed layout node becomes a literal - the nodes stock 1.22 folds; the rest (typeof, a module, an
++    # abstract struct) codegen computes. Their errors are raised before: by the main visitor and the cleanup
++    # transformer.
++    def foldable_layout?(node : ASTNode) : Bool
++      return false unless type = layout_operand(node)
++      case node
++      when SizeOf, AlignOf
++        !node.exp.is_a?(TypeOf) && !(type.module? || (type.abstract? && type.struct?))
++      when InstanceSizeOf, InstanceAlignOf
++        !node.exp.is_a?(TypeOf) && type.devirtualize.class? && !type.metaclass? && !type.struct?
++      else
++        true # offsetof: codegen has no way to compute it
++      end
++    end
++
++    def layout_number(node : ASTNode, typer : LLVMTyper) : UInt64
++      type = layout_operand(node).not_nil!
++      case node
++      when SizeOf          then size_of(type.sizeof_type, typer)
++      when AlignOf         then align_of(type.sizeof_type, typer).to_u64
++      when InstanceSizeOf  then instance_size_of(type.sizeof_type, typer)
++      when InstanceAlignOf then instance_align_of(type.sizeof_type, typer).to_u64
++      when OffsetOf
++        index = case offset = node.offset
++                when InstanceVar then type.index_of_instance_var(offset.name).not_nil!
++                else                  offset.as(NumberLiteral).integer_value.to_i
++                end
++        if type.struct? || type.is_a?(TupleInstanceType)
++          offset_of(type.sizeof_type, index, typer)
++        else
++          instance_offset_of(type.sizeof_type, index, typer)
++        end
++      else
++        raise "BUG: #{node.class_desc} is not a layout number"
++      end
++    end
++
++    # A typer over its own context AND its own data layout. LLVM's DataLayout caches struct layouts by the struct
++    # type's address: this context's types in the target machine's shared layout would leave stale entries once the
++    # context is freed, and a struct codegen creates later at the same address would get a dead one's layout
++    # (objects allocated too small). Its owner disposes the layout (LLVMTyper#dispose_layout); the context goes with
++    # the typer.
++    def new_layout_typer : LLVMTyper
++      LLVMTyper.new(self, LLVM::Context.new, LLVM::TargetData.new(LibLLVM.create_target_data_layout(target_machine)))
++    end
++
++    def with_fresh_layout_typer(&)
++      typer = new_layout_typer
++      begin
++        yield typer
++      ensure
++        typer.dispose_layout
++      end
++    end
++
++    # Every layout number folded into a literal, with its value.
++    getter layout_folds = [] of {ASTNode, UInt64}
++
++    def fold_layout(node : ASTNode, typer : LLVMTyper) : NumberLiteral
++      value = layout_number(node, typer)
++      layout_folds << {node, value}
++      NumberLiteral.new(value.to_s, :i32).tap(&.type = int32)
++    end
++
++    # A folded number must be the one the final layout gives - a difference would make code that copies or
++    # indexes by it disagree with the objects codegen lays out.
++    def check_layout_folds : Nil
++      return if layout_folds.empty?
++      with_fresh_layout_typer do |typer|
++        layout_folds.each do |node, value|
++          final = layout_number(node, typer)
++          next if final == value
++          node.raise "#{node} was folded to #{value} before the layout of #{layout_operand(node)} was complete: " \
++                     "its final layout gives #{final}"
++        end
++      end
+     end
+   end
+ 
+@@ -303,6 +396,7 @@ module Crystal
          @main.personality_function = windows_personality_fun.func
        else
          @personality_name = "__crystal_personality"
@@ -49,6 +221,35 @@ index b4b1355..0bea152 100644
        end
  
        @context = Context.new @main, main_type, @program
+@@ -991,24 +1085,13 @@ module Crystal
+       false
+     end
+ 
+-    def visit(node : SizeOf)
+-      @last = int32(@llvm_typer.size_of(llvm_type(node.exp.type.sizeof_type)).to_i32)
+-      false
+-    end
+-
+-    def visit(node : InstanceSizeOf)
+-      @last = int32(@llvm_typer.size_of(llvm_struct_type(node.exp.type.sizeof_type)).to_i32)
++    def visit(node : SizeOf | AlignOf | InstanceSizeOf | InstanceAlignOf)
++      @last = int32(@program.layout_number(node, @llvm_typer).to_i32)
+       false
+     end
+ 
+-    def visit(node : AlignOf)
+-      @last = int32(@llvm_typer.align_of(llvm_type(node.exp.type.sizeof_type)).to_i32)
+-      false
+-    end
+-
+-    def visit(node : InstanceAlignOf)
+-      @last = int32(@llvm_typer.align_of(llvm_struct_type(node.exp.type.sizeof_type)).to_i32)
+-      false
++    def visit(node : OffsetOf)
++      node.raise "BUG: offsetof not folded by the cleanup transformer"
+     end
+ 
+     def visit(node : Include)
 diff --git a/src/compiler/crystal/codegen/exception.cr b/src/compiler/crystal/codegen/exception.cr
 index 944ac99..47be6f3 100644
 --- a/src/compiler/crystal/codegen/exception.cr
@@ -121,11 +322,59 @@ index 944ac99..47be6f3 100644
    private def windows_personality_fun
      fetch_typed_fun(@llvm_mod, "__CxxFrameHandler3") do
        LLVM::Type.function([] of LLVM::Type, @llvm_context.int32, true)
+diff --git a/src/compiler/crystal/codegen/llvm_typer.cr b/src/compiler/crystal/codegen/llvm_typer.cr
+index 10f5f1c..9c86f1d 100644
+--- a/src/compiler/crystal/codegen/llvm_typer.cr
++++ b/src/compiler/crystal/codegen/llvm_typer.cr
+@@ -12,7 +12,10 @@ module Crystal
+ 
+     @@closure_counter = 0
+ 
+-    def initialize(@program : Program, @llvm_context : LLVM::Context)
++    # The data layout this typer was given (Program#new_layout_typer), disposed by #dispose_layout
++    @own_layout : LLVM::TargetData?
++
++    def initialize(@program : Program, @llvm_context : LLVM::Context, @own_layout : LLVM::TargetData? = nil)
+       @cache = TypeCache.new
+       @struct_cache = TypeCache.new
+ 
+@@ -47,11 +50,16 @@ module Crystal
+ 
+       @structs = {} of String => LLVM::Type
+ 
+-      machine = program.target_machine
+-      @layout = machine.data_layout
++      @layout = @own_layout || program.target_machine.data_layout
+       @landing_pad_type = @llvm_context.struct([@llvm_context.void_pointer, @llvm_context.int32], "landing_pad")
+     end
+ 
++    # (TargetData has no finalizer; never the target machine's shared one)
++    def dispose_layout : Nil
++      @own_layout.try { |layout| LibLLVM.dispose_target_data(layout) }
++      @own_layout = nil
++    end
++
+     def type_id_pointer
+       @llvm_context.int32.pointer
+     end
 diff --git a/src/compiler/crystal/compiler.cr b/src/compiler/crystal/compiler.cr
-index 60a071d..b46f51d 100644
+index 60a071d..bed6865 100644
 --- a/src/compiler/crystal/compiler.cr
 +++ b/src/compiler/crystal/compiler.cr
-@@ -726,6 +726,10 @@ module Crystal
+@@ -359,10 +359,12 @@ module Crystal
+         end
+       {% end %}
+ 
++      program.check_layout_folds # every folded layout number against the final layout
+       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
+         program.codegen node, debug: debug, frame_pointers: frame_pointers,
+           single_module: @single_module || @cross_compile || !@emit_targets.none?
+       end
++      program.check_layout_folds # again: codegen types its raise helpers, and folds in them
+ 
+       output_dir = CacheDir.instance.directory_for(sources)
+ 
+@@ -726,6 +728,10 @@ module Crystal
      end
  
      def create_target_machine
@@ -136,6 +385,279 @@ index 60a071d..b46f51d 100644
        @codegen_target.to_target_machine(@mcpu || "", @mattr || "", @optimization_mode, @mcmodel)
      rescue ex : ArgumentError
        stderr.print colorize("Error: ").red.bold
+@@ -791,6 +797,60 @@ module Crystal
+           LLVM.run_passes(llvm_mod, "default<#{optimization_mode}>", target_machine, options)
+         end
+       {% end %}
++      stub_aggregate_signature_mismatches(llvm_mod) if @codegen_target.architecture == "wasm32"
++    end
++
++    # wasm32, after the optimizer: a direct call or invoke whose function type differs from its callee's, with an
++    # aggregate on either side (a struct or array at the top level of a parameter or the return - not a vector or
++    # pointer, which LLVM handles), gets as its callee an internal stub of the call's own type whose body is
++    # `unreachable`.
++    #
++    # The optimizer makes such calls out of a proc call's two branches (codegen/primitives.cr): once it resolves the
++    # proc's pointer, the branch for the other kind of proc - without closure data on a closure's function, with it
++    # on a plain one - becomes a direct call of the wrong type. Legal IR, and for a proc Crystal builds that branch
++    # never runs. LLVM's WebAssembly backend adapts a mismatched direct call (WebAssemblyFixFunctionBitcasts: an
++    # adapter, or this stub when the types cannot be adapted) only when no aggregate is involved; with one it emits
++    # a call with the wrong number of operands and the module does not validate. Retargeting only the callee operand
++    # (the last one, for a call and an invoke alike) leaves control flow, unwind edges and funclet bundles alone.
++    #
++    # The bitcode cache (must_compile?) compares bitcode from before this step, so it could not see this step change;
++    # wasm32 builds only cross-compile, which never uses that cache. With CRYMBLE_WASM_STUB_REPORT set, says how many
++    # calls and invokes it retargeted.
++    private def stub_aggregate_signature_mismatches(llvm_mod)
++      mismatched = [] of {LLVM::Value, LLVM::Type}
++      llvm_mod.functions.each do |func|
++        func.basic_blocks.each do |block|
++          block.instructions.each do |inst|
++            next unless LibLLVM.is_a_call_inst(inst) || LibLLVM.is_a_invoke_inst(inst)
++            callee = LibLLVM.get_called_value(inst)
++            next unless LibLLVM.is_a_function(callee)
++            call_type = LLVM::Type.new(LibLLVM.get_called_function_type(inst))
++            callee_type = LLVM::Type.new(LibLLVM.global_get_value_type(callee))
++            next if call_type == callee_type
++            mismatched << {inst, call_type} if aggregate_signature?(call_type) || aggregate_signature?(callee_type)
++          end
++        end
++      end
++
++      stubs = {} of {LLVM::Type, LLVM::CallConvention} => LLVM::Function
++      invokes = 0
++      mismatched.each do |inst, call_type|
++        convention = inst.call_convention
++        stub = stubs[{call_type, convention}] ||= llvm_mod.functions.add("__crystal_wasm_mismatched_call", call_type) do |func|
++          func.linkage = LLVM::Linkage::Internal
++          func.call_convention = convention
++          builder = llvm_mod.context.new_builder
++          builder.position_at_end func.basic_blocks.append
++          builder.unreachable
++        end
++        invokes += 1 if LibLLVM.is_a_invoke_inst(inst)
++        LibLLVM.set_operand(inst, LibLLVM.get_num_operands(inst) - 1, stub)
++      end
++      stderr.puts "wasm32 stubs: #{mismatched.size - invokes} calls, #{invokes} invokes" if ENV["CRYMBLE_WASM_STUB_REPORT"]?
++    end
++
++    private def aggregate_signature?(type : LLVM::Type)
++      ([type.return_type] + type.params_types).any?(&.kind.in?(LLVM::Type::Kind::Struct, LLVM::Type::Kind::Array))
+     end
+ 
+     private def run_linker(linker_name, command, args)
+diff --git a/src/compiler/crystal/semantic/cleanup_transformer.cr b/src/compiler/crystal/semantic/cleanup_transformer.cr
+index 7756cac..18dcc8b 100644
+--- a/src/compiler/crystal/semantic/cleanup_transformer.cr
++++ b/src/compiler/crystal/semantic/cleanup_transformer.cr
+@@ -11,7 +11,7 @@ module Crystal
+     def cleanup(node, inside_def = false)
+       transformer = self.cleanup_transformer
+       transformer.inside_def! if inside_def
+-      node = node.transform(transformer)
++      node = transformer.with_layouts { node.transform(transformer) }
+       puts node if ENV["AFTER"]? == "1"
+       node
+     end
+@@ -19,12 +19,14 @@ module Crystal
+     def cleanup_types
+       transformer = self.cleanup_transformer
+ 
+-      after_inference_types.each do |type|
+-        cleanup_type type, transformer
+-      end
++      transformer.with_layouts do
++        after_inference_types.each do |type|
++          cleanup_type type, transformer
++        end
+ 
+-      self.class_var_initializers.each do |initializer|
+-        initializer.node = initializer.node.transform(transformer)
++        self.class_var_initializers.each do |initializer|
++          initializer.node = initializer.node.transform(transformer)
++        end
+       end
+     end
+ 
+@@ -69,6 +71,9 @@ module Crystal
+     # The current method we are processing
+     @current_def : Def?
+ 
++    # Lays out the types that exist when a cleanup starts (Program#size_of): a cleanup during codegen sees more
++    @layout_typer : LLVMTyper?
++
+     def initialize(@program : Program)
+       @transformed = Set(Def).new.compare_by_identity
+       @exhaustiveness_checker = ExhaustivenessChecker.new(@program)
+@@ -1011,38 +1016,44 @@ module Crystal
+       node
+     end
+ 
+-    def transform(node : InstanceSizeOf)
+-      exp_type = node.exp.type?
+-
+-      if exp_type
+-        case instance_type = exp_type.devirtualize
+-        when .struct?, .module?, .metaclass?, .void?, .no_return?, UnionType
+-          node.exp.raise "instance_sizeof can only be used with a class, but #{instance_type} is a #{instance_type.type_desc}"
+-        end
+-      end
+-
+-      if expanded = node.expanded
+-        return expanded.transform self
+-      end
++    # Folds the layout numbers this cleanup meets through one fresh typer (Program#with_fresh_layout_typer's kind),
++    # made at the first fold - most cleanups meet none - and disposed at the end
++    def with_layouts(&)
++      outer, @layout_typer = @layout_typer, nil
++      yield
++    ensure
++      @layout_typer.try &.dispose_layout
++      @layout_typer = outer
++    end
+ 
+-      node
++    def transform(node : SizeOf | AlignOf | OffsetOf)
++      expand_or_fold(node)
+     end
+ 
+-    def transform(node : InstanceAlignOf)
++    def transform(node : InstanceSizeOf | InstanceAlignOf)
+       exp_type = node.exp.type?
+ 
+       if exp_type
+         case instance_type = exp_type.devirtualize
+         when .struct?, .module?, .metaclass?, .void?, .no_return?, UnionType
+-          node.exp.raise "instance_alignof can only be used with a class, but #{instance_type} is a #{instance_type.type_desc}"
++          what = node.is_a?(InstanceSizeOf) ? "instance_sizeof" : "instance_alignof"
++          node.exp.raise "#{what} can only be used with a class, but #{instance_type} is a #{instance_type.type_desc}"
+         end
+       end
+ 
++      expand_or_fold(node)
++    end
++
++    # Folded inside a type argument already (the main visitor), folded now (Program#foldable_layout?), or left to
++    # codegen
++    private def expand_or_fold(node)
+       if expanded = node.expanded
+-        return expanded.transform self
++        expanded.transform self
++      elsif @program.foldable_layout?(node)
++        @program.fold_layout(node, @layout_typer ||= @program.new_layout_typer)
++      else
++        node
+       end
+-
+-      node
+     end
+ 
+     def transform(node : TupleLiteral)
+diff --git a/src/compiler/crystal/semantic/main_visitor.cr b/src/compiler/crystal/semantic/main_visitor.cr
+index 790aaf4..c9e4361 100644
+--- a/src/compiler/crystal/semantic/main_visitor.cr
++++ b/src/compiler/crystal/semantic/main_visitor.cr
+@@ -2751,31 +2751,7 @@ module Crystal
+       false
+     end
+ 
+-    def visit(node : SizeOf)
+-      visit_size_or_align_of(node) do |type|
+-        @program.size_of(type.sizeof_type)
+-      end
+-    end
+-
+-    def visit(node : InstanceSizeOf)
+-      visit_instance_size_or_align_of(node) do |type|
+-        @program.instance_size_of(type.sizeof_type)
+-      end
+-    end
+-
+-    def visit(node : AlignOf)
+-      visit_size_or_align_of(node) do |type|
+-        @program.align_of(type.sizeof_type)
+-      end
+-    end
+-
+-    def visit(node : InstanceAlignOf)
+-      visit_instance_size_or_align_of(node) do |type|
+-        @program.instance_align_of(type.sizeof_type)
+-      end
+-    end
+-
+-    private def visit_size_or_align_of(node, &)
++    def visit(node : SizeOf | AlignOf)
+       @in_type_args += 1
+       node.exp.accept self
+       @in_type_args -= 1
+@@ -2786,14 +2762,10 @@ module Crystal
+         node.exp.raise "can't take #{sizeof_description(node)} of uninstantiated generic type #{type}"
+       end
+ 
+-      # Try to resolve the node right now to a number literal
+-      # (useful for sizeof/alignof inside as a generic type argument, but also
+-      # to make it easier for LLVM to optimize things)
+-      if type && !node.exp.is_a?(TypeOf) &&
+-         !(type.module? || (type.abstract? && type.struct?))
+-        expanded = NumberLiteral.new(yield(type).to_s, :i32)
+-        expanded.type = @program.int32
+-        node.expanded = expanded
++      # A type argument needs the number now (`StaticArray(UInt8, sizeof(T))`); anywhere else the cleanup
++      # transformer folds it, once every type is complete (Program#size_of)
++      if @in_type_args > 0 && @program.foldable_layout?(node)
++        node.expanded = @program.with_fresh_layout_typer { |typer| @program.fold_layout(node, typer) }
+       end
+ 
+       node.type = @program.int32
+@@ -2801,7 +2773,7 @@ module Crystal
+       false
+     end
+ 
+-    private def visit_instance_size_or_align_of(node, &)
++    def visit(node : InstanceSizeOf | InstanceAlignOf)
+       @in_type_args += 1
+       node.exp.accept self
+       @in_type_args -= 1
+@@ -2812,13 +2784,9 @@ module Crystal
+         node.exp.raise "can't take #{sizeof_description(node)} of uninstantiated generic type #{type}"
+       end
+ 
+-      # Try to resolve the instance_sizeof right now to a number literal
+-      # (useful for instance_sizeof inside as a generic type argument, but also
+-      # to make it easier for LLVM to optimize things)
+-      if type && type.devirtualize.class? && !type.metaclass? && !type.struct? && !node.exp.is_a?(TypeOf)
+-        expanded = NumberLiteral.new(yield(type).to_s, :i32)
+-        expanded.type = @program.int32
+-        node.expanded = expanded
++      # As for sizeof: folded here only inside a type argument
++      if @in_type_args > 0 && @program.foldable_layout?(node)
++        node.expanded = @program.with_fresh_layout_typer { |typer| @program.fold_layout(node, typer) }
+       end
+ 
+       node.type = @program.int32
+@@ -2870,17 +2838,14 @@ module Crystal
+         node.offsetof_type.raise "type #{type} can't have instance variables neither is a Tuple"
+       end
+ 
+-      if type && (type.struct? || type.is_a?(TupleInstanceType))
+-        offset = @program.offset_of(type.sizeof_type, ivar_index)
+-      elsif type && type.instance_type.devirtualize.class?
+-        offset = @program.instance_offset_of(type.sizeof_type, ivar_index)
+-      else
++      unless type.struct? || type.is_a?(TupleInstanceType) || type.instance_type.devirtualize.class?
+         node.offsetof_type.raise "#{type} is neither a class, a struct nor a Tuple, it's a #{type.type_desc}"
+       end
+ 
+-      expanded = NumberLiteral.new(offset.to_s, :i32)
+-      expanded.type = @program.int32
+-      node.expanded = expanded
++      # As for sizeof: folded here only inside a type argument
++      if @in_type_args > 0 && @program.foldable_layout?(node)
++        node.expanded = @program.with_fresh_layout_typer { |typer| @program.fold_layout(node, typer) }
++      end
+       node.type = @program.int32
+ 
+       false
 diff --git a/src/crystal/event_loop/wasi.cr b/src/crystal/event_loop/wasi.cr
 index d3b3ab3..ee4a1c7 100644
 --- a/src/crystal/event_loop/wasi.cr
@@ -254,7 +776,7 @@ index 67d7813..9dba3ef 100644
      Type.new LibLLVM.int32_type_in_context(self)
    end
 diff --git a/src/llvm/lib_llvm/core.cr b/src/llvm/lib_llvm/core.cr
-index 0d23baa..708d7fb 100644
+index 0d23baa..a731d74 100644
 --- a/src/llvm/lib_llvm/core.cr
 +++ b/src/llvm/lib_llvm/core.cr
 @@ -103,6 +103,7 @@ lib LibLLVM
@@ -265,15 +787,29 @@ index 0d23baa..708d7fb 100644
  
    fun type_of = LLVMTypeOf(val : ValueRef) : TypeRef
    fun get_value_kind = LLVMGetValueKind(val : ValueRef) : LLVM::Value::Kind
+@@ -115,7 +116,14 @@ lib LibLLVM
+   fun set_value_name = LLVMSetValueName(val : ValueRef, name : Char*)
+ 
+   fun get_operand = LLVMGetOperand(val : ValueRef, index : UInt) : ValueRef
++  fun set_operand = LLVMSetOperand(user : ValueRef, index : UInt, val : ValueRef)
+   fun get_num_operands = LLVMGetNumOperands(val : ValueRef) : Int
++  fun is_a_call_inst = LLVMIsACallInst(val : ValueRef) : ValueRef
++  fun is_a_invoke_inst = LLVMIsAInvokeInst(val : ValueRef) : ValueRef
++  fun is_a_function = LLVMIsAFunction(val : ValueRef) : ValueRef
++  fun get_called_value = LLVMGetCalledValue(instr : ValueRef) : ValueRef
++  fun get_called_function_type = LLVMGetCalledFunctionType(instr : ValueRef) : TypeRef
++  fun global_get_value_type = LLVMGlobalGetValueType(global : ValueRef) : TypeRef
+ 
+   fun const_null = LLVMConstNull(ty : TypeRef) : ValueRef
+   fun get_undef = LLVMGetUndef(ty : TypeRef) : ValueRef
 diff --git a/src/raise.cr b/src/raise.cr
-index ab5d9a5..3347600 100644
+index ab5d9a5..08af73d 100644
 --- a/src/raise.cr
 +++ b/src/raise.cr
-@@ -168,11 +168,20 @@ end
-     LibC.exit(1)
+@@ -169,10 +169,22 @@ end
    end
  
-+  # :nodoc:
+   # :nodoc:
 +  lib LibWasmEH
 +    fun throw = "llvm.wasm.throw"(tag : Int32, ex : Void*) : NoReturn
 +  end
@@ -283,8 +819,11 @@ index ab5d9a5..3347600 100644
 +    0
 +  end
 +
-   # :nodoc:
++  # :nodoc:
++  # Never inlined: llvm.wasm.throw may only be called, and inlined into a rescue body the call becomes an invoke
++  # (the verifier rejects it; unverified, instruction selection divides by zero). As __cxa_throw keeps it for C++.
    @[Raises]
++  @[NoInline]
    fun __crystal_raise(ex : Void*) : NoReturn
 -    Crystal::System.print_error "EXITING: __crystal_raise called"
 -    LibC.exit(1)
@@ -292,7 +831,7 @@ index ab5d9a5..3347600 100644
    end
  
    # :nodoc:
-@@ -241,9 +250,7 @@ end
+@@ -241,9 +253,7 @@ end
  
  {% if flag?(:wasm32) %}
    def raise(exception : Exception) : NoReturn
